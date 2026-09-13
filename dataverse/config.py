@@ -1,0 +1,80 @@
+"""Connection settings for a Dataverse environment."""
+
+import os
+import re
+from dataclasses import dataclass
+
+from .exceptions import DataverseConfigError
+
+
+@dataclass(frozen=True)
+class DataverseConfig:
+    """Everything needed to reach one Dataverse environment.
+
+    Attributes:
+        environment_url: Org root, e.g.
+            ``https://paion-crm-test.api.crm4.dynamics.com``.
+        tenant_id: Entra ID tenant (directory) GUID.
+        client_id: Application (client) GUID.
+        client_secret: Client secret value.
+        api_version: Web API version segment.
+        timeout: Per-request timeout in seconds.
+        max_retries: Attempts for transport errors and 429/5xx responses.
+    """
+
+    environment_url: str
+    tenant_id: str
+    client_id: str
+    client_secret: str
+    api_version: str = "v9.2"
+    timeout: float = 60.0
+    max_retries: int = 3
+
+    def __post_init__(self):
+        for field in ("environment_url", "tenant_id", "client_id", "client_secret"):
+            if not str(getattr(self, field) or "").strip():
+                raise DataverseConfigError(f"{field} is required")
+
+        url = self.environment_url.strip().rstrip("/")
+        if not url.startswith("http"):
+            url = "https://" + url
+        # Accept a pasted Web API or maker URL and reduce it to the org root.
+        url = re.sub(r"/api/data/v[\d.]+/?$", "", url)
+        object.__setattr__(self, "environment_url", url)
+
+    @property
+    def scope(self):
+        """The ``/.default`` scope for this environment."""
+        return f"{self.environment_url}/.default"
+
+    @property
+    def api_url(self):
+        """Base URL of the Web API."""
+        return f"{self.environment_url}/api/data/{self.api_version}"
+
+    @classmethod
+    def from_env(cls, prefix="DATAVERSE_"):
+        """Build a config from ``<prefix>URL``/``TENANT_ID``/``CLIENT_ID``/``CLIENT_SECRET``."""
+        missing = [
+            f"{prefix}{name}"
+            for name in ("URL", "TENANT_ID", "CLIENT_ID", "CLIENT_SECRET")
+            if not os.environ.get(f"{prefix}{name}")
+        ]
+        if missing:
+            raise DataverseConfigError("Missing environment variables: " + ", ".join(missing))
+
+        return cls(
+            environment_url=os.environ[f"{prefix}URL"],
+            tenant_id=os.environ[f"{prefix}TENANT_ID"],
+            client_id=os.environ[f"{prefix}CLIENT_ID"],
+            client_secret=os.environ[f"{prefix}CLIENT_SECRET"],
+            api_version=os.environ.get(f"{prefix}API_VERSION", "v9.2"),
+            timeout=float(os.environ.get(f"{prefix}TIMEOUT", "60")),
+        )
+
+    def __repr__(self):
+        return (
+            f"DataverseConfig(environment_url={self.environment_url!r}, "
+            f"tenant_id={self.tenant_id!r}, client_id={self.client_id!r}, "
+            f"client_secret='***')"
+        )

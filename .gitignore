@@ -1,0 +1,22 @@
+# Credentials - never commit
+.env
+
+# Vendor reference documents (large binaries, licence-restricted)
+docs/reference/*.pdf
+docs/reference/*.xlsx
+
+# Retrieved data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# macOS
+.DS_Store

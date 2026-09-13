@@ -1,0 +1,259 @@
+"""Authentication for OneKey web services.
+
+A note on tokens
+----------------
+OneKey does **not** issue an access token. There is no ``/oauth/token``
+endpoint, no ``grant_type`` exchange and no bearer credential to cache or
+refresh. Every OneKey endpoint is protected by HTTP Basic authentication over
+TLS, and the ``Authorization: Basic <base64(user:password)>`` header is sent on
+each individual request (Developer Guide 5.2.2 "Authentication details"). The
+guide's only mention of OAuth2 is a forward-looking note that it may be
+supported "in next release"; it has not shipped.
+
+Authentication is therefore stateless: there is nothing to retrieve up front
+and nothing that expires mid-run. What :func:`authenticate` gives you instead
+is the closest useful equivalent -- it packages the credentials into a
+connection-pooled :class:`OneKeySession` and verifies them once, up front,
+against ``/system/connection/test`` so that bad credentials surface at start-up
+rather than on the first data call.
+"""
+
+import base64
+import logging
+import random
+import time
+
+import requests
+
+from .config import OneKeyConfig
+from .exceptions import (
+    OneKeyAPIResponseError,
+    OneKeyAuthError,
+    OneKeyForbiddenError,
+    OneKeyHTTPError,
+    OneKeyNotFoundError,
+    OneKeyRateLimitError,
+)
+
+logger = logging.getLogger(__name__)
+
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def basic_auth_header(username, password):
+    """Return the ``Authorization`` header value for HTTP Basic auth."""
+    raw = f"{username}:{password}".encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+class OneKeySession:
+    """An authenticated, connection-pooled handle on a OneKey connector.
+
+    Holds the credentials and a pooled :class:`requests.Session`, applies the
+    Basic auth header to every call, maps OneKey's documented status codes onto
+    typed exceptions, and retries the transient ones with backoff.
+
+    Prefer :func:`authenticate` over constructing this directly -- it validates
+    the credentials before handing the session back.
+    """
+
+    def __init__(self, config, session=None):
+        self.config = config
+        self._session = session or requests.Session()
+        self._session.headers.update(
+            {
+                "Authorization": basic_auth_header(config.username, config.password),
+                "Accept": "application/json",
+                "User-Agent": "onekey-paion-integration/0.1",
+            }
+        )
+
+    # -- plumbing ---------------------------------------------------------
+
+    def _raise_for_status(self, response, url):
+        """Map a non-2xx response onto the documented exception type."""
+        status = response.status_code
+        if status < 400:
+            return
+
+        body = response.text[:1000]
+        cls = {
+            401: OneKeyAuthError,
+            403: OneKeyForbiddenError,
+            404: OneKeyNotFoundError,
+            429: OneKeyRateLimitError,
+        }.get(status, OneKeyHTTPError)
+
+        messages = {
+            401: "OneKey rejected the credentials (401). Check the username "
+            "and password for this environment.",
+            403: "OneKey refused access (403). The user is authenticated but "
+            "not permitted here: either this endpoint is not enabled for the "
+            "connector, or the caller's IP is outside the OneKey allow-list.",
+            404: f"OneKey has no resource at {url} (404). Check the endpoint "
+            "path and the connector id.",
+            429: "OneKey rate limit hit (429). Slow down and retry later.",
+        }
+        raise cls(
+            messages.get(status, f"OneKey returned HTTP {status} for {url}"),
+            status_code=status,
+            body=body,
+            url=url,
+        )
+
+    def request(self, method, path, with_connector=True, **kwargs):
+        """Issue one authenticated request, with retries on transient failures."""
+        url = self.config.url(path, with_connector=with_connector)
+        kwargs.setdefault("timeout", self.config.timeout)
+        kwargs.setdefault("verify", self.config.verify_ssl)
+
+        last_error = None
+        for attempt in range(1, self.config.max_retries + 1):
+            try:
+                response = self._session.request(method, url, **kwargs)
+            except requests.RequestException as exc:
+                last_error = OneKeyHTTPError(
+                    f"Could not reach OneKey at {url}: {exc}", url=url
+                )
+            else:
+                if response.status_code not in _RETRY_STATUSES:
+                    self._raise_for_status(response, url)
+                    return response
+                last_error = None
+                try:
+                    self._raise_for_status(response, url)
+                except OneKeyHTTPError as exc:
+                    last_error = exc
+
+            if attempt < self.config.max_retries:
+                # Exponential backoff, jittered so parallel workers desynchronise.
+                delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                logger.warning(
+                    "OneKey %s %s failed (attempt %d/%d); retrying in %.1fs",
+                    method,
+                    url,
+                    attempt,
+                    self.config.max_retries,
+                    delay,
+                )
+                time.sleep(delay)
+
+        raise last_error
+
+    def post_json(self, path, payload, with_connector=True):
+        """POST a JSON body and return the decoded ``response`` envelope.
+
+        OneKey wraps successful payloads in a top-level ``response`` object and
+        reports a ``status`` of ``SUCCESS``, ``WARNING`` or ``ERROR`` inside it.
+        """
+        # The guide is explicit that the charset must be declared for UTF-8.
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        raw = self.request(
+            "POST", path, with_connector=with_connector, json=payload, headers=headers
+        )
+
+        try:
+            body = raw.json()
+        except ValueError as exc:
+            raise OneKeyAPIResponseError(
+                f"OneKey returned a non-JSON body: {raw.text[:300]}"
+            ) from exc
+
+        envelope = body.get("response", body)
+        status = str(envelope.get("status", "")).upper()
+        if status == "ERROR":
+            raise OneKeyAPIResponseError(
+                "OneKey reported an ERROR status: "
+                + str(envelope.get("statusMessage") or envelope),
+                status=status,
+                payload=envelope,
+            )
+        if status == "WARNING":
+            logger.warning("OneKey returned a WARNING status: %s", envelope)
+        return envelope
+
+    def test_connection(self):
+        """Verify the credentials against ``/system/connection/test``.
+
+        Returns True on success and raises :class:`OneKeyAuthError` (or another
+        :class:`OneKeyHTTPError` subclass) otherwise. This endpoint is a GET and
+        takes no connector id; it returns HTTP 200 with an empty body.
+        """
+        self.request("GET", "/system/connection/test", with_connector=False)
+        return True
+
+    def close(self):
+        self._session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def __repr__(self):
+        return (
+            f"OneKeySession(base_url={self.config.base_url!r}, "
+            f"username={self.config.username!r}, "
+            f"connector_id={self.config.connector_id!r})"
+        )
+
+
+def authenticate(
+    base_url,
+    username,
+    password,
+    connector_id,
+    timeout=30.0,
+    verify_ssl=True,
+    validate=True,
+):
+    """Authenticate against OneKey and return a ready-to-use session.
+
+    This is the entry point for "get me a connection to OneKey". Because OneKey
+    uses stateless HTTP Basic auth rather than issuing a token (see the module
+    docstring), the returned :class:`OneKeySession` *is* the credential: it
+    carries the ``Authorization`` header and applies it to every later call.
+
+    Args:
+        base_url: Environment root, e.g. ``https://okws-uat.onekey.iqvia.com``.
+        username: OneKey web-services user.
+        password: Password for that user.
+        connector_id: Connection point id (``cid``), e.g. ``494``.
+        timeout: Per-request timeout in seconds.
+        verify_ssl: TLS verification. Leave enabled outside of debugging.
+        validate: Round-trip ``/system/connection/test`` before returning, so
+            bad credentials fail here instead of on the first data call. Set
+            False to build the session without any network I/O.
+
+    Returns:
+        OneKeySession: an authenticated session.
+
+    Raises:
+        OneKeyAuthError: the credentials were rejected (HTTP 401).
+        OneKeyForbiddenError: authenticated but not permitted (HTTP 403).
+        OneKeyConfigError: a required argument was blank.
+    """
+    config = OneKeyConfig(
+        base_url=base_url,
+        username=username,
+        password=password,
+        connector_id=connector_id,
+        timeout=timeout,
+        verify_ssl=verify_ssl,
+    )
+    session = OneKeySession(config)
+
+    if validate:
+        try:
+            session.test_connection()
+        except Exception:
+            session.close()
+            raise
+        logger.info(
+            "Authenticated with OneKey at %s as %s (connector %s)",
+            config.base_url,
+            config.username,
+            config.connector_id,
+        )
+    return session
