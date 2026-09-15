@@ -1,0 +1,50 @@
+mapping_id,source_platform,source_entity,source_field,source_field_path,target_platform,target_entity,target_field,target_field_type,max_length,is_required,is_key,is_lookup,lookup_entity,lookup_key_field,transform_rule,default_value,notes
+# ============================================================================================================
+# HCO (Workplace) -> Account Mapping
+# Source: flatten_hco() output from onekey/parse.py
+# Target: Dataverse account entity
+# ============================================================================================================
+HCO-001,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,accountnumber,string,20,true,true,false,,,direct,,Primary key for upsert; alternate key required in Dataverse
+HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,true,false,false,,,coalesce:usualName,,Primary name; fallback to usualName if empty. Truncate to 160.
+HCO-003,OneKey,Workplace,typeCode,workplace.typeCode,Dataverse,account,sic,string,20,false,false,false,,,direct,,HCO type code (HAU=Health Board; ACT=Acute Trust; MHT=Mental Health Trust)
+HCO-004,OneKey,Workplace,typeLabel,workplace.typeCorporateLabel,Dataverse,account,description,string,2000,false,false,false,,,template:HCO type: {value},,Part of description field
+HCO-005,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dataverse,account,industrycode,picklist,,false,false,false,,,map:H=11|S=12|N=13|O=14,,H=Hospital S=Surgery N=NHS Est. Maps to Dataverse industrycode picklist
+HCO-006,OneKey,Workplace,specialtyLabel,workplace.ada.SP_1.codeCorporateLabel,Dataverse,account,description,string,2000,false,false,false,,,template:Specialty: {value},,Part of description field
+HCO-007,OneKey,Workplace,parentWorkplaceEid,workplace.managerWorkplaceEid,Dataverse,account,parentaccountid,lookup,,false,false,true,account,accountnumber,lookup_by_key,,Parent HCO hierarchy; lookup account by accountnumber
+HCO-008,OneKey,Workplace,statusCode,workplace.statusCode,Dataverse,account,statecode,state,,false,false,false,,,map:3=0|9=1|1=1,,3=Valid->Active(0); 9=Invalid->Inactive(1); 1=Created->Inactive
+HCO-009,OneKey,Workplace,statusCode,workplace.statusCode,Dataverse,account,statuscode,status,,false,false,false,,,map:3=1|9=2|1=2,,3=Valid->Active(1); 9=Invalid->Inactive(2)
+HCO-010,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_1.address.addressLongLabel,Dataverse,account,address1_line1,string,250,false,false,false,,,direct,,Primary address street; typeCode P = Principal
+HCO-011,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_1.address.postalTownReference.villageLabel,Dataverse,account,address1_city,string,80,false,false,false,,,direct,,City; fallback to dispatchLabel
+HCO-012,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_1.address.longPostalCode,Dataverse,account,address1_postalcode,string,20,false,false,false,,,direct,,Postal/ZIP code
+HCO-013,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_1.address.postalTownReference.country,Dataverse,account,address1_country,string,80,false,false,false,,,direct,,ISO country code or full name
+HCO-014,OneKey,Workplace,country,country,Dataverse,account,address1_country,string,80,false,false,false,,,fallback_for:address_country,,Fallback from top-level country field
+HCO-015,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_1.typeCode,Dataverse,account,address1_addresstypecode,picklist,,false,false,false,,,constant:3,,Always 3 (Primary) for P-type address
+HCO-016,OneKey,Workplace,codBase,codBase,Dataverse,account,description,string,2000,false,false,false,,,template:Codebase: {value},,Part of description field
+HCO-017,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,description,string,2000,false,false,false,,,template:OneKey EID: {value},,Part of description field
+HCO-018,OneKey,Workplace,isPrivacyLaw,isPrivacyLaw,Dataverse,account,msdyn_gdproptout,boolean,,false,false,false,,,direct,,Privacy law flag; review legal meaning before using
+# ============================================================================================================
+# HCP (Individual/Activity) -> Contact Mapping  
+# Source: flatten_hcp() output from onekey/parse.py
+# Target: Dataverse contact entity
+# ============================================================================================================
+HCP-001,OneKey,Individual,individualEid,individual.individualEid,Dataverse,contact,externaluseridentifier,string,50,true,true,false,,,direct,,Primary key for upsert; one Contact per Individual (not per Activity)
+HCP-002,OneKey,Individual,firstName,individual.firstName,Dataverse,contact,firstname,string,50,false,false,false,,,direct,,First name; UK may have initial only (e.g. M.)
+HCP-003,OneKey,Individual,lastName,individual.lastName,Dataverse,contact,lastname,string,50,true,false,false,,,coalesce:individualEid,Unknown,Last name (mandatory); fallback to individualEid or Unknown
+HCP-004,OneKey,Individual,genderCode,individual.genderCode,Dataverse,contact,gendercode,picklist,,false,false,false,,,map:M=1|F=2,,M=Male(1) F=Female(2); leave blank for unknown
+HCP-005,OneKey,Individual,title,individual.titleCode,Dataverse,contact,salutation,string,100,false,false,false,,,decode:title,,Decode title code to label (e.g. 03->Dr); use titleCode over prefixNameCode
+HCP-006,OneKey,Individual,typeLabel,individual.typeCorporateLabel,Dataverse,contact,jobtitle,string,100,false,false,false,,,direct,,Professional type (Doctor/Pharmacist/Dentist); base for jobtitle
+HCP-007,OneKey,Individual,specialtyLabel,individual.ada.SP_1.codeCorporateLabel,Dataverse,contact,jobtitle,string,100,false,false,false,,,append: - {value},,Primary specialty; appended to typeLabel for full jobtitle
+HCP-008,OneKey,Individual,statusCode,individual.statusCode,Dataverse,contact,statecode,state,,false,false,false,,,map:3=0|9=1|1=1,,3=Valid->Active(0); 9=Invalid->Inactive(1)
+HCP-009,OneKey,Individual,statusCode,individual.statusCode,Dataverse,contact,statuscode,status,,false,false,false,,,map:3=1|9=2|1=2,,3=Valid->Active(1); 9=Invalid->Inactive(2)
+HCP-010,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,contact,parentcustomerid,lookup,,false,false,true,account,accountnumber,lookup_by_key,,Link to workplace Account; binds via parentcustomerid_account@odata.bind
+HCP-011,OneKey,Workplace,usualName,workplace.usualName,Dataverse,contact,department,string,100,false,false,false,,,direct,,Department name if workplace is a department (typeCode ABT/ACT)
+HCP-012,OneKey,Activity,activityEid,activity.activityEid,Dataverse,contact,description,string,2000,false,false,false,,,template:OneKey Activity: {value},,Part of description; track which activity this contact represents
+HCP-013,OneKey,Individual,individualEid,individual.individualEid,Dataverse,contact,description,string,2000,false,false,false,,,template:OneKey Individual: {value},,Part of description
+HCP-014,OneKey,Workplace,workplaceName,workplace.officialName,Dataverse,contact,description,string,2000,false,false,false,,,template:Workplace: {value},,Part of description
+HCP-015,OneKey,Individual,codBase,codBase,Dataverse,contact,description,string,2000,false,false,false,,,template:Source: IQVIA OneKey ({value}),,Part of description
+HCP-016,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_1.address.addressLongLabel,Dataverse,contact,address1_line1,string,250,false,false,false,,,direct,,Workplace address copied to contact
+HCP-017,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_1.address.postalTownReference.villageLabel,Dataverse,contact,address1_city,string,80,false,false,false,,,direct,,City from workplace
+HCP-018,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_1.address.longPostalCode,Dataverse,contact,address1_postalcode,string,20,false,false,false,,,direct,,Postal code from workplace
+HCP-019,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_1.address.postalTownReference.country,Dataverse,contact,address1_country,string,80,false,false,false,,,direct,,Country from workplace
+HCP-020,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_1.typeCode,Dataverse,contact,address1_addresstypecode,picklist,,false,false,false,,,constant:3,,Always 3 (Primary)
+HCP-021,OneKey,Individual,isPrivacyLaw,isPrivacyLaw,Dataverse,contact,msdyn_gdproptout,boolean,,false,false,false,,,direct,,Privacy law flag

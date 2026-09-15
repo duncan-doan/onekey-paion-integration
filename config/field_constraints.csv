@@ -1,0 +1,48 @@
+constraint_id,platform,entity,field,constraint_type,constraint_value,error_action,notes
+# ============================================================================================================
+# Field Constraints: Max lengths, required fields, and validation rules
+# Used by validation module to check data before writing to Dataverse
+# ============================================================================================================
+# Account (HCO) Constraints
+CON-ACC-001,Dataverse,account,accountnumber,max_length,20,truncate,Primary key field; must fit OneKey workplaceEid
+CON-ACC-002,Dataverse,account,name,max_length,160,truncate,Official name; required field
+CON-ACC-003,Dataverse,account,name,required,true,error,Name is mandatory for Account
+CON-ACC-004,Dataverse,account,description,max_length,2000,truncate,Multi-part description field
+CON-ACC-005,Dataverse,account,sic,max_length,20,truncate,HCO type code
+CON-ACC-006,Dataverse,account,address1_line1,max_length,250,truncate,Street address
+CON-ACC-007,Dataverse,account,address1_line2,max_length,250,truncate,Building/extension
+CON-ACC-008,Dataverse,account,address1_line3,max_length,250,truncate,Additional address line
+CON-ACC-009,Dataverse,account,address1_city,max_length,80,truncate,City name
+CON-ACC-010,Dataverse,account,address1_postalcode,max_length,20,truncate,Postal/ZIP code
+CON-ACC-011,Dataverse,account,address1_county,max_length,50,truncate,County
+CON-ACC-012,Dataverse,account,address1_stateorprovince,max_length,50,truncate,State/Province/Region
+CON-ACC-013,Dataverse,account,address1_country,max_length,80,truncate,Country
+CON-ACC-014,Dataverse,account,telephone1,max_length,50,truncate,Primary phone
+CON-ACC-015,Dataverse,account,emailaddress1,max_length,100,truncate,Email address
+CON-ACC-016,Dataverse,account,websiteurl,max_length,200,truncate,Website URL
+CON-ACC-017,Dataverse,account,yominame,max_length,160,truncate,Phonetic name (Yomi)
+# Contact (HCP) Constraints
+CON-CON-001,Dataverse,contact,externaluseridentifier,max_length,50,truncate,Primary key field; must fit OneKey individualEid
+CON-CON-002,Dataverse,contact,firstname,max_length,50,truncate,First name
+CON-CON-003,Dataverse,contact,lastname,max_length,50,truncate,Last name
+CON-CON-004,Dataverse,contact,lastname,required,true,error,Lastname is mandatory for Contact; fallback to individualEid
+CON-CON-005,Dataverse,contact,middlename,max_length,50,truncate,Middle name
+CON-CON-006,Dataverse,contact,salutation,max_length,100,truncate,Title/Salutation
+CON-CON-007,Dataverse,contact,jobtitle,max_length,100,truncate,Job title / specialty
+CON-CON-008,Dataverse,contact,department,max_length,100,truncate,Department name
+CON-CON-009,Dataverse,contact,description,max_length,2000,truncate,Multi-part description
+CON-CON-010,Dataverse,contact,governmentid,max_length,50,truncate,National ID (GMC/LANR etc)
+CON-CON-011,Dataverse,contact,address1_line1,max_length,250,truncate,Street address
+CON-CON-012,Dataverse,contact,address1_line2,max_length,250,truncate,Building
+CON-CON-013,Dataverse,contact,address1_city,max_length,80,truncate,City
+CON-CON-014,Dataverse,contact,address1_postalcode,max_length,20,truncate,Postal code
+CON-CON-015,Dataverse,contact,address1_county,max_length,50,truncate,County
+CON-CON-016,Dataverse,contact,address1_stateorprovince,max_length,50,truncate,State/Province
+CON-CON-017,Dataverse,contact,address1_country,max_length,80,truncate,Country
+CON-CON-018,Dataverse,contact,telephone1,max_length,50,truncate,Business phone
+CON-CON-019,Dataverse,contact,mobilephone,max_length,50,truncate,Mobile phone
+CON-CON-020,Dataverse,contact,emailaddress1,max_length,100,truncate,Primary email
+CON-CON-021,Dataverse,contact,emailaddress2,max_length,100,truncate,Secondary email
+CON-CON-022,Dataverse,contact,websiteurl,max_length,200,truncate,Website URL
+CON-CON-023,Dataverse,contact,yomifirstname,max_length,150,truncate,Phonetic first name
+CON-CON-024,Dataverse,contact,yomilastname,max_length,150,truncate,Phonetic last name

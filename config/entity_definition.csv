@@ -1,0 +1,16 @@
+entity_id,platform,entity_name,entity_set,primary_key,alternate_key,alternate_key_field,is_required,load_order,parent_entity,description
+# ============================================================================================================
+# Entity Definition for Validation and Load Order
+# Defines which entities exist and their key fields for upsert operations
+# ============================================================================================================
+# Dataverse Target Entities
+ENT-DV-001,Dataverse,account,accounts,accountid,Yes,accountnumber,true,1,,Healthcare Organization (HCO); alternate key on accountnumber required for upsert by workplaceEid
+ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,externaluseridentifier,true,2,account,Healthcare Professional (HCP); alternate key on externaluseridentifier required for upsert by individualEid
+ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,No,,false,3,account|contact,Address records; currently blocked by existing alternate key issue
+ENT-DV-004,Dataverse,connection,connections,connectionid,No,,false,4,account,For HCO-to-HCO relationships (affiliations); optional
+ENT-DV-005,Dataverse,fc_hcpaffiliation,fc_hcpaffiliations,fc_hcpaffiliationid,No,,false,4,contact,Custom entity for multi-workplace HCPs; optional
+# OneKey Source Entities (for reference/validation)
+ENT-OK-001,OneKey,Workplace,N/A,workplaceEid,N/A,workplaceEid,true,N/A,,Healthcare Organization source; entityType=WORKPLACE in search/refresh
+ENT-OK-002,OneKey,Individual,N/A,individualEid,N/A,individualEid,true,N/A,,Healthcare Professional source; accessed via Activity
+ENT-OK-003,OneKey,Activity,N/A,activityEid,N/A,activityEid,true,N/A,Workplace,HCP-HCO link source; entityType=ACTIVITY in search/refresh; ties Individual to Workplace
+ENT-OK-004,OneKey,Address,N/A,addressEid,N/A,addressEid,false,N/A,Workplace,Embedded in workplaceAddresses; typeCode P=Primary

@@ -1,0 +1,81 @@
+mapping_id,mapping_type,source_code,source_value,target_value,target_label,notes
+# ============================================================================================================
+# Value Mapping: OneKey Codes -> Dataverse Picklist Values
+# Used by transform rules: map: and decode:
+# ============================================================================================================
+# Gender Code Mapping (individual.genderCode -> contact.gendercode)
+VAL-GEN-001,gendercode,M,Male,1,Male,OneKey M -> Dataverse Male (1)
+VAL-GEN-002,gendercode,F,Female,2,Female,OneKey F -> Dataverse Female (2)
+# Status Code Mapping (statusCode -> statecode)
+VAL-STA-001,statecode,3,Valid,0,Active,OneKey Valid -> Dataverse Active
+VAL-STA-002,statecode,9,Invalid,1,Inactive,OneKey Invalid -> Dataverse Inactive
+VAL-STA-003,statecode,1,Created,1,Inactive,OneKey Created (pending) -> Dataverse Inactive
+VAL-STA-004,statecode,6,Deceased,1,Inactive,OneKey Deceased -> Dataverse Inactive
+# Status Reason Mapping (statusCode -> statuscode)
+VAL-STR-001,statuscode,3,Valid,1,Active,Active status reason
+VAL-STR-002,statuscode,9,Invalid,2,Inactive,Inactive status reason
+VAL-STR-003,statuscode,1,Created,2,Inactive,Pending validation
+VAL-STR-004,statuscode,6,Deceased,2,Inactive,Deceased
+# Industry Code Mapping (activityLocationCode -> industrycode)
+VAL-IND-001,industrycode,H,Hospital,11,Hospital,Hospital facility
+VAL-IND-002,industrycode,S,Surgery,12,Surgery/Practice,Surgery or GP Practice
+VAL-IND-003,industrycode,N,NHS Establishment,13,NHS Establishment,NHS Est / Clinic
+VAL-IND-004,industrycode,O,Office,14,Office,Office / Other
+VAL-IND-005,industrycode,P,Pharmacy,15,Pharmacy,Pharmacy
+VAL-IND-006,industrycode,L,Laboratory,16,Laboratory,Lab facility
+# HCP Professional Type Code (individual.typeCode -> typecode decode)
+VAL-TYP-001,typecode,M,Physician,Doctor,Doctor,Medical Practitioner / Physician
+VAL-TYP-002,typecode,P,Pharmacist,Pharmacist,Pharmacist,Pharmacist
+VAL-TYP-003,typecode,D,Dentist,Dentist,Dentist,Dentist
+VAL-TYP-004,typecode,N,Nurse,Nurse,Nurse,Nurse
+VAL-TYP-005,typecode,A,Administrator,Administrator,Healthcare Administrator,Healthcare Administrator
+VAL-TYP-006,typecode,Z,Other,Other,Other Healthcare Professional,Other HCP type
+VAL-TYP-007,typecode,V,Veterinarian,Veterinarian,Veterinarian,Veterinarian (some markets)
+# Title Code Mapping (individual.titleCode -> salutation decode)
+VAL-TIT-001,title,01,Mr,Mr,Mr,Title Mr
+VAL-TIT-002,title,02,Mrs,Mrs,Mrs,Title Mrs
+VAL-TIT-003,title,03,Dr,Dr,Dr,Title Doctor
+VAL-TIT-004,title,04,Prof,Prof,Professor,Title Professor
+VAL-TIT-005,title,05,Ms,Ms,Ms,Title Ms
+VAL-TIT-006,title,06,Miss,Miss,Miss,Title Miss
+VAL-TIT-007,title,07,Sir,Sir,Sir,Title Sir
+VAL-TIT-008,title,08,Lord,Lord,Lord,Title Lord
+VAL-TIT-009,title,09,Lady,Lady,Lady,Title Lady
+VAL-TIT-010,title,10,Dame,Dame,Dame,Title Dame
+VAL-TIT-011,title,11,Rev,Rev,Reverend,Title Reverend
+# HCO Type Code (workplace.typeCode -> description)
+VAL-HCO-001,hcotype,HAU,Health Board / Agency,HAU,Health Authority / Board,Health Board (UK) / Agency
+VAL-HCO-002,hcotype,ACT,Acute Trust,ACT,Acute Trust,NHS Acute Trust
+VAL-HCO-003,hcotype,MHT,Mental Health Trust,MHT,Mental Health Trust,NHS Mental Health Trust
+VAL-HCO-004,hcotype,AMB,Ambulance Trust,AMB,Ambulance Trust,Ambulance Service Trust
+VAL-HCO-005,hcotype,PCT,Primary Care Trust,PCT,Primary Care Trust,Primary Care Trust (legacy)
+VAL-HCO-006,hcotype,CCG,Clinical Commissioning Group,CCG,CCG,Clinical Commissioning Group
+VAL-HCO-007,hcotype,ICB,Integrated Care Board,ICB,Integrated Care Board,Integrated Care Board (NHS reform)
+VAL-HCO-008,hcotype,PRA,Practice,PRA,GP Practice,General Practice
+VAL-HCO-009,hcotype,PHR,Pharmacy,PHR,Pharmacy,Pharmacy
+VAL-HCO-010,hcotype,LAB,Laboratory,LAB,Laboratory,Laboratory
+VAL-HCO-011,hcotype,ABT,Department,ABT,Department,Department within hospital
+# Address Type Code (workplaceAddresses.typeCode -> address1_addresstypecode)
+VAL-ADR-001,addresstypecode,P,Primary,3,Primary,Primary/Principal address
+VAL-ADR-002,addresstypecode,S,Secondary,4,Other,Secondary address
+VAL-ADR-003,addresstypecode,M,Mailing,5,Mail,Mailing address
+# Process Code Mapping (CDC processCode)
+VAL-PRC-001,processcode,I,Insert,insert,Insert,New record created in OneKey
+VAL-PRC-002,processcode,U,Update,update,Update,Existing record modified
+VAL-PRC-003,processcode,R,Replace,replace,Replace,Record replaced/merged
+# Country Code / Codebase Mapping
+VAL-COD-001,codebase,WUK,United Kingdom,GB,United Kingdom,UK codebase
+VAL-COD-002,codebase,WDE,Germany,DE,Germany,Germany codebase
+VAL-COD-003,codebase,WNL,Netherlands,NL,Netherlands,Netherlands codebase
+VAL-COD-004,codebase,WSE,Sweden,SE,Sweden,Sweden codebase
+VAL-COD-005,codebase,WDK,Denmark,DK,Denmark,Denmark codebase
+VAL-COD-006,codebase,WNO,Norway,NO,Norway,Norway codebase
+VAL-COD-007,codebase,WFI,Finland,FI,Finland,Finland codebase
+# Language Code Mapping (for portal LCID if needed)
+VAL-LNG-001,language,en_GB,English (UK),1033,English,English UK
+VAL-LNG-002,language,de,German,1031,German,German
+VAL-LNG-003,language,nl,Dutch,1043,Dutch,Dutch
+VAL-LNG-004,language,sv,Swedish,1053,Swedish,Swedish
+VAL-LNG-005,language,da,Danish,1030,Danish,Danish
+VAL-LNG-006,language,no,Norwegian,1044,Norwegian,Norwegian
+VAL-LNG-007,language,fi,Finnish,1035,Finnish,Finnish
