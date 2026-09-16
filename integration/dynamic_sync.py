@@ -18,6 +18,7 @@ from .transform import TransformEngine
 from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, setup_logging
 from onekey.parse import flatten_hcp, flatten_hco
+from dataverse.client import chunked
 
 if TYPE_CHECKING:
     from onekey import OneKeyClient
@@ -34,6 +35,7 @@ class DynamicSyncEngine:
     - Pre-sync validation of schema and mappings
     - Depth-first HCO hierarchy loading
     - HCP loading with account relationship resolution
+    - Bulk CreateMultiple / UpdateMultiple upserts
     - Comprehensive logging at every step
     """
     
@@ -43,6 +45,7 @@ class DynamicSyncEngine:
         dataverse_client: "DataverseClient",
         config: MappingConfig = None,
         sync_logger: SyncLogger = None,
+        bulk_batch_size: int = None,
     ):
         self.onekey = onekey_client
         self.dataverse = dataverse_client
@@ -51,6 +54,9 @@ class DynamicSyncEngine:
         self.mapping_validator = MappingValidator(self.config)
         self.dataverse_validator = DataverseValidator(dataverse_client)
         self.sync_logger = sync_logger or SyncLogger()
+        self.bulk_batch_size = bulk_batch_size or getattr(
+            getattr(dataverse_client, "config", None), "bulk_batch_size", None
+        ) or 100
         
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
@@ -84,6 +90,8 @@ class DynamicSyncEngine:
         include_address: bool = False,
         max_records: int = None,
         dry_run: bool = False,
+        hco_only: bool = False,
+        hcp_only: bool = False,
     ) -> dict:
         """Run full data synchronization.
         
@@ -92,10 +100,15 @@ class DynamicSyncEngine:
             include_address: Whether to sync address fields
             max_records: Limit records per entity type (for testing)
             dry_run: If True, validate and log but don't write
+            hco_only: If True, sync only workplaces/accounts (skip contacts)
+            hcp_only: If True, sync only individuals/contacts (skip accounts)
             
         Returns:
             Summary dict with counts and any errors
         """
+        if hco_only and hcp_only:
+            raise ValueError("hco_only and hcp_only cannot both be True")
+
         self.sync_logger.start_sync("full", codebases)
         
         # Pre-sync validation
@@ -117,23 +130,25 @@ class DynamicSyncEngine:
             self.sync_logger.log_phase(f"SYNC CODEBASE: {codebase}")
             
             try:
-                # Phase 1: Load HCOs
-                hco_result = self._sync_hcos(
-                    codebase, include_address, max_records, dry_run
-                )
-                results["accounts"]["processed"] += hco_result["processed"]
-                results["accounts"]["created"] += hco_result["created"]
-                results["accounts"]["updated"] += hco_result["updated"]
-                results["accounts"]["failed"] += hco_result["failed"]
+                # Phase 1: Load HCOs (unless HCP-only)
+                if not hcp_only:
+                    hco_result = self._sync_hcos(
+                        codebase, include_address, max_records, dry_run
+                    )
+                    results["accounts"]["processed"] += hco_result["processed"]
+                    results["accounts"]["created"] += hco_result["created"]
+                    results["accounts"]["updated"] += hco_result["updated"]
+                    results["accounts"]["failed"] += hco_result["failed"]
                 
-                # Phase 2: Load HCPs
-                hcp_result = self._sync_hcps(
-                    codebase, include_address, max_records, dry_run
-                )
-                results["contacts"]["processed"] += hcp_result["processed"]
-                results["contacts"]["created"] += hcp_result["created"]
-                results["contacts"]["updated"] += hcp_result["updated"]
-                results["contacts"]["failed"] += hcp_result["failed"]
+                # Phase 2: Load HCPs (unless HCO-only)
+                if not hco_only:
+                    hcp_result = self._sync_hcps(
+                        codebase, include_address, max_records, dry_run
+                    )
+                    results["contacts"]["processed"] += hcp_result["processed"]
+                    results["contacts"]["created"] += hcp_result["created"]
+                    results["contacts"]["updated"] += hcp_result["updated"]
+                    results["contacts"]["failed"] += hcp_result["failed"]
                 
             except Exception as e:
                 logger.exception("Error syncing codebase %s", codebase)
@@ -214,12 +229,11 @@ class DynamicSyncEngine:
         max_records: int,
         dry_run: bool,
     ) -> dict:
-        """Sync HCOs for a single codebase."""
+        """Sync HCOs for a single codebase using bulk upserts per hierarchy depth."""
         self.sync_logger.log_phase(f"HCO SYNC: {codebase}")
         
         result = {"processed": 0, "created": 0, "updated": 0, "failed": 0}
         
-        # Collect all HCOs
         hcos = []
         logger.info("Extracting HCOs from OneKey %s...", codebase)
         
@@ -232,94 +246,131 @@ class DynamicSyncEngine:
         if not hcos:
             return result
         
-        # Flatten and compute hierarchy
         flattened = [flatten_hco(r) for r in hcos]
         depths = self._compute_hierarchy_depths(flattened)
+        max_depth = max(depths.values()) if depths else 0
+        logger.info(
+            "HCO hierarchy: max depth %d; bulk batch size %d",
+            max_depth, self.bulk_batch_size,
+        )
         
-        # Sort by depth (parents first)
-        sorted_hcos = sorted(flattened, key=lambda h: depths.get(h.get("workplaceEid"), 0))
+        # Prefetch parents that may already exist outside this extract.
+        parent_eids = {
+            hco.get("parentWorkplaceEid")
+            for hco in flattened
+            if hco.get("parentWorkplaceEid")
+            and hco.get("parentWorkplaceEid") not in self._account_cache
+        }
+        if parent_eids and not dry_run:
+            self._lookup_accounts_bulk(parent_eids)
         
-        logger.info("HCO hierarchy: max depth %d", max(depths.values()) if depths else 0)
+        by_depth: dict[int, list[dict]] = {}
+        for hco in flattened:
+            depth = depths.get(hco.get("workplaceEid"), 0)
+            by_depth.setdefault(depth, []).append(hco)
         
-        # Process each HCO
-        total = len(sorted_hcos)
-        for i, hco in enumerate(sorted_hcos, 1):
-            workplace_eid = hco.get("workplaceEid")
+        total = len(flattened)
+        done = 0
+        
+        for depth in sorted(by_depth):
+            level = by_depth[depth]
+            logger.info("Bulk upserting %d accounts at depth %d", len(level), depth)
             
-            if i % 50 == 0 or i == total:
-                self.sync_logger.log_progress("accounts", i, total)
-            
-            # Validate record
-            record_validation = self.mapping_validator.validate_source_record(hco, "account")
-            if not record_validation.is_valid:
-                self.sync_logger.log_validation_result(record_validation, f"HCO {workplace_eid}")
-                result["failed"] += 1
-                continue
-            
-            # Resolve parent account
-            parent_account_id = None
-            parent_eid = hco.get("parentWorkplaceEid")
-            if parent_eid:
-                parent_account_id = self._account_cache.get(parent_eid)
-                if not parent_account_id and not dry_run:
-                    # Try to find in Dataverse
-                    parent_account_id = self._lookup_account(parent_eid)
+            prepared = []  # (workplace_eid, key_value, payload, hco)
+            for hco in level:
+                workplace_eid = hco.get("workplaceEid")
+                record_validation = self.mapping_validator.validate_source_record(
+                    hco, "account"
+                )
+                if not record_validation.is_valid:
+                    self.sync_logger.log_validation_result(
+                        record_validation, f"HCO {workplace_eid}"
+                    )
+                    result["failed"] += 1
+                    done += 1
+                    continue
                 
-                if parent_account_id:
-                    self.sync_logger.log_relationship_resolved(
-                        "account", workplace_eid, "account", parent_account_id
+                parent_account_id = None
+                parent_eid = hco.get("parentWorkplaceEid")
+                if parent_eid:
+                    parent_account_id = self._account_cache.get(parent_eid)
+                    if parent_account_id:
+                        self.sync_logger.log_relationship_resolved(
+                            "account", workplace_eid, "account", parent_account_id
+                        )
+                    else:
+                        self.sync_logger.log_relationship_failed(
+                            "account", workplace_eid, "account", parent_eid,
+                            "Parent not found",
+                        )
+                
+                payload = self.transformer.transform_hco(
+                    hco, include_address, parent_account_id
+                )
+                key_field = self.config.get_key_field("account")
+                key_name = key_field.target_field if key_field else "accountnumber"
+                key_value = payload.get(key_name)
+                if not key_value:
+                    result["failed"] += 1
+                    done += 1
+                    self.sync_logger.log_record_error(
+                        "account", workplace_eid, "upsert",
+                        f"Missing key field {key_name}",
                     )
-                else:
-                    self.sync_logger.log_relationship_failed(
-                        "account", workplace_eid, "account", parent_eid, "Parent not found"
-                    )
-            
-            # Transform to Dataverse payload
-            payload = self.transformer.transform_hco(
-                hco, include_address, parent_account_id
-            )
+                    continue
+                
+                prepared.append((workplace_eid, key_name, key_value, payload, hco))
             
             if dry_run:
-                logger.debug("DRY RUN: Would upsert account %s: %s", workplace_eid, payload)
-                result["processed"] += 1
+                for workplace_eid, _, _, payload, _ in prepared:
+                    logger.debug(
+                        "DRY RUN: Would upsert account %s: %s", workplace_eid, payload
+                    )
+                    result["processed"] += 1
+                    done += 1
+                self.sync_logger.log_progress("accounts", done, total)
                 continue
             
-            # Upsert to Dataverse
-            with self.sync_logger.log_operation("upsert", "account", workplace_eid) as log:
-                try:
-                    key_field = self.config.get_key_field("account")
-                    key_value = payload.get(key_field.target_field if key_field else "accountnumber")
-                    
-                    account_id, created = self.dataverse.upsert_by_field(
-                        "accounts",
-                        key_field.target_field if key_field else "accountnumber",
-                        key_value,
-                        payload,
-                    )
-                    
-                    log.target_id = account_id
-                    log.operation = "create" if created else "update"
-                    
-                    self._account_cache[workplace_eid] = account_id
-                    
-                    if created:
-                        result["created"] += 1
-                    else:
-                        result["updated"] += 1
-                    result["processed"] += 1
-                    
-                    self.sync_logger.log_record_success(
-                        "account", workplace_eid, account_id,
-                        "create" if created else "update",
-                        hco.get("officialName")
-                    )
-                    
-                except Exception as e:
-                    result["failed"] += 1
+            if not prepared:
+                self.sync_logger.log_progress("accounts", done, total)
+                continue
+            
+            key_name = prepared[0][1]
+            payloads = [item[3] for item in prepared]
+            
+            try:
+                bulk_results = self.dataverse.bulk_upsert_by_field(
+                    "accounts",
+                    key_name,
+                    payloads,
+                    batch_size=self.bulk_batch_size,
+                )
+            except Exception as e:
+                result["failed"] += len(prepared)
+                done += len(prepared)
+                for workplace_eid, *_ in prepared:
                     self.sync_logger.log_record_error(
-                        "account", workplace_eid, "upsert", str(e)
+                        "account", workplace_eid, "bulk_upsert", str(e)
                     )
-                    raise
+                raise
+            
+            for (workplace_eid, _, _, _, hco), (match_value, account_id, created) in zip(
+                prepared, bulk_results
+            ):
+                self._account_cache[workplace_eid] = account_id
+                if created:
+                    result["created"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                done += 1
+                self.sync_logger.log_record_success(
+                    "account", workplace_eid, account_id,
+                    "create" if created else "update",
+                    hco.get("officialName"),
+                )
+            
+            self.sync_logger.log_progress("accounts", done, total)
         
         return result
     
@@ -330,12 +381,11 @@ class DynamicSyncEngine:
         max_records: int,
         dry_run: bool,
     ) -> dict:
-        """Sync HCPs for a single codebase."""
+        """Sync HCPs for a single codebase using bulk upserts."""
         self.sync_logger.log_phase(f"HCP SYNC: {codebase}")
         
         result = {"processed": 0, "created": 0, "updated": 0, "failed": 0}
         
-        # Collect HCPs (Activities)
         hcps = []
         logger.info("Extracting HCPs from OneKey %s...", codebase)
         
@@ -348,32 +398,36 @@ class DynamicSyncEngine:
         if not hcps:
             return result
         
-        # Flatten records
         flattened = [flatten_hcp(r) for r in hcps]
         
-        # Process each HCP
+        workplace_eids = {
+            hcp.get("workplaceEid")
+            for hcp in flattened
+            if hcp.get("workplaceEid") and hcp.get("workplaceEid") not in self._account_cache
+        }
+        if workplace_eids and not dry_run:
+            self._lookup_accounts_bulk(workplace_eids)
+        
         total = len(flattened)
+        prepared = []  # (individual_eid, key_name, payload, hcp)
+        
         for i, hcp in enumerate(flattened, 1):
             individual_eid = hcp.get("individualEid")
             workplace_eid = hcp.get("workplaceEid")
             
-            if i % 50 == 0 or i == total:
-                self.sync_logger.log_progress("contacts", i, total)
-            
-            # Validate record
-            record_validation = self.mapping_validator.validate_source_record(hcp, "contact")
+            record_validation = self.mapping_validator.validate_source_record(
+                hcp, "contact"
+            )
             if not record_validation.is_valid:
-                self.sync_logger.log_validation_result(record_validation, f"HCP {individual_eid}")
+                self.sync_logger.log_validation_result(
+                    record_validation, f"HCP {individual_eid}"
+                )
                 result["failed"] += 1
                 continue
             
-            # Resolve account relationship
             account_id = None
             if workplace_eid:
                 account_id = self._account_cache.get(workplace_eid)
-                if not account_id and not dry_run:
-                    account_id = self._lookup_account(workplace_eid)
-                
                 if account_id:
                     self.sync_logger.log_relationship_resolved(
                         "contact", individual_eid, "account", account_id
@@ -381,49 +435,69 @@ class DynamicSyncEngine:
                 else:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
             
-            # Transform to Dataverse payload
             payload = self.transformer.transform_hcp(hcp, include_address, account_id)
-            
-            if dry_run:
-                logger.debug("DRY RUN: Would upsert contact %s: %s", individual_eid, payload)
-                result["processed"] += 1
+            key_field = self.config.get_key_field("contact")
+            key_name = key_field.target_field if key_field else "externaluseridentifier"
+            key_value = payload.get(key_name)
+            if not key_value:
+                result["failed"] += 1
+                self.sync_logger.log_record_error(
+                    "contact", individual_eid, "upsert",
+                    f"Missing key field {key_name}",
+                )
                 continue
             
-            # Upsert to Dataverse
-            with self.sync_logger.log_operation("upsert", "contact", individual_eid) as log:
-                try:
-                    key_field = self.config.get_key_field("contact")
-                    key_value = payload.get(key_field.target_field if key_field else "externaluseridentifier")
-                    
-                    contact_id, created = self.dataverse.upsert_by_field(
-                        "contacts",
-                        key_field.target_field if key_field else "externaluseridentifier",
-                        key_value,
-                        payload,
-                    )
-                    
-                    log.target_id = contact_id
-                    log.operation = "create" if created else "update"
-                    
-                    if created:
-                        result["created"] += 1
-                    else:
-                        result["updated"] += 1
-                    result["processed"] += 1
-                    
-                    name = f"{hcp.get('firstName') or ''} {hcp.get('lastName') or ''}".strip()
-                    self.sync_logger.log_record_success(
-                        "contact", individual_eid, contact_id,
-                        "create" if created else "update",
-                        name
-                    )
-                    
-                except Exception as e:
-                    result["failed"] += 1
+            if dry_run:
+                logger.debug(
+                    "DRY RUN: Would upsert contact %s: %s", individual_eid, payload
+                )
+                result["processed"] += 1
+                if i % 50 == 0 or i == total:
+                    self.sync_logger.log_progress("contacts", i, total)
+                continue
+            
+            prepared.append((individual_eid, key_name, payload, hcp))
+        
+        if dry_run or not prepared:
+            return result
+        
+        key_name = prepared[0][1]
+        # Process contacts in write batches so progress logs stay useful.
+        done = 0
+        for batch in chunked(prepared, self.bulk_batch_size):
+            payloads = [item[2] for item in batch]
+            try:
+                bulk_results = self.dataverse.bulk_upsert_by_field(
+                    "contacts",
+                    key_name,
+                    payloads,
+                    batch_size=self.bulk_batch_size,
+                )
+            except Exception as e:
+                result["failed"] += len(batch)
+                for individual_eid, *_ in batch:
                     self.sync_logger.log_record_error(
-                        "contact", individual_eid, "upsert", str(e)
+                        "contact", individual_eid, "bulk_upsert", str(e)
                     )
-                    raise
+                raise
+            
+            for (individual_eid, _, _, hcp), (_, contact_id, created) in zip(
+                batch, bulk_results
+            ):
+                if created:
+                    result["created"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                done += 1
+                name = f"{hcp.get('firstName') or ''} {hcp.get('lastName') or ''}".strip()
+                self.sync_logger.log_record_success(
+                    "contact", individual_eid, contact_id,
+                    "create" if created else "update",
+                    name,
+                )
+            
+            self.sync_logger.log_progress("contacts", done, len(prepared))
         
         return result
     
@@ -435,14 +509,13 @@ class DynamicSyncEngine:
         include_address: bool,
         dry_run: bool,
     ) -> dict:
-        """Sync delta changes for a single codebase."""
+        """Sync delta changes for a single codebase using bulk upserts."""
         result = {
             "accounts": {"processed": 0, "created": 0, "updated": 0, "failed": 0},
             "contacts": {"processed": 0, "created": 0, "updated": 0, "failed": 0},
             "by_process_code": {"I": 0, "U": 0, "R": 0},
         }
         
-        # Collect changes
         workplaces = []
         activities = []
         
@@ -452,7 +525,9 @@ class DynamicSyncEngine:
             date_to=date_to,
         ):
             process_code = record.get("processCode", "U")
-            result["by_process_code"][process_code] = result["by_process_code"].get(process_code, 0) + 1
+            result["by_process_code"][process_code] = (
+                result["by_process_code"].get(process_code, 0) + 1
+            )
             
             entity_type = (record.get("entityType") or "").upper()
             if entity_type == "WORKPLACE":
@@ -468,68 +543,106 @@ class DynamicSyncEngine:
             result["by_process_code"]["R"],
         )
         
-        # Process workplaces first (for hierarchy)
-        for record in workplaces:
-            hco = flatten_hco(record)
-            workplace_eid = hco.get("workplaceEid")
+        if workplaces:
+            flattened = [flatten_hco(r) for r in workplaces]
+            depths = self._compute_hierarchy_depths(flattened)
+            parent_eids = {
+                h.get("parentWorkplaceEid")
+                for h in flattened
+                if h.get("parentWorkplaceEid")
+                and h.get("parentWorkplaceEid") not in self._account_cache
+            }
+            if parent_eids and not dry_run:
+                self._lookup_accounts_bulk(parent_eids)
             
-            # Resolve parent
-            parent_account_id = None
-            parent_eid = hco.get("parentWorkplaceEid")
-            if parent_eid:
-                parent_account_id = self._account_cache.get(parent_eid) or self._lookup_account(parent_eid)
+            by_depth: dict[int, list[dict]] = {}
+            for hco in flattened:
+                by_depth.setdefault(depths.get(hco.get("workplaceEid"), 0), []).append(hco)
             
-            payload = self.transformer.transform_hco(hco, include_address, parent_account_id)
-            
-            if not dry_run:
-                try:
+            for depth in sorted(by_depth):
+                prepared = []
+                for hco in by_depth[depth]:
+                    workplace_eid = hco.get("workplaceEid")
+                    parent_eid = hco.get("parentWorkplaceEid")
+                    parent_account_id = (
+                        self._account_cache.get(parent_eid) if parent_eid else None
+                    )
+                    payload = self.transformer.transform_hco(
+                        hco, include_address, parent_account_id
+                    )
                     key_field = self.config.get_key_field("account")
-                    key_value = payload.get(key_field.target_field if key_field else "accountnumber")
-                    
-                    account_id, created = self.dataverse.upsert_by_field(
-                        "accounts", key_field.target_field if key_field else "accountnumber",
-                        key_value, payload
-                    )
-                    self._account_cache[workplace_eid] = account_id
-                    
-                    if created:
-                        result["accounts"]["created"] += 1
-                    else:
-                        result["accounts"]["updated"] += 1
-                except Exception as e:
-                    logger.error("Delta sync failed for HCO %s: %s", workplace_eid, e)
-                    result["accounts"]["failed"] += 1
-            
-            result["accounts"]["processed"] += 1
-        
-        # Process activities
-        for record in activities:
-            hcp = flatten_hcp(record)
-            individual_eid = hcp.get("individualEid")
-            workplace_eid = hcp.get("workplaceEid")
-            
-            account_id = self._account_cache.get(workplace_eid) or self._lookup_account(workplace_eid)
-            payload = self.transformer.transform_hcp(hcp, include_address, account_id)
-            
-            if not dry_run:
+                    key_name = key_field.target_field if key_field else "accountnumber"
+                    prepared.append((workplace_eid, key_name, payload))
+                    result["accounts"]["processed"] += 1
+                
+                if dry_run or not prepared:
+                    continue
+                
+                key_name = prepared[0][1]
                 try:
-                    key_field = self.config.get_key_field("contact")
-                    key_value = payload.get(key_field.target_field if key_field else "externaluseridentifier")
-                    
-                    contact_id, created = self.dataverse.upsert_by_field(
-                        "contacts", key_field.target_field if key_field else "externaluseridentifier",
-                        key_value, payload
+                    bulk_results = self.dataverse.bulk_upsert_by_field(
+                        "accounts",
+                        key_name,
+                        [p for _, _, p in prepared],
+                        batch_size=self.bulk_batch_size,
                     )
-                    
-                    if created:
-                        result["contacts"]["created"] += 1
-                    else:
-                        result["contacts"]["updated"] += 1
+                    for (workplace_eid, _, _), (_, account_id, created) in zip(
+                        prepared, bulk_results
+                    ):
+                        self._account_cache[workplace_eid] = account_id
+                        if created:
+                            result["accounts"]["created"] += 1
+                        else:
+                            result["accounts"]["updated"] += 1
                 except Exception as e:
-                    logger.error("Delta sync failed for HCP %s: %s", individual_eid, e)
-                    result["contacts"]["failed"] += 1
+                    logger.error("Delta bulk sync failed for HCOs: %s", e)
+                    result["accounts"]["failed"] += len(prepared)
+        
+        if activities:
+            flattened = [flatten_hcp(r) for r in activities]
+            workplace_eids = {
+                h.get("workplaceEid")
+                for h in flattened
+                if h.get("workplaceEid")
+                and h.get("workplaceEid") not in self._account_cache
+            }
+            if workplace_eids and not dry_run:
+                self._lookup_accounts_bulk(workplace_eids)
             
-            result["contacts"]["processed"] += 1
+            prepared = []
+            for hcp in flattened:
+                individual_eid = hcp.get("individualEid")
+                workplace_eid = hcp.get("workplaceEid")
+                account_id = (
+                    self._account_cache.get(workplace_eid) if workplace_eid else None
+                )
+                payload = self.transformer.transform_hcp(
+                    hcp, include_address, account_id
+                )
+                key_field = self.config.get_key_field("contact")
+                key_name = (
+                    key_field.target_field if key_field else "externaluseridentifier"
+                )
+                prepared.append((individual_eid, key_name, payload))
+                result["contacts"]["processed"] += 1
+            
+            if not dry_run and prepared:
+                key_name = prepared[0][1]
+                try:
+                    bulk_results = self.dataverse.bulk_upsert_by_field(
+                        "contacts",
+                        key_name,
+                        [p for _, _, p in prepared],
+                        batch_size=self.bulk_batch_size,
+                    )
+                    for (_, _, _), (_, _, created) in zip(prepared, bulk_results):
+                        if created:
+                            result["contacts"]["created"] += 1
+                        else:
+                            result["contacts"]["updated"] += 1
+                except Exception as e:
+                    logger.error("Delta bulk sync failed for HCPs: %s", e)
+                    result["contacts"]["failed"] += len(prepared)
         
         return result
     
@@ -569,29 +682,62 @@ class DynamicSyncEngine:
     
     def _lookup_account(self, workplace_eid: str) -> str | None:
         """Lookup account ID from Dataverse by workplace EID."""
+        found = self._lookup_accounts_bulk([workplace_eid])
+        return found.get(workplace_eid)
+    
+    def _lookup_accounts_bulk(self, workplace_eids) -> dict[str, str]:
+        """Resolve many workplace EIDs to account GUIDs; update the cache."""
         key_field = self.config.get_key_field("account")
         field_name = key_field.target_field if key_field else "accountnumber"
         
-        try:
-            record = self.dataverse.find_one(
-                "accounts",
-                filter=f"{field_name} eq '{workplace_eid}'",
-                select=[field_name, "accountid"],
-            )
-            if record:
-                account_id = record.get("accountid")
-                self._account_cache[workplace_eid] = account_id
-                return account_id
-        except Exception as e:
-            logger.warning("Failed to lookup account %s: %s", workplace_eid, e)
+        needed = [
+            str(eid) for eid in workplace_eids
+            if eid and str(eid) not in self._account_cache
+        ]
+        if not needed:
+            return {
+                str(eid): self._account_cache[str(eid)]
+                for eid in workplace_eids
+                if eid and str(eid) in self._account_cache
+            }
         
-        return None
+        find_many = getattr(self.dataverse, "find_many_by_field", None)
+        try:
+            if find_many:
+                rows = find_many(
+                    "accounts",
+                    field_name,
+                    needed,
+                    select=[field_name, "accountid"],
+                )
+                for match_value, row in rows.items():
+                    account_id = row.get("accountid")
+                    if account_id:
+                        self._account_cache[str(match_value)] = account_id
+            else:
+                for eid in needed:
+                    record = self.dataverse.find_one(
+                        "accounts",
+                        filter=f"{field_name} eq '{eid}'",
+                        select=[field_name, "accountid"],
+                    )
+                    if record and record.get("accountid"):
+                        self._account_cache[eid] = record["accountid"]
+        except Exception as e:
+            logger.warning("Failed bulk account lookup: %s", e)
+        
+        return {
+            str(eid): self._account_cache[str(eid)]
+            for eid in workplace_eids
+            if eid and str(eid) in self._account_cache
+        }
 
 
 def create_sync_engine(
     onekey_client: "OneKeyClient",
     dataverse_client: "DataverseClient",
     config_dir: str = None,
+    bulk_batch_size: int = None,
 ) -> DynamicSyncEngine:
     """Create a sync engine with configuration loaded from CSV files.
     
@@ -599,6 +745,7 @@ def create_sync_engine(
         onekey_client: Connected OneKey client
         dataverse_client: Connected Dataverse client
         config_dir: Optional path to config directory
+        bulk_batch_size: Optional CreateMultiple/UpdateMultiple batch size
         
     Returns:
         Configured DynamicSyncEngine
@@ -606,4 +753,9 @@ def create_sync_engine(
     from pathlib import Path
     
     config = load_mapping_config(Path(config_dir) if config_dir else None)
-    return DynamicSyncEngine(onekey_client, dataverse_client, config)
+    return DynamicSyncEngine(
+        onekey_client,
+        dataverse_client,
+        config,
+        bulk_batch_size=bulk_batch_size,
+    )

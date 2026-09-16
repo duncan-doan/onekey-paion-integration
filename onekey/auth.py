@@ -125,6 +125,29 @@ class OneKeySession:
                 except OneKeyHTTPError as exc:
                     last_error = exc
 
+                # Honour Retry-After on 429; use a long floor so we do not
+                # re-hit the limit immediately after a short exponential wait.
+                if response.status_code == 429 and attempt < self.config.max_retries:
+                    headers = getattr(response, "headers", None) or {}
+                    retry_after = headers.get("Retry-After")
+                    delay = None
+                    if retry_after:
+                        try:
+                            delay = float(retry_after)
+                        except ValueError:
+                            delay = None
+                    if delay is None:
+                        delay = min(60 * attempt, 300) + random.uniform(0, 5)
+                    else:
+                        delay = min(max(delay, 30), 300)
+                    logger.warning(
+                        "OneKey rate limited (429) on %s %s "
+                        "(attempt %d/%d); sleeping %.0fs",
+                        method, url, attempt, self.config.max_retries, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
             if attempt < self.config.max_retries:
                 # Exponential backoff, jittered so parallel workers desynchronise.
                 delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)

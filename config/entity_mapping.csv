@@ -5,7 +5,7 @@ mapping_id,source_platform,source_entity,source_field,source_field_path,target_p
 # Target: Dataverse account entity
 # ============================================================================================================
 HCO-001,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,accountnumber,string,20,true,true,false,,,direct,,Primary key for upsert; alternate key required in Dataverse
-HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,true,false,false,,,coalesce:usualName,,Primary name; fallback to usualName if empty. Truncate to 160.
+HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,true,false,false,,,coalesce:usualName,noname,Primary name; fallback to usualName then noname. Truncate to 160.
 HCO-003,OneKey,Workplace,typeCode,workplace.typeCode,Dataverse,account,sic,string,20,false,false,false,,,direct,,HCO type code (HAU=Health Board; ACT=Acute Trust; MHT=Mental Health Trust)
 HCO-004,OneKey,Workplace,typeLabel,workplace.typeCorporateLabel,Dataverse,account,description,string,2000,false,false,false,,,template:HCO type: {value},,Part of description field
 HCO-005,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dataverse,account,industrycode,picklist,,false,false,false,,,map:H=11|S=12|N=13|O=14,,H=Hospital S=Surgery N=NHS Est. Maps to Dataverse industrycode picklist

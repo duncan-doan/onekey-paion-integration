@@ -1,6 +1,7 @@
 """High-level client for retrieving HCP and HCO records from OneKey."""
 
 import logging
+import time
 
 from .auth import authenticate
 
@@ -390,6 +391,11 @@ class OneKeyClient:
                     yielded,
                 )
                 return
+
+            # Pace packets to stay under OneKey rate limits.
+            delay = getattr(self.session.config, "packet_delay", 0) or 0
+            if delay > 0:
+                time.sleep(delay)
 
             # Replaying the transaction id is what advances the cursor.
             # The territory must be repeated on every continuation: OneKey

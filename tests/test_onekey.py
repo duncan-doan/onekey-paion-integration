@@ -54,8 +54,10 @@ class FakeTransport:
         pass
 
 
-def make_session(responses):
-    config = OneKeyConfig("https://okws-uat.onekey.iqvia.com", "u", "p", "494")
+def make_session(responses, max_retries=3):
+    config = OneKeyConfig(
+        "https://okws-uat.onekey.iqvia.com", "u", "p", "494", max_retries=max_retries
+    )
     return OneKeySession(config, session=FakeTransport(responses))
 
 

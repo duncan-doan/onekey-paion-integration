@@ -34,8 +34,10 @@ class OneKeyConfig:
     password: str
     connector_id: str
     timeout: float = 30.0
-    max_retries: int = 3
+    max_retries: int = 8
     verify_ssl: bool = True
+    # Seconds to wait between successful population packets (rate-limit hygiene).
+    packet_delay: float = 1.0
 
     def __post_init__(self):
         for field in ("base_url", "username", "password", "connector_id"):
@@ -79,8 +81,10 @@ class OneKeyConfig:
             password=os.environ.get(f"{prefix}PASSWORD", ""),
             connector_id=os.environ.get(f"{prefix}CONNECTOR_ID", ""),
             timeout=float(os.environ.get(f"{prefix}TIMEOUT", "30")),
+            max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "8")),
             verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower()
             not in ("0", "false", "no"),
+            packet_delay=float(os.environ.get(f"{prefix}PACKET_DELAY", "1.0")),
         )
 
     def __repr__(self):

@@ -29,6 +29,10 @@ class DataverseConfig:
     api_version: str = "v9.2"
     timeout: float = 60.0
     max_retries: int = 3
+    # CreateMultiple / UpdateMultiple have no hard record cap; Microsoft
+    # recommends starting at 100–1000 for standard tables (often ~100 for
+    # account/contact with plugins). See bulk-operations docs.
+    bulk_batch_size: int = 100
 
     def __post_init__(self):
         for field in ("environment_url", "tenant_id", "client_id", "client_secret"):
@@ -70,6 +74,7 @@ class DataverseConfig:
             client_secret=os.environ[f"{prefix}CLIENT_SECRET"],
             api_version=os.environ.get(f"{prefix}API_VERSION", "v9.2"),
             timeout=float(os.environ.get(f"{prefix}TIMEOUT", "60")),
+            bulk_batch_size=int(os.environ.get(f"{prefix}BULK_BATCH_SIZE", "100")),
         )
 
     def __repr__(self):

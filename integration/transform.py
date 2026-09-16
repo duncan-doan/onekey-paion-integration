@@ -79,6 +79,15 @@ class TransformEngine:
         if parent_account_id:
             payload["parentaccountid@odata.bind"] = f"/accounts({parent_account_id})"
         
+        # Account name is mandatory; honour mapping default when still empty.
+        if not (payload.get("name") or "").strip():
+            name_mapping = self.config.get_field_mappings("account")
+            default_name = next(
+                (fm.default_value for fm in name_mapping if fm.target_field == "name"),
+                None,
+            )
+            payload["name"] = (default_name or "noname")[:160]
+        
         # Remove None values
         return {k: v for k, v in payload.items() if v is not None}
     
@@ -223,7 +232,10 @@ class TransformEngine:
             if value is not None and (not isinstance(value, str) or value.strip()):
                 return value
             fallback_field = rule.split(":", 1)[1]
-            return self._extract_value(source, fallback_field)
+            fallback = self._extract_value(source, fallback_field)
+            if fallback is not None and (not isinstance(fallback, str) or fallback.strip()):
+                return fallback
+            return mapping.default_value
         
         if rule.startswith("fallback_for:"):
             # This field is a fallback - only return if checking for the primary
@@ -265,6 +277,17 @@ class TransformEngine:
             other_field = rule.split(":", 1)[1]
             other_value = self._extract_value(source, other_field)
             return bool(value) or bool(other_value)
+
+        if rule.startswith("constant:"):
+            return rule.split(":", 1)[1]
+
+        if rule.startswith("fallback_for:"):
+            # Secondary mapping: only used when primary field is empty (handled by caller)
+            return value
+
+        # Lookups are resolved by DynamicSyncEngine before transform; skip here.
+        if rule in ("lookup_by_key", "lookup"):
+            return None
         
         # Unknown rule - pass through
         logger.warning("Unknown transform rule: %s", rule)

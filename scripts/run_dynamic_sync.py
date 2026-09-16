@@ -93,6 +93,21 @@ def parse_args():
         help="Include address fields (may fail due to Dataverse constraints)"
     )
     parser.add_argument(
+        "--hco-only", action="store_true",
+        help="Sync only HCO/accounts (skip HCP/contacts)"
+    )
+    parser.add_argument(
+        "--hcp-only", action="store_true",
+        help="Sync only HCP/contacts (skip HCO/accounts)"
+    )
+    parser.add_argument(
+        "--bulk-batch-size", type=int, default=None,
+        help=(
+            "Records per Dataverse CreateMultiple/UpdateMultiple request "
+            "(default: DATAVERSE_BULK_BATCH_SIZE or 100; Microsoft suggests 100–1000)"
+        ),
+    )
+    parser.add_argument(
         "--config-dir",
         help="Path to config directory with CSV mapping files"
     )
@@ -166,12 +181,21 @@ def main():
         class MockDataverse:
             def upsert_by_field(self, *args, **kwargs):
                 return ("mock-guid", True)
+            def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+                return [
+                    (str(r.get(match_field)), f"mock-{i}", True)
+                    for i, r in enumerate(records)
+                ]
             def find_one(self, *args, **kwargs):
                 return None
+            def find_many_by_field(self, *args, **kwargs):
+                return {}
         dataverse = MockDataverse()
     
     # Create sync engine
-    engine = create_sync_engine(onekey, dataverse, args.config_dir)
+    engine = create_sync_engine(
+        onekey, dataverse, args.config_dir, bulk_batch_size=args.bulk_batch_size
+    )
     
     # Run sync
     try:
@@ -203,6 +227,8 @@ def main():
                 include_address=args.with_address,
                 max_records=args.max_records,
                 dry_run=args.dry_run,
+                hco_only=args.hco_only,
+                hcp_only=args.hcp_only,
             )
         
         # Print summary

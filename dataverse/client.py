@@ -4,7 +4,6 @@ import logging
 import random
 import re
 import time
-import urllib.parse
 
 import requests
 
@@ -16,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+# Microsoft recommends 100–1000 targets per CreateMultiple/UpdateMultiple for
+# standard tables; there is no fixed record maximum (message size / timeout
+# bind). Keep lookups smaller to stay under OData URL length limits.
+DEFAULT_BULK_BATCH_SIZE = 100
+DEFAULT_LOOKUP_CHUNK_SIZE = 50
+
+# entity_set -> (logical_name, primary_id_attribute)
+_ENTITY_META = {
+    "accounts": ("account", "accountid"),
+    "contacts": ("contact", "contactid"),
+}
+
 
 def escape_odata(value):
     """Escape a string for an OData filter literal.
@@ -24,6 +35,21 @@ def escape_odata(value):
     encoded by requests. Names like ``O'Brien`` break the filter otherwise.
     """
     return str(value).replace("'", "''")
+
+
+def entity_meta(entity_set):
+    """Return ``(logical_name, primary_id_field)`` for a Web API entity set."""
+    if entity_set in _ENTITY_META:
+        return _ENTITY_META[entity_set]
+    logical = entity_set[:-1] if entity_set.endswith("s") else entity_set
+    return logical, f"{logical}id"
+
+
+def chunked(items, size):
+    """Yield successive slices of ``items`` with length ``size``."""
+    size = max(1, int(size))
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
 
 
 class DataverseClient:
@@ -261,6 +287,268 @@ class DataverseClient:
             self.update(entity_set, record_id, data)
             return record_id, False
         return self.create(entity_set, data), True
+
+    # -- bulk writes ------------------------------------------------------
+
+    def find_many_by_field(self, entity_set, match_field, values, select=None,
+                           chunk_size=DEFAULT_LOOKUP_CHUNK_SIZE):
+        """Return ``{match_value: record}`` for values that already exist.
+
+        Values are queried in chunks so OData filters stay within URL limits.
+        """
+        unique = []
+        seen = set()
+        for value in values:
+            if value is None or value == "":
+                continue
+            key = str(value)
+            if key not in seen:
+                seen.add(key)
+                unique.append(key)
+
+        if not unique:
+            return {}
+
+        logical, primary_id = entity_meta(entity_set)
+        columns = list(select or [])
+        for col in (match_field, primary_id):
+            if col not in columns:
+                columns.append(col)
+
+        found = {}
+        for chunk in chunked(unique, chunk_size):
+            filter_expr = " or ".join(
+                f"{match_field} eq '{escape_odata(v)}'" for v in chunk
+            )
+            rows = self.retrieve_multiple(
+                entity_set, select=columns, filter=filter_expr, top=len(chunk),
+            )
+            for row in rows:
+                match_value = row.get(match_field)
+                if match_value is not None:
+                    found[str(match_value)] = row
+        return found
+
+    def create_multiple(self, entity_set, records, logical_name=None):
+        """Create many rows via ``CreateMultiple`` (same table, one request).
+
+        Args:
+            entity_set: Plural set name, e.g. ``accounts``.
+            records: Payloads without ``@odata.type`` (added automatically).
+            logical_name: Entity logical name; inferred when omitted.
+
+        Returns:
+            list[str]: Created GUIDs in the same order as ``records``.
+        """
+        if not records:
+            return []
+
+        logical, _ = entity_meta(entity_set)
+        if logical_name is not None:
+            logical = logical_name
+        odata_type = f"Microsoft.Dynamics.CRM.{logical}"
+        targets = [{**row, "@odata.type": odata_type} for row in records]
+        response = self.request(
+            "POST",
+            f"{entity_set}/Microsoft.Dynamics.CRM.CreateMultiple",
+            json={"Targets": targets},
+        )
+        body = response.json() if response.content else {}
+        ids = body.get("Ids") or []
+        if len(ids) != len(records):
+            raise DataverseHTTPError(
+                f"CreateMultiple on {entity_set} returned {len(ids)} Ids for "
+                f"{len(records)} targets",
+                status_code=response.status_code,
+                body=response.text[:1000],
+                url=f"{entity_set}/Microsoft.Dynamics.CRM.CreateMultiple",
+            )
+        return [str(i) for i in ids]
+
+    def update_multiple(self, entity_set, records, logical_name=None):
+        """Update many rows via ``UpdateMultiple`` (same table, one request).
+
+        Each record must include the primary id attribute (e.g. ``accountid``).
+        """
+        if not records:
+            return
+
+        logical, primary_id = entity_meta(entity_set)
+        if logical_name is not None:
+            logical = logical_name
+        odata_type = f"Microsoft.Dynamics.CRM.{logical}"
+        targets = []
+        for row in records:
+            if primary_id not in row:
+                raise DataverseHTTPError(
+                    f"UpdateMultiple target for {entity_set} is missing {primary_id}"
+                )
+            targets.append({**row, "@odata.type": odata_type})
+
+        self.request(
+            "POST",
+            f"{entity_set}/Microsoft.Dynamics.CRM.UpdateMultiple",
+            json={"Targets": targets},
+        )
+
+    def upsert_multiple(self, entity_set, records, alternate_key_field,
+                        logical_name=None):
+        """Native ``UpsertMultiple`` using an alternate key on each target.
+
+        Requires the alternate key to exist on the table. Prefer
+        ``bulk_upsert_by_field`` when matching on a plain column without a key.
+
+        Each record must include ``alternate_key_field``. Returns ``None``
+        (Dataverse responds ``204 NoContent`` without per-row ids).
+        """
+        if not records:
+            return None
+
+        logical, _ = entity_meta(entity_set)
+        if logical_name is not None:
+            logical = logical_name
+        odata_type = f"Microsoft.Dynamics.CRM.{logical}"
+        targets = []
+        for row in records:
+            key_value = row.get(alternate_key_field)
+            if key_value is None or key_value == "":
+                raise DataverseHTTPError(
+                    f"UpsertMultiple target for {entity_set} is missing "
+                    f"alternate key {alternate_key_field}"
+                )
+            target = {
+                **row,
+                "@odata.type": odata_type,
+                "@odata.id": (
+                    f"{entity_set}({alternate_key_field}="
+                    f"'{escape_odata(key_value)}')"
+                ),
+            }
+            targets.append(target)
+
+        self.request(
+            "POST",
+            f"{entity_set}/Microsoft.Dynamics.CRM.UpsertMultiple",
+            json={"Targets": targets},
+        )
+        return None
+
+    def bulk_upsert_by_field(
+        self,
+        entity_set,
+        match_field,
+        records,
+        batch_size=None,
+        lookup_chunk_size=DEFAULT_LOOKUP_CHUNK_SIZE,
+        fallback_on_error=True,
+    ):
+        """Bulk create/update by matching on a plain column.
+
+        Looks up existing rows in chunks, then calls ``CreateMultiple`` /
+        ``UpdateMultiple`` in batches. Falls back to per-record
+        ``upsert_by_field`` when a bulk call fails (optional).
+
+        Args:
+            entity_set: Plural set name.
+            match_field: Column used to decide create vs update.
+            records: Payloads; each must include ``match_field``.
+            batch_size: Targets per CreateMultiple/UpdateMultiple request.
+                Defaults to ``config.bulk_batch_size`` (recommended 100–1000).
+            lookup_chunk_size: Values per OData filter for existence checks.
+            fallback_on_error: Retry failed batches record-by-record.
+
+        Returns:
+            list[tuple[str, str, bool]]: ``(match_value, record_id, created)``
+            in the same order as ``records``.
+        """
+        if not records:
+            return []
+
+        batch_size = batch_size or getattr(
+            self.config, "bulk_batch_size", DEFAULT_BULK_BATCH_SIZE
+        ) or DEFAULT_BULK_BATCH_SIZE
+        _, primary_id = entity_meta(entity_set)
+
+        prepared = []
+        for index, data in enumerate(records):
+            match_value = data.get(match_field)
+            if match_value is None or match_value == "":
+                raise DataverseHTTPError(
+                    f"bulk_upsert_by_field record[{index}] missing {match_field}"
+                )
+            prepared.append((str(match_value), dict(data)))
+
+        existing = self.find_many_by_field(
+            entity_set,
+            match_field,
+            [match for match, _ in prepared],
+            select=[match_field, primary_id],
+            chunk_size=lookup_chunk_size,
+        )
+
+        # Preserve input order in the final result list.
+        results = [None] * len(prepared)
+        creates = []  # (index, match_value, payload)
+        updates = []  # (index, match_value, payload_with_id)
+
+        for index, (match_value, payload) in enumerate(prepared):
+            row = existing.get(match_value)
+            if row and row.get(primary_id):
+                update_payload = {**payload, primary_id: row[primary_id]}
+                updates.append((index, match_value, update_payload))
+            else:
+                creates.append((index, match_value, payload))
+
+        def _create_batch(batch):
+            payloads = [payload for _, _, payload in batch]
+            try:
+                ids = self.create_multiple(entity_set, payloads)
+                for (index, match_value, _), record_id in zip(batch, ids):
+                    results[index] = (match_value, record_id, True)
+            except DataverseHTTPError:
+                if not fallback_on_error:
+                    raise
+                logger.warning(
+                    "CreateMultiple failed for %d %s; falling back to single creates",
+                    len(batch), entity_set,
+                )
+                for index, match_value, payload in batch:
+                    record_id, created = self.upsert_by_field(
+                        entity_set, match_field, match_value, payload
+                    )
+                    results[index] = (match_value, record_id, created)
+
+        def _update_batch(batch):
+            payloads = [payload for _, _, payload in batch]
+            try:
+                self.update_multiple(entity_set, payloads)
+                for index, match_value, payload in batch:
+                    results[index] = (match_value, payload[primary_id], False)
+            except DataverseHTTPError:
+                if not fallback_on_error:
+                    raise
+                logger.warning(
+                    "UpdateMultiple failed for %d %s; falling back to single updates",
+                    len(batch), entity_set,
+                )
+                for index, match_value, payload in batch:
+                    record_id = payload[primary_id]
+                    update_data = {
+                        k: v for k, v in payload.items() if k != primary_id
+                    }
+                    self.update(entity_set, record_id, update_data)
+                    results[index] = (match_value, record_id, False)
+
+        for batch in chunked(creates, batch_size):
+            _create_batch(batch)
+        for batch in chunked(updates, batch_size):
+            _update_batch(batch)
+
+        if any(item is None for item in results):
+            raise DataverseHTTPError(
+                f"bulk_upsert_by_field on {entity_set} produced incomplete results"
+            )
+        return results
 
     def close(self):
         self._session.close()

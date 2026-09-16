@@ -265,6 +265,80 @@ def test_upsert_creates_when_nothing_matches():
     assert (record_id, created) == (guid, True)
 
 
+def test_create_multiple_returns_ids_in_order():
+    client = make_client([
+        FakeResponse(200, {"Ids": ["id-1", "id-2"]}),
+    ])
+    ids = client.create_multiple(
+        "accounts",
+        [{"name": "A", "accountnumber": "1"}, {"name": "B", "accountnumber": "2"}],
+    )
+    assert ids == ["id-1", "id-2"]
+    call = client._session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("accounts/Microsoft.Dynamics.CRM.CreateMultiple")
+    targets = call["json"]["Targets"]
+    assert targets[0]["@odata.type"] == "Microsoft.Dynamics.CRM.account"
+    assert "accountnumber" in targets[0]
+
+
+def test_update_multiple_requires_primary_id():
+    client = make_client([])
+    with pytest.raises(DataverseHTTPError, match="accountid"):
+        client.update_multiple("accounts", [{"name": "A"}])
+
+
+def test_bulk_upsert_by_field_splits_create_and_update():
+    client = make_client([
+        # find_many lookup
+        FakeResponse(200, {"value": [{"accountid": "existing", "accountnumber": "W1"}]}),
+        # CreateMultiple (creates are sent before updates)
+        FakeResponse(200, {"Ids": ["new-id"]}),
+        # UpdateMultiple
+        FakeResponse(204),
+    ])
+    results = client.bulk_upsert_by_field(
+        "accounts",
+        "accountnumber",
+        [
+            {"accountnumber": "W1", "name": "Updated"},
+            {"accountnumber": "W2", "name": "Created"},
+        ],
+        batch_size=100,
+        fallback_on_error=False,
+    )
+    assert results == [
+        ("W1", "existing", False),
+        ("W2", "new-id", True),
+    ]
+    methods = [c["method"] for c in client._session.calls]
+    assert methods == ["GET", "POST", "POST"]
+    assert client._session.calls[1]["url"].endswith(
+        "accounts/Microsoft.Dynamics.CRM.CreateMultiple"
+    )
+    assert client._session.calls[2]["url"].endswith(
+        "accounts/Microsoft.Dynamics.CRM.UpdateMultiple"
+    )
+
+
+def test_bulk_upsert_falls_back_to_single_on_create_failure():
+    guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # lookup
+        FakeResponse(400, {"error": {"message": "plugin failed"}}),  # CreateMultiple
+        # fallback upsert_by_field: find + create
+        FakeResponse(200, {"value": []}),
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/accounts({guid})"}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "accounts",
+        "accountnumber",
+        [{"accountnumber": "W1", "name": "X"}],
+        fallback_on_error=True,
+    )
+    assert results == [("W1", guid, True)]
+
+
 def test_odata_quotes_are_escaped():
     # O'Brien would otherwise terminate the filter literal early.
     assert escape_odata("O'Brien") == "O''Brien"
