@@ -46,12 +46,36 @@ def specialties(entity):
 
 _ADDRESS_FIELDS = (
     "addressEid",
+    "buildingLabel",
     "street",
     "postalCode",
     "city",
+    "county",
+    "district",
     "country",
     "addressType",
 )
+
+
+def _subdivision_label(town, *type_codes):
+    """Return first matching subdivision localized label (e.g. COUNTY, DISTRICT)."""
+    subs = (town or {}).get("subdivisions") or {}
+    if not isinstance(subs, dict):
+        return None
+    wanted = {c.upper() for c in type_codes}
+    for entry in subs.values():
+        if not isinstance(entry, dict):
+            continue
+        code = (entry.get("typeCode") or entry.get("subdivisionType") or "").upper()
+        if code in wanted:
+            label = (
+                entry.get("longLocalizedLabel")
+                or entry.get("longLabel")
+                or entry.get("shortLocalizedLabel")
+            )
+            if label:
+                return label
+    return None
 
 
 def primary_address(workplace):
@@ -61,6 +85,10 @@ def primary_address(workplace):
     back to whichever address is ranked first. Always returns the same keys,
     valued None when the entity carries no address, so that flattened rows keep
     a stable column set for CSV or dataframe export.
+
+    UK OneKey often omits ``addressLongLabel`` and only sends
+    ``addressShortLabel`` (street) plus ``buildingLabel`` on the workplace
+    address entry.
     """
     empty = {field: None for field in _ADDRESS_FIELDS}
 
@@ -77,14 +105,64 @@ def primary_address(workplace):
     address = entry.get("address") or {}
     town = address.get("postalTownReference") or {}
 
+    street = (
+        address.get("addressLongLabel")
+        or address.get("addressShortLabel")
+        or address.get("extensionLabel")
+    )
+
     return {
         **empty,
         "addressEid": address.get("addressEid"),
-        "street": address.get("addressLongLabel"),
-        "postalCode": address.get("longPostalCode"),
+        "buildingLabel": entry.get("buildingLabel") or address.get("buildingLabel"),
+        "street": street,
+        "postalCode": address.get("longPostalCode") or address.get("postalCode"),
         "city": town.get("villageLabel") or town.get("dispatchLabel"),
+        "county": _subdivision_label(town, "COUNTY", "SUB.3"),
+        "district": _subdivision_label(town, "DISTRICT", "SUB.5"),
         "country": town.get("country"),
         "addressType": entry.get("typeCode"),
+    }
+
+
+def compose_hcp_result(individual_record=None, activity_record=None, workplace_record=None):
+    """Build a search-shaped ACTIVITY result from population entity rows.
+
+    ``/pop/refreshMyOnekey`` returns WORKPLACE, INDIVIDUAL, and ACTIVITY as
+    separate rows. ACTIVITY rows carry only the ``activity`` object (with
+    ``individualEid`` / ``workplaceEid`` links); person and workplace detail
+    live on the other entity types. Search (``/ok/search``) embeds all three.
+    This helper reassembles the nested shape ``flatten_hcp`` expects.
+    """
+    activity_record = activity_record or {}
+    individual_record = individual_record or {}
+    workplace_record = workplace_record or {}
+    activity = activity_record.get("activity") or {}
+    individual = individual_record.get("individual") or {}
+    workplace = workplace_record.get("workplace") or {}
+
+    return {
+        "onekeyEid": activity_record.get("onekeyEid") or activity.get("activityEid"),
+        "entityType": "ACTIVITY",
+        "country": (
+            individual_record.get("country")
+            or activity_record.get("country")
+            or workplace_record.get("country")
+        ),
+        "codBase": (
+            individual_record.get("codBase")
+            or activity_record.get("codBase")
+            or workplace_record.get("codBase")
+        ),
+        "isInContract": activity_record.get("isInContract"),
+        "isPrivacyLaw": (
+            individual_record.get("isPrivacyLaw")
+            if individual_record.get("isPrivacyLaw") is not None
+            else activity_record.get("isPrivacyLaw")
+        ),
+        "activity": activity,
+        "individual": individual,
+        "workplace": workplace,
     }
 
 
@@ -95,6 +173,9 @@ def flatten_hcp(result):
     person, their role there, and that workplace's address. The same individual
     appears once per workplace they practise at, each with its own
     ``activityEid``.
+
+    Population ACTIVITY rows may omit nested ``individual`` / ``workplace``;
+    EIDs then fall back to fields on ``activity``.
     """
     individual = result.get("individual") or {}
     activity = result.get("activity") or {}
@@ -104,8 +185,8 @@ def flatten_hcp(result):
     return {
         "onekeyEid": result.get("onekeyEid"),
         "activityEid": activity.get("activityEid"),
-        "individualEid": individual.get("individualEid"),
-        "workplaceEid": workplace.get("workplaceEid"),
+        "individualEid": individual.get("individualEid") or activity.get("individualEid"),
+        "workplaceEid": workplace.get("workplaceEid") or activity.get("workplaceEid"),
         "firstName": individual.get("firstName"),
         "lastName": individual.get("lastName"),
         "gender": individual.get("genderLabel"),
@@ -115,8 +196,8 @@ def flatten_hcp(result):
         "typeLabel": individual.get("typeCorporateLabel") or individual.get("typeLabel"),
         "specialtyCode": specialty.get("code"),
         "specialtyLabel": specialty.get("corporateLabel") or specialty.get("label"),
-        "statusCode": individual.get("statusCode"),
-        "isValid": individual.get("statusCode") == "3",
+        "statusCode": individual.get("statusCode") or activity.get("statusCode"),
+        "isValid": (individual.get("statusCode") or activity.get("statusCode")) == "3",
         "workplaceName": workplace.get("officialName") or workplace.get("usualName"),
         "country": result.get("country"),
         "codBase": result.get("codBase"),

@@ -2,7 +2,7 @@
 """Link HCO parent/child hierarchy in Dataverse via bulk UpdateMultiple.
 
 Reads workplace -> managerWorkplaceEid edges from OneKey, resolves both sides
-to Dataverse account GUIDs (by accountnumber), then sets
+to Dataverse account GUIDs (by cr4ec_externalid), then sets
 parentaccountid@odata.bind in batches.
 
 Usage:
@@ -21,10 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dataverse import DataverseClient, DataverseConfig, DataverseHTTPError
-from dataverse.client import chunked
+from dataverse import DataverseClient, DataverseConfig
 from integration import setup_logging
 from integration.env import load_env
+from integration.hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from onekey import OneKeyClient, OneKeyConfig, OneKeySession
 from onekey.parse import flatten_hco
 
@@ -82,20 +82,11 @@ def iter_workplaces(client: OneKeyClient, codebase: str):
 
 def collect_edges(client: OneKeyClient, codebase: str) -> list[tuple[str, str]]:
     """Return (child_eid, parent_eid) pairs from OneKey workplaces."""
-    edges = []
-    workplaces = 0
-    for hco in iter_workplaces(client, codebase):
-        workplaces += 1
-        child = hco.get("workplaceEid")
-        parent = hco.get("parentWorkplaceEid")
-        if not child or not parent:
-            continue
-        if child == parent:
-            continue
-        edges.append((str(child), str(parent)))
+    flattened = list(iter_workplaces(client, codebase))
+    edges = edges_from_hcos(flattened)
     logger.info(
         "OneKey %s: %d workplaces, %d parent edges",
-        codebase, workplaces, len(edges),
+        codebase, len(flattened), len(edges),
     )
     return edges
 
@@ -116,123 +107,6 @@ def load_edges(path: Path) -> list[tuple[str, str]]:
     edges = [(e["child"], e["parent"]) for e in data.get("edges", [])]
     logger.info("Loaded %d edges from cache %s", len(edges), path)
     return edges
-
-
-def resolve_accounts(dataverse: DataverseClient, eids: list[str]) -> dict[str, dict]:
-    """Map accountnumber -> {accountid, _parentaccountid_value}."""
-    return dataverse.find_many_by_field(
-        "accounts",
-        "accountnumber",
-        eids,
-        select=["accountnumber", "accountid", "_parentaccountid_value"],
-        chunk_size=50,
-    )
-
-
-def build_updates(
-    edges: list[tuple[str, str]],
-    accounts: dict[str, dict],
-    skip_unchanged: bool,
-) -> tuple[list[dict], dict]:
-    """Build UpdateMultiple targets and a stats dict."""
-    stats = {
-        "edges": len(edges),
-        "ready": 0,
-        "missing_child": 0,
-        "missing_parent": 0,
-        "already_linked": 0,
-        "self_ref": 0,
-    }
-    updates = []
-    missing_children = []
-    missing_parents = set()
-
-    for child_eid, parent_eid in edges:
-        child = accounts.get(child_eid)
-        parent = accounts.get(parent_eid)
-        if not child or not child.get("accountid"):
-            stats["missing_child"] += 1
-            missing_children.append(child_eid)
-            continue
-        if not parent or not parent.get("accountid"):
-            stats["missing_parent"] += 1
-            missing_parents.add(parent_eid)
-            continue
-
-        child_id = child["accountid"]
-        parent_id = parent["accountid"]
-        if child_id == parent_id:
-            stats["self_ref"] += 1
-            continue
-
-        current_parent = child.get("_parentaccountid_value")
-        if skip_unchanged and current_parent and str(current_parent).lower() == str(parent_id).lower():
-            stats["already_linked"] += 1
-            continue
-
-        updates.append({
-            "accountid": child_id,
-            "accountnumber": child_eid,
-            "parentaccountid@odata.bind": f"/accounts({parent_id})",
-        })
-        stats["ready"] += 1
-
-    stats["missing_parent_unique"] = len(missing_parents)
-    if missing_children[:5]:
-        logger.warning("Sample missing child accounts: %s", missing_children[:5])
-    if list(missing_parents)[:5]:
-        logger.warning("Sample missing parent accounts: %s", list(missing_parents)[:5])
-    return updates, stats
-
-
-def apply_updates(
-    dataverse: DataverseClient,
-    updates: list[dict],
-    batch_size: int,
-) -> tuple[int, int]:
-    """Send UpdateMultiple batches. Returns (updated, failed)."""
-    updated = failed = 0
-    total = len(updates)
-    for i, batch in enumerate(chunked(updates, batch_size), 1):
-        # UpdateMultiple only needs id + bind; drop accountnumber helper field.
-        payloads = [
-            {
-                "accountid": row["accountid"],
-                "parentaccountid@odata.bind": row["parentaccountid@odata.bind"],
-            }
-            for row in batch
-        ]
-        try:
-            dataverse.update_multiple("accounts", payloads)
-            updated += len(batch)
-            logger.info(
-                "UpdateMultiple batch %d: linked %d/%d (running total %d)",
-                i, len(batch), total, updated,
-            )
-        except DataverseHTTPError as exc:
-            logger.warning(
-                "UpdateMultiple batch %d failed (%s); falling back to single PATCH",
-                i, exc,
-            )
-            for row in batch:
-                try:
-                    dataverse.update(
-                        "accounts",
-                        row["accountid"],
-                        {
-                            "parentaccountid@odata.bind": row[
-                                "parentaccountid@odata.bind"
-                            ],
-                        },
-                    )
-                    updated += 1
-                except DataverseHTTPError as single_exc:
-                    failed += 1
-                    logger.error(
-                        "Failed to link %s: %s",
-                        row.get("accountnumber"), single_exc,
-                    )
-    return updated, failed
 
 
 def main():
@@ -269,7 +143,7 @@ def main():
         return 0
 
     eids = sorted({eid for pair in edges for eid in pair})
-    logger.info("Resolving %d accountnumbers in Dataverse...", len(eids))
+    logger.info("Resolving %d cr4ec_externalid values in Dataverse...", len(eids))
 
     if args.dry_run:
         # Still need live lookups to report readiness unless mocked.
@@ -295,7 +169,7 @@ def main():
         for row in updates[:10]:
             logger.info(
                 "DRY RUN would set %s -> %s",
-                row["accountnumber"],
+                row["cr4ec_externalid"],
                 row["parentaccountid@odata.bind"],
             )
         if len(updates) > 10:

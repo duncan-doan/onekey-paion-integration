@@ -38,7 +38,7 @@ from .exceptions import (
     OneKeyNotFoundError,
     OneKeyRateLimitError,
 )
-from .parse import flatten_hco, flatten_hcp, primary_address, specialties
+from .parse import flatten_hco, flatten_hcp, compose_hcp_result, primary_address, specialties
 
 __version__ = "0.1.0"
 
@@ -67,6 +67,7 @@ __all__ = [
     "basic_auth_header",
     "flatten_hco",
     "flatten_hcp",
+    "compose_hcp_result",
     "primary_address",
     "search_field",
     "specialties",

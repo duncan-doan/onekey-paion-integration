@@ -83,14 +83,12 @@ Entra rejects the request without it.
 
 | | Dataverse column | Holds |
 | --- | --- | --- |
-| account (HCO) | `accountnumber` | OneKey `workplaceEid` |
+| account (HCO) | `cree7_externalid` | OneKey `workplaceEid` |
 | contact (HCP) | `externaluseridentifier` | OneKey `individualEid` |
 
-`accountnumber` follows the convention already in the org, which has an active
-alternate key `cree7_onekeyid` on it. Contact has no OneKey column, so the
-out-of-box `externaluseridentifier` is borrowed. Records are matched before
-writing, so a re-run updates rather than duplicates — verified: a second
-identical run reports `0 created, 15 updated`.
+`cree7_externalid` is the org alternate key (`cree7_onekeyid`). Contact has no
+dedicated OneKey column, so the out-of-box `externaluseridentifier` is borrowed.
+Records are matched before writing, so a re-run updates rather than duplicates.
 
 ## What gets loaded
 
@@ -99,7 +97,7 @@ identical run reports `0 created, 15 updated`.
 | account (HCO) | contact (HCP) |
 | --- | --- |
 | `name` | `firstname`, `lastname` |
-| `accountnumber` | `externaluseridentifier` |
+| `cree7_externalid` | `externaluseridentifier` |
 | `description` — type, specialty, provenance | `jobtitle`, `gendercode` |
 | | `parentcustomerid` → its account |
 

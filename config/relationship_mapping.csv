@@ -8,4 +8,4 @@ REL-002,HCP to Workplace,contact,externaluseridentifier,account,parentcustomerid
 REL-003,HCP to Managing Partner,contact,externaluseridentifier,account,msa_managingpartnerid,many_to_one,accountnumber,FALSE,2,Optional parent hospital link,Parent hospital via workplace.managerWorkplaceEid (alternative to Account hierarchy)
 REL-004,HCO to HCO Relations,account,accountnumber,account,N/A,many_to_many,accountnumber,FALSE,3,Requires Connection entity,workplace.relations[] with linkCode AUT/AFF for affiliations
 REL-005,HCP Multi-Activity,contact,externaluseridentifier,account,N/A,many_to_many,accountnumber,FALSE,4,Requires custom fc_hcpaffiliation entity,One Individual with multiple Activities at different workplaces
-REL-006,HCO to Address,address,externalid,account,parentid,many_to_one,externalid,TRUE,5,,
+REL-006,HCO to Address,address,cr4ec_externalid,account,parentid,many_to_one,cr4ec_externalid,TRUE,5,Duplicate shared OneKey addresses per HCO; key=workplaceEid - addressEid,OneKey Address↔HCO is N-N; Dataverse keeps Account→CustomerAddress 1-n so same addressEid under two HCOs becomes two rows

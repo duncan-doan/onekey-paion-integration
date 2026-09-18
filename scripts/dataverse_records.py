@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Step 2 - read and write HCO/HCP records in Dynamics 365 Dataverse.
 
-    HCO -> account    keyed on accountnumber
+    HCO -> account    keyed on cr4ec_externalid
     HCP -> contact    keyed on externaluseridentifier
 
 Commands:

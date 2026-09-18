@@ -93,7 +93,7 @@ This file defines **what objects exist** in both OneKey and Dataverse.
 | `entity_set` | API collection name (Dataverse only) | `accounts`, `contacts` |
 | `primary_key` | Main ID field | `accountid`, `workplaceEid` |
 | `alternate_key` | Has alternate key for upsert? | `Yes` or `No` |
-| `alternate_key_field` | Field used for upsert matching | `accountnumber` |
+| `alternate_key_field` | Field used for upsert matching | `cree7_externalid` |
 | `is_required` | Must this entity be synced? | `true` or `false` |
 | `load_order` | Sync sequence (1=first) | `1`, `2`, `3` |
 | `parent_entity` | Depends on which entity | `account` |
@@ -128,7 +128,7 @@ This file defines **what objects exist** in both OneKey and Dataverse.
 #### Example Entry
 
 ```csv
-ENT-DV-001,Dataverse,account,accounts,accountid,Yes,accountnumber,true,1,,"Healthcare Organization (HCO)"
+ENT-DV-001,Dataverse,account,accounts,accountid,Yes,cree7_externalid,true,1,,"Healthcare Organization (HCO)"
 ```
 
 This means:
@@ -136,7 +136,7 @@ This means:
 - **Entity**: `account` table
 - **API endpoint**: `/accounts`
 - **Primary key**: `accountid` (GUID)
-- **Alternate key**: `accountnumber` (for upsert by OneKey workplaceEid)
+- **Alternate key**: `cree7_externalid` / `cree7_onekeyid` (for upsert by OneKey workplaceEid)
 - **Load order**: 1 (load first, before contacts)
 
 ### 3.2 Adding a New Entity
@@ -172,14 +172,14 @@ This is the **main mapping file** that defines how each OneKey field maps to a D
 | `source_field_path` | Full path in raw JSON | `workplace.workplaceEid` |
 | `target_platform` | Always `Dataverse` | `Dataverse` |
 | `target_entity` | Dataverse table | `account`, `contact` |
-| `target_field` | Dataverse column | `accountnumber`, `lastname` |
+| `target_field` | Dataverse column | `cree7_externalid`, `lastname` |
 | `target_field_type` | Data type | `string`, `picklist`, `lookup` |
 | `max_length` | Max characters (for strings) | `50`, `160` |
 | `is_required` | Must have value? | `true` / `false` |
 | `is_key` | Is this the upsert key? | `true` / `false` |
 | `is_lookup` | Is this a relationship? | `true` / `false` |
 | `lookup_entity` | Related entity (if lookup) | `account` |
-| `lookup_key_field` | Field to match (if lookup) | `accountnumber` |
+| `lookup_key_field` | Field to match (if lookup) | `cree7_externalid` |
 | `transform_rule` | How to transform value | `direct`, `map:M=1\|F=2` |
 | `default_value` | Fallback if empty | `Unknown` |
 | `notes` | Documentation | Free text |
@@ -231,11 +231,11 @@ HCP-004,OneKey,Individual,genderCode,individual.genderCode,Dataverse,contact,gen
 
 #### Example 3: Lookup Relationship
 ```csv
-HCP-010,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,contact,parentcustomerid,lookup,,false,false,true,account,accountnumber,lookup_by_key,,Link to workplace
+HCP-010,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,contact,parentcustomerid,lookup,,false,false,true,account,cree7_externalid,lookup_by_key,,Link to workplace
 ```
 - **Source**: `workplaceEid` from Activity
 - **Target**: `parentcustomerid` lookup field
-- **Transform**: Find account where `accountnumber` = workplaceEid, bind to GUID
+- **Transform**: Find account where `cree7_externalid` = workplaceEid, bind to GUID
 
 #### Example 4: Fallback/Coalesce
 ```csv
@@ -255,7 +255,7 @@ HCP-003,OneKey,Individual,lastName,individual.lastName,Dataverse,contact,lastnam
 │  OneKey Workplace                        Dataverse account                  │
 │  ─────────────────                       ─────────────────                  │
 │                                                                             │
-│  workplaceEid ──────── direct ────────► accountnumber (KEY)                │
+│  workplaceEid ──────── direct ────────► cree7_externalid (KEY)              │
 │  officialName ──────── coalesce ──────► name                               │
 │  usualName    ─────────┘                                                   │
 │  typeCode ───────────── direct ────────► sic                               │
@@ -314,7 +314,7 @@ This file defines **how entities relate to each other** and the order they must 
 | `target_entity` | Parent entity | `account` |
 | `target_field` | Lookup field name | `parentcustomerid` |
 | `relationship_type` | Type of relationship | `many_to_one`, `self_referential` |
-| `lookup_key_field` | Parent's match field | `accountnumber` |
+| `lookup_key_field` | Parent's match field | `cree7_externalid` |
 | `is_required` | Must parent exist? | `true` / `false` |
 | `load_order` | Processing sequence | `1`, `2` |
 | `notes` | Technical notes | Free text |
@@ -338,7 +338,7 @@ This file defines **how entities relate to each other** and the order they must 
 │                                                                             │
 │                        ┌─────────────────┐                                  │
 │                        │     account     │                                  │
-│                        │ (accountnumber) │                                  │
+│                        │ (cree7_externalid) │                                │
 │                        └────────┬────────┘                                  │
 │                                 │                                           │
 │              ┌──────────────────┼──────────────────┐                       │
@@ -468,7 +468,7 @@ This file defines **validation rules** for Dataverse fields.
 
 | Entity | Field | Constraint | Value | Action |
 |--------|-------|------------|-------|--------|
-| account | accountnumber | max_length | 20 | truncate |
+| account | cree7_externalid | max_length | 100 | truncate |
 | account | name | max_length | 160 | truncate |
 | account | name | required | true | error |
 | contact | externaluseridentifier | max_length | 50 | truncate |
@@ -529,14 +529,14 @@ ENT-DV-006,Dataverse,fc_affiliation,fc_affiliations,fc_affiliationid,Yes,fc_affi
 **Step 2**: Add relationships to `relationship_mapping.csv`
 ```csv
 REL-006,Affiliation to HCP,fc_affiliation,fc_affiliationkey,contact,fc_hcpid,many_to_one,externaluseridentifier,true,3,"Affiliation belongs to HCP",Links affiliation to healthcare professional
-REL-007,Affiliation to HCO,fc_affiliation,fc_affiliationkey,account,fc_hcoid,many_to_one,accountnumber,true,3,"Affiliation belongs to HCO",Links affiliation to healthcare organization
+REL-007,Affiliation to HCO,fc_affiliation,fc_affiliationkey,account,fc_hcoid,many_to_one,cree7_externalid,true,3,"Affiliation belongs to HCO",Links affiliation to healthcare organization
 ```
 
 **Step 3**: Add field mappings to `entity_mapping.csv`
 ```csv
 AFF-001,OneKey,Activity,activityEid,activity.activityEid,Dataverse,fc_affiliation,fc_affiliationkey,string,50,true,true,false,,,direct,,Primary key
 AFF-002,OneKey,Activity,individualEid,activity.individualEid,Dataverse,fc_affiliation,fc_hcpid,lookup,,true,false,true,contact,externaluseridentifier,lookup_by_key,,Link to HCP
-AFF-003,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,fc_affiliation,fc_hcoid,lookup,,true,false,true,account,accountnumber,lookup_by_key,,Link to HCO
+AFF-003,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,fc_affiliation,fc_hcoid,lookup,,true,false,true,account,cree7_externalid,lookup_by_key,,Link to HCO
 AFF-004,OneKey,Activity,roleLabel,activity.roleLabel,Dataverse,fc_affiliation,fc_role,string,100,false,false,false,,,direct,,Role at workplace
 AFF-005,OneKey,Activity,isMainActivity,activity.isMainActivity,Dataverse,fc_affiliation,fc_ismain,boolean,,false,false,false,,,direct,,Is primary affiliation
 AFF-006,OneKey,Activity,statusCode,activity.statusCode,Dataverse,fc_affiliation,statecode,state,,false,false,false,,,map:3=0|9=1,,Status
@@ -691,7 +691,7 @@ These field names come from `flatten_hcp()` in `onekey/parse.py`:
 
 | Field | Type | Max Length | Required | Notes |
 |-------|------|------------|----------|-------|
-| `accountnumber` | String | 20 | Yes (key) | Alternate key for upsert |
+| `cree7_externalid` | String | 100 | Yes (key) | Alternate key cree7_onekeyid for upsert |
 | `name` | String | 160 | Yes | Organization name |
 | `statecode` | State | - | No | 0=Active, 1=Inactive |
 | `parentaccountid` | Lookup | - | No | Parent account |

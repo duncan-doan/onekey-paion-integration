@@ -373,8 +373,9 @@ HCP = {
 }
 
 
-def test_hco_maps_the_onekey_id_into_accountnumber():
+def test_hco_maps_the_onekey_id_into_cr4ec_externalid():
     assert hco_to_account(HCO)[ACCOUNT_KEY_FIELD] == "WDEH02963729"
+    assert ACCOUNT_KEY_FIELD == "cr4ec_externalid"
 
 
 def test_hcp_maps_the_onekey_id_into_externaluseridentifier():

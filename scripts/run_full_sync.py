@@ -4,7 +4,7 @@
 Does in one pass what steps 1 and 2 do separately. Use this for a real run; use
 the separate scripts when you want to inspect or edit the data in between.
 
-    OneKey workplace  (HCO) -> Dataverse account   keyed on accountnumber
+    OneKey workplace  (HCO) -> Dataverse account   keyed on cr4ec_externalid
     OneKey individual (HCP) -> Dataverse contact   keyed on externaluseridentifier
 
 Examples:

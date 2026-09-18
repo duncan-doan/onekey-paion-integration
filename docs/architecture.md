@@ -49,8 +49,15 @@ Don't assume one from the other — OneKey has no token endpoint at all.
 
 | Entity | Dataverse column | Holds |
 | --- | --- | --- |
-| HCO → `account` | `accountnumber` | OneKey `workplaceEid` |
+| HCO → `account` | `cree7_externalid` | OneKey `workplaceEid` |
 | HCP → `contact` | `externaluseridentifier` | OneKey `individualEid` |
+| Address → `customeraddress` | `cree7_externalid` | `{workplaceEid} - {addressEid}` |
 
-Both are matched before writing, so a re-run updates in place rather than
-duplicating.
+Account and contact are matched before writing, so a re-run updates in place
+rather than duplicating.
+
+**HCO–Address:** OneKey models Address↔Workplace as N-N (many HCOs can share
+one address). Dataverse keeps Account→CustomerAddress as 1-n, so the sync
+**duplicates** shared addresses: each HCO gets its own `customeraddress` row
+with the same street details but a distinct composite key and `parentid` bind
+to that Account.

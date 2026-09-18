@@ -8,10 +8,12 @@
 
 | OneKey Entity | Dataverse Entity | Key Field Mapping | Load Order |
 |---------------|------------------|-------------------|------------|
-| **Workplace** (HCO) | `account` | `workplaceEid` → `accountnumber` | 1 |
+| **Workplace** (HCO) | `account` | `workplaceEid` → `cree7_externalid` | 1 |
 | **Individual** (HCP) | `contact` | `individualEid` → `externaluseridentifier` | 2 |
 | Activity | (embedded in contact) | `activityEid` | - |
-| Address | `address1_*` fields | `addressEid` | - |
+| Address | `customeraddress` | `{workplaceEid} - {addressEid}` → `cree7_externalid` | 3 |
+
+> **Address duplication:** OneKey Address↔HCO is N-N. Dataverse keeps Account→CustomerAddress as **1-n**, so a shared physical address is written once per HCO with a distinct composite key (same street/city, different `cree7_externalid`).
 
 ---
 
@@ -21,7 +23,7 @@
 
 | OneKey Field | → | Dataverse Field | Transform |
 |--------------|---|-----------------|-----------|
-| `workplaceEid` | → | `accountnumber` | direct (KEY) |
+| `workplaceEid` | → | `cree7_externalid` | direct (KEY) |
 | `officialName` | → | `name` | coalesce:usualName |
 | `typeCode` | → | `sic` | direct |
 | `statusCode` | → | `statecode` | map: 3→0, 9→1 |
@@ -44,6 +46,18 @@
 | `statusCode` | → | `statecode` | map: 3→0, 9→1 |
 | `workplaceEid` | → | `parentcustomerid` | lookup |
 | `usualName` | → | `department` | direct |
+
+### Address (Workplace address → CustomerAddress)
+
+| OneKey Field | → | Dataverse Field | Transform |
+|--------------|---|-----------------|-----------|
+| `workplaceEid` + `addressEid` | → | `cree7_externalid` | composite KEY: `{workplaceEid} - {addressEid}` |
+| `address_street` | → | `line1` | direct |
+| `address_city` | → | `city` | direct |
+| `address_postalCode` | → | `postalcode` | direct |
+| `address_country` | → | `country` | direct |
+| `address_addressType` | → | `addresstypecode` | decode:addresstype |
+| `workplaceEid` | → | `parentid` | lookup Account by `cree7_externalid` |
 
 ---
 
@@ -106,7 +120,7 @@ O → Office (14)
 
 | Entity | Field | Max Length |
 |--------|-------|------------|
-| account | accountnumber | 20 |
+| account | cree7_externalid | 100 |
 | account | name | 160 |
 | account | description | 2000 |
 | account | address1_line1 | 250 |

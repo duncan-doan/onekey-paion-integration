@@ -8,15 +8,12 @@ Identity
 Re-running a sync must update records rather than duplicate them, so each row
 carries its OneKey id:
 
-    account.accountnumber          <- workplaceEid   (max 20 chars)
+    account.cr4ec_externalid       <- workplaceEid   (max 100 chars; KEY)
     contact.externaluseridentifier <- individualEid  (max 50 chars)
 
-``accountnumber`` follows the convention already present in the target org.
-Neither table has a custom OneKey column, so ``externaluseridentifier`` is
-borrowed on the contact side; it is an out-of-box text field intended for
-external identity, which is the closest stock fit. If OneKey ever becomes the
-system of record here, promote both to a proper custom column and an alternate
-key so Dataverse can upsert natively.
+``cr4ec_externalid`` is the org alternate key (``cr4ec_onekeyid``). Account
+number is no longer the upsert key. ``externaluseridentifier`` is borrowed on
+the contact side as the closest stock external-identity field.
 
 Addresses
 ---------
@@ -24,7 +21,7 @@ Addresses are **not** loaded. Only identity, classification and the
 account/contact relationship are written.
 
 This is not just a preference: the target environment cannot accept them. An
-alternate key ``cree7_externalkey`` is defined on
+alternate key ``cr4ec_externalkey`` is defined on
 ``customeraddress.addressnumber``, which forces that column to be unique across
 the whole org -- but Dynamics numbers every record's addresses 1 and 2, so the
 second address row of any kind violates it. Writing any ``address1_*`` field
@@ -39,6 +36,7 @@ on without rework once that key is removed.
 MAX_LENGTHS = {
     "account": {
         "name": 160,
+        "cr4ec_externalid": 100,
         "accountnumber": 20,
         "address1_line1": 250,
         "address1_city": 80,
@@ -68,7 +66,7 @@ GENDER_CODES = {"M": 1, "F": 2}
 # account.address1_addresstypecode: 3 == Primary.
 ADDRESS_TYPE_PRIMARY = 3
 
-ACCOUNT_KEY_FIELD = "accountnumber"
+ACCOUNT_KEY_FIELD = "cr4ec_externalid"
 CONTACT_KEY_FIELD = "externaluseridentifier"
 
 

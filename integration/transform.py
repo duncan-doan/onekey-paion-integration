@@ -7,8 +7,9 @@ OneKey records into Dataverse payloads.
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Any
+
+from .picklist_gaps import PicklistGapCollector
 
 if TYPE_CHECKING:
     from .dynamic_mapping import FieldMapping, MappingConfig
@@ -21,65 +22,65 @@ class TransformEngine:
     
     def __init__(self, config: "MappingConfig"):
         self.config = config
+        self.picklist_gaps = PicklistGapCollector()
+        self._current_entity: str = ""
+        self._current_eid: str = ""
     
+    def begin_record(self, target_entity: str, source_eid: str | None = None) -> None:
+        """Set context used when recording picklist gaps for the next transform."""
+        self._current_entity = target_entity or ""
+        self._current_eid = source_eid or ""
+
     def transform_hco(
         self,
         source: dict,
-        include_address: bool = False,
         parent_account_id: str = None,
+        **_deprecated,
     ) -> dict:
         """Transform OneKey HCO (flattened) to Dataverse Account payload.
-        
-        Args:
-            source: Flattened HCO record from onekey.parse.flatten_hco
-            include_address: Whether to include address fields
-            parent_account_id: GUID of parent account for hierarchy
-            
-        Returns:
-            dict: Dataverse Web API payload for account
+
+        Address fields go to ``customeraddress`` (never ``address1_*``).
+        Parent hierarchy is normally applied in a separate phase; pass
+        ``parent_account_id`` only when binding inline.
         """
+        if "include_address" in _deprecated:
+            logger.debug("include_address is ignored; use customeraddress phase")
+        self.begin_record("account", source.get("workplaceEid"))
         payload = {}
         description_parts = []
-        
+
         mappings = self.config.get_field_mappings("account")
-        
+
         for fm in mappings:
-            # Skip address fields if not requested
-            if not include_address and fm.target_field.startswith("address1_"):
+            if fm.target_field.startswith("address1_"):
                 continue
-            
-            # Extract source value
+            if fm.target_field == "parentaccountid":
+                continue
+
             value = self._extract_value(source, fm.source_field)
-            
-            # Apply transform rule
             transformed = self._apply_transform(value, fm, source)
-            
+
             if transformed is None:
                 continue
-            
-            # Handle description aggregation
+
             if fm.target_field == "description" and fm.transform_rule.startswith("template:"):
                 if transformed:
                     description_parts.append(transformed)
                 continue
-            
-            # Apply max length
+
             if fm.max_length and isinstance(transformed, str):
                 transformed = transformed[:fm.max_length]
-            
+
             payload[fm.target_field] = transformed
-        
-        # Build description from parts
+
         if description_parts:
             existing = payload.get("description", "")
             all_parts = ([existing] if existing else []) + description_parts
             payload["description"] = "\n".join(p for p in all_parts if p)
-        
-        # Handle parent account binding
+
         if parent_account_id:
             payload["parentaccountid@odata.bind"] = f"/accounts({parent_account_id})"
-        
-        # Account name is mandatory; honour mapping default when still empty.
+
         if not (payload.get("name") or "").strip():
             name_mapping = self.config.get_field_mappings("account")
             default_name = next(
@@ -87,57 +88,45 @@ class TransformEngine:
                 None,
             )
             payload["name"] = (default_name or "noname")[:160]
-        
-        # Remove None values
+
         return {k: v for k, v in payload.items() if v is not None}
-    
+
     def transform_hcp(
         self,
         source: dict,
-        include_address: bool = False,
         account_id: str = None,
+        **_deprecated,
     ) -> dict:
         """Transform OneKey HCP (flattened) to Dataverse Contact payload.
-        
-        Args:
-            source: Flattened HCP record from onekey.parse.flatten_hcp
-            include_address: Whether to include address fields
-            account_id: GUID of parent account to link
-            
-        Returns:
-            dict: Dataverse Web API payload for contact
+
+        Address fields go to ``customeraddress`` (never ``address1_*``).
         """
+        if "include_address" in _deprecated:
+            logger.debug("include_address is ignored; use customeraddress phase")
+        self.begin_record("contact", source.get("individualEid"))
         payload = {}
         description_parts = []
         jobtitle_parts = []
-        
+
         mappings = self.config.get_field_mappings("contact")
-        
+
         for fm in mappings:
-            # Skip address fields if not requested
-            if not include_address and fm.target_field.startswith("address1_"):
+            if fm.target_field.startswith("address1_"):
                 continue
-            
-            # Skip lookup field - handled separately
             if fm.target_field == "parentcustomerid":
                 continue
-            
-            # Extract source value
+
             value = self._extract_value(source, fm.source_field)
-            
-            # Apply transform rule
             transformed = self._apply_transform(value, fm, source)
-            
+
             if transformed is None:
                 continue
-            
-            # Handle description aggregation
+
             if fm.target_field == "description" and fm.transform_rule.startswith("template:"):
                 if transformed:
                     description_parts.append(transformed)
                 continue
-            
-            # Handle jobtitle aggregation (append specialty to type)
+
             if fm.target_field == "jobtitle":
                 if fm.transform_rule.startswith("append:"):
                     if transformed:
@@ -145,14 +134,12 @@ class TransformEngine:
                 else:
                     jobtitle_parts.insert(0, ("base", transformed))
                 continue
-            
-            # Apply max length
+
             if fm.max_length and isinstance(transformed, str):
                 transformed = transformed[:fm.max_length]
-            
+
             payload[fm.target_field] = transformed
-        
-        # Build jobtitle from parts
+
         if jobtitle_parts:
             base = next((v for t, v in jobtitle_parts if t == "base"), None)
             appendages = [v for t, v in jobtitle_parts if t == "append"]
@@ -160,19 +147,16 @@ class TransformEngine:
                 jobtitle = base
                 for a in appendages:
                     jobtitle = f"{jobtitle} - {a}"
-                payload["jobtitle"] = jobtitle[:100]  # Max length
-        
-        # Build description from parts
+                payload["jobtitle"] = jobtitle[:100]
+
         if description_parts:
             existing = payload.get("description", "")
             all_parts = ([existing] if existing else []) + description_parts
             payload["description"] = "\n".join(p for p in all_parts if p)
-        
-        # Handle account binding
+
         if account_id:
             payload["parentcustomerid_account@odata.bind"] = f"/accounts({account_id})"
-        
-        # Ensure lastname has a value (mandatory field)
+
         if not payload.get("lastname"):
             fallback = source.get("individualEid") or "Unknown"
             payload["lastname"] = fallback[:50]
@@ -180,9 +164,163 @@ class TransformEngine:
                 "Contact %s missing lastname, using fallback: %s",
                 source.get("individualEid"), fallback
             )
-        
-        # Remove None values
+
         return {k: v for k, v in payload.items() if v is not None}
+
+    def transform_address(
+        self,
+        source: dict,
+        parent_account_id: str = None,
+        slot: str = "P_1",
+    ) -> dict | None:
+        """Transform one HCO–address link to a Dataverse ``customeraddress`` payload.
+
+        OneKey Address↔Workplace is N-N (a physical address can attach to many
+        HCOs). Dataverse keeps Account→CustomerAddress as 1-n, so a shared
+        OneKey address is **duplicated** once per HCO. Upsert identity is the
+        composite key::
+
+            cr4ec_externalid = ``{workplaceEid} - {addressEid}``
+
+        Args:
+            source: Flattened address row (e.g. from :func:`onekey.parse.flatten_hco`)
+                with ``workplaceEid`` and ``addressEid`` / ``address_addressEid``.
+            parent_account_id: GUID of the parent ``account`` for ``parentid`` bind.
+            slot: Which ``workplaceAddresses`` slot mappings to apply (default ``P_1``).
+
+        Returns:
+            Web API payload, or ``None`` when either OneKey id is missing.
+        """
+        self.begin_record("customeraddress", source.get("workplaceEid"))
+        workplace_eid = self._address_workplace_eid(source)
+        address_eid = self._address_eid(source)
+        if not workplace_eid or not address_eid:
+            logger.debug(
+                "Skipping address transform: workplaceEid=%r addressEid=%r",
+                workplace_eid,
+                address_eid,
+            )
+            return None
+
+        normalized = dict(source)
+        normalized["workplaceEid"] = workplace_eid
+        normalized["addressEid"] = address_eid
+        normalized.setdefault("address_addressEid", address_eid)
+
+        payload: dict[str, Any] = {}
+        key_parts: list[tuple[str, str]] = []
+        slot_token = f"workplaceAddresses.{slot}"
+
+        for fm in self.config.get_field_mappings("customeraddress"):
+            path = fm.source_field_path or ""
+            # Skip other address slots so P_2/P_3/P_4 do not overwrite P_1.
+            if "workplaceAddresses." in path and slot_token not in path:
+                continue
+
+            if fm.target_field == "parentid":
+                continue
+
+            value = self._extract_value(normalized, fm.source_field)
+            # Flattened HCO rows use address_* for the primary address eid.
+            if value is None and fm.source_field == "addressEid":
+                value = address_eid
+            if value is None and fm.source_field == "workplaceEid":
+                value = workplace_eid
+
+            transformed = self._apply_transform(value, fm, normalized)
+            if transformed is None:
+                continue
+
+            if fm.target_field == "cr4ec_externalid":
+                kind = "append" if (fm.transform_rule or "").startswith("append:") else "base"
+                # workplaceEid base rows are repeated per address slot without a
+                # slot token in source_field_path — keep only the first base.
+                if kind == "base" and any(k == "base" for k, _ in key_parts):
+                    continue
+                key_parts.append((kind, str(transformed)))
+                continue
+
+            # Non-slot target fields (name, line1, …) may also repeat across
+            # ADR blocks that omitted the slot in the path; prefer first write.
+            if fm.target_field in payload and "workplaceAddresses." not in path:
+                continue
+
+            if fm.max_length and isinstance(transformed, str):
+                transformed = transformed[: fm.max_length]
+
+            payload[fm.target_field] = transformed
+
+        composed = self._compose_address_external_id_from_parts(key_parts, workplace_eid, address_eid)
+        key_max = next(
+            (
+                fm.max_length
+                for fm in self.config.get_field_mappings("customeraddress")
+                if fm.target_field == "cr4ec_externalid" and fm.max_length
+            ),
+            100,
+        )
+        payload["cr4ec_externalid"] = composed[:key_max]
+
+        if parent_account_id:
+            payload["parentid_account@odata.bind"] = f"/accounts({parent_account_id})"
+
+        # name is required on customeraddress; prefer building, then street/city.
+        if not (payload.get("name") or "").strip():
+            fallback_name = (
+                normalized.get("address_buildingLabel")
+                or normalized.get("buildingLabel")
+                or payload.get("line1")
+                or payload.get("city")
+                or composed
+            )
+            payload["name"] = str(fallback_name)[:250]
+
+        # Picklist codes arrive as strings from value_mapping.csv.
+        type_code = payload.get("addresstypecode")
+        if isinstance(type_code, str) and type_code.isdigit():
+            payload["addresstypecode"] = int(type_code)
+
+        return {k: v for k, v in payload.items() if v is not None}
+
+    @staticmethod
+    def _address_workplace_eid(source: dict) -> str | None:
+        value = source.get("workplaceEid")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return str(value).strip()
+
+    @staticmethod
+    def _address_eid(source: dict) -> str | None:
+        value = source.get("addressEid") or source.get("address_addressEid")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return str(value).strip()
+
+    @staticmethod
+    def _compose_address_external_id_from_parts(
+        key_parts: list[tuple[str, str]],
+        workplace_eid: str,
+        address_eid: str,
+    ) -> str:
+        """Build ``{workplaceEid} - {addressEid}`` from mapping parts or fallbacks."""
+        base = next((v for kind, v in key_parts if kind == "base"), None)
+        appendages = [v for kind, v in key_parts if kind == "append"]
+        if base and appendages:
+            key = base
+            for part in appendages:
+                key = f"{key} - {part}"
+            return key
+        if base and not appendages:
+            return f"{base} - {address_eid}"
+        return f"{workplace_eid} - {address_eid}"
+
+    def compose_address_external_id(self, source: dict) -> str | None:
+        """Return the composite address upsert key, or None if ids are incomplete."""
+        workplace_eid = self._address_workplace_eid(source)
+        address_eid = self._address_eid(source)
+        if not workplace_eid or not address_eid:
+            return None
+        return f"{workplace_eid} - {address_eid}"
     
     def _extract_value(self, source: dict, field_name: str) -> Any:
         """Extract value from source record.
@@ -251,7 +389,20 @@ class TransformEngine:
                 if "=" in pair:
                     k, v = pair.split("=", 1)
                     value_map[k] = v
-            return value_map.get(str(value), mapping.default_value)
+            mapped = value_map.get(str(value))
+            if mapped is not None:
+                return mapped
+            if mapping.default_value is not None:
+                return mapping.default_value
+            self.picklist_gaps.record(
+                f"map:{mapping.target_field}",
+                str(value),
+                target_field=mapping.target_field,
+                target_entity=self._current_entity or mapping.target_entity,
+                source_eid=self._current_eid,
+                transform_rule=rule,
+            )
+            return None
         
         if rule.startswith("template:"):
             if value is None:
@@ -262,10 +413,22 @@ class TransformEngine:
         if rule.startswith("decode:"):
             if value is None:
                 return mapping.default_value
-            decode_type = rule.split(":", 1)[1].lower()
-            # Use value mapping lookup
+            decode_type = rule.split(":", 1)[1].lower().replace(" ", "")
             decoded = self.config.get_value(decode_type, str(value))
-            return decoded or mapping.default_value
+            if decoded is not None:
+                return decoded
+            if mapping.default_value is not None:
+                return mapping.default_value
+            # Quarantine: omit field; do not invent option integers at runtime.
+            self.picklist_gaps.record(
+                decode_type,
+                str(value),
+                target_field=mapping.target_field,
+                target_entity=self._current_entity or mapping.target_entity,
+                source_eid=self._current_eid,
+                transform_rule=rule,
+            )
+            return None
         
         if rule.startswith("append:"):
             # Value will be appended to another field
@@ -298,11 +461,20 @@ class TransformEngine:
         
         Args:
             source: Flattened source record
-            target_entity: Target Dataverse entity ("account" or "contact")
+            target_entity: Target Dataverse entity ("account", "contact", or
+                "customeraddress")
             
         Returns:
             Key value for matching, or None if not found
         """
+        if target_entity.lower() == "customeraddress":
+            composed = self.compose_address_external_id(source)
+            if not composed:
+                return None
+            key_mapping = self.config.get_key_field(target_entity)
+            max_length = key_mapping.max_length if key_mapping and key_mapping.max_length else 100
+            return composed[:max_length]
+
         key_mapping = self.config.get_key_field(target_entity)
         if not key_mapping:
             logger.error("No key field defined for %s", target_entity)

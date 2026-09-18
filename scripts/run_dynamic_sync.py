@@ -1,38 +1,31 @@
 #!/usr/bin/env python3
-"""Run dynamic sync using CSV-based mapping configuration.
+"""Run phased OneKey → Dataverse migration (full or delta).
 
-This script demonstrates the new dynamic sync engine that uses CSV files
-for field mapping, validation, and comprehensive logging.
+Phase order:
+  0. Validate + upsert picklists from value_mapping.csv
+  1. HCO accounts (workplaceEid → cr4ec_externalid)
+  2. customeraddress rows ({workplaceEid} - {addressEid})
+  3. HCO parentaccountid hierarchy (managerWorkplaceEid)
+  4. HCP contacts + parentcustomerid
 
 Usage:
-    # Full sync with validation (dry run)
-    python scripts/run_dynamic_sync.py --dry-run --codbase WUK
-    
-    # Full sync to Dataverse
-    python scripts/run_dynamic_sync.py --codbase WUK --max-records 100
-    
-    # Delta sync for specific date range
-    python scripts/run_dynamic_sync.py --delta --date-from 2026-09-07 --date-to 2026-09-11
-    
-    # Validate configuration only
     python scripts/run_dynamic_sync.py --validate-only
-
-Examples:
-    # Test with small sample
-    python scripts/run_dynamic_sync.py --codbase WUK --max-records 10 --dry-run
-    
-    # Production full sync
-    python scripts/run_dynamic_sync.py --codbase WUK,WDE,WNL --with-address
+    python scripts/run_dynamic_sync.py --dry-run --codbase WUK --max-records 10
+    python scripts/run_dynamic_sync.py --codbase WUK --max-records 100
+    python scripts/run_dynamic_sync.py --delta --date-from 2026-09-07 --date-to 2026-09-11
+    python scripts/run_dynamic_sync.py --codbase WUK --skip-address --skip-hierarchy
+    python scripts/run_dynamic_sync.py --hco-only --codbase WUK
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import logging
-import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dataverse import DataverseClient, DataverseConfig
@@ -42,9 +35,8 @@ from integration import (
     load_mapping_config,
     setup_logging,
     MappingValidator,
-    DataverseValidator,
 )
-from integration.env import load_env
+from integration.env import REPO_ROOT, load_env
 
 
 def parse_args():
@@ -52,104 +44,194 @@ def parse_args():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
-    # Sync mode
+
     parser.add_argument(
-        "--delta", action="store_true",
-        help="Run delta/CDC sync instead of full sync"
+        "--delta",
+        action="store_true",
+        help="Run delta/CDC sync instead of full sync",
     )
     parser.add_argument(
-        "--validate-only", action="store_true",
-        help="Only validate configuration, don't sync"
+        "--validate-only",
+        action="store_true",
+        help="Only validate configuration, don't sync",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Validate and log but don't write to Dataverse"
+        "--dry-run",
+        action="store_true",
+        help="Validate and log but don't write to Dataverse",
     )
-    
-    # Codebase selection
+
     parser.add_argument(
-        "--codbase", default="WUK",
-        help="Comma-separated OneKey codebases (default: WUK)"
+        "--codbase",
+        default="WUK",
+        help="Comma-separated OneKey codebases (default: WUK)",
     )
-    
-    # Delta sync dates
+
     parser.add_argument(
         "--date-from",
-        help="Start date for delta sync (ISO format: YYYY-MM-DD)"
+        help="Start date for delta sync (ISO: YYYY-MM-DD). Defaults to watermark or yesterday.",
     )
     parser.add_argument(
         "--date-to",
-        help="End date for delta sync (ISO format: YYYY-MM-DD)"
+        help="End date for delta sync (ISO: YYYY-MM-DD). Defaults to today.",
     )
-    
-    # Options
+
     parser.add_argument(
-        "--max-records", type=int,
-        help="Limit records per entity type (for testing)"
-    )
-    parser.add_argument(
-        "--with-address", action="store_true",
-        help="Include address fields (may fail due to Dataverse constraints)"
+        "--max-records",
+        type=int,
+        help="Limit records per entity type (for testing)",
     )
     parser.add_argument(
-        "--hco-only", action="store_true",
-        help="Sync only HCO/accounts (skip HCP/contacts)"
+        "--skip-address",
+        action="store_true",
+        help="Skip customeraddress phase",
     )
     parser.add_argument(
-        "--hcp-only", action="store_true",
-        help="Sync only HCP/contacts (skip HCO/accounts)"
+        "--skip-hierarchy",
+        action="store_true",
+        help="Skip parentaccountid hierarchy link phase",
     )
     parser.add_argument(
-        "--bulk-batch-size", type=int, default=None,
-        help=(
-            "Records per Dataverse CreateMultiple/UpdateMultiple request "
-            "(default: DATAVERSE_BULK_BATCH_SIZE or 100; Microsoft suggests 100–1000)"
-        ),
+        "--skip-picklists",
+        action="store_true",
+        help="Skip Phase 0 picklist upsert from value_mapping.csv",
+    )
+    parser.add_argument(
+        "--hco-only",
+        action="store_true",
+        help="Sync only HCO/accounts (+ address/hierarchy unless skipped)",
+    )
+    parser.add_argument(
+        "--hcp-only",
+        action="store_true",
+        help="Sync only HCP/contacts (skip accounts/address/hierarchy)",
+    )
+    parser.add_argument(
+        "--bulk-batch-size",
+        type=int,
+        default=None,
+        help="Records per Dataverse CreateMultiple/UpdateMultiple request",
     )
     parser.add_argument(
         "--config-dir",
-        help="Path to config directory with CSV mapping files"
-    )
-    
-    # Logging
-    parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Enable verbose logging"
+        help="Path to config directory with CSV mapping files",
     )
     parser.add_argument(
-        "--quiet", "-q", action="store_true",
-        help="Suppress progress logs"
+        "--watermark-dir",
+        type=Path,
+        default=REPO_ROOT / "logs",
+        help="Directory for delta watermarks (default: logs/)",
     )
-    
+
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable verbose logging"
+    )
+    parser.add_argument(
+        "--quiet", "-q", action="store_true", help="Suppress progress logs"
+    )
+
     return parser.parse_args()
+
+
+def _watermark_path(directory: Path, codebase: str) -> Path:
+    return Path(directory) / f"sync_watermark_{codebase.upper()}.json"
+
+
+def load_watermark(directory: Path, codebase: str) -> str | None:
+    path = _watermark_path(directory, codebase)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("date_to")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_watermark(directory: Path, codebase: str, date_to: str) -> None:
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _watermark_path(directory, codebase)
+    path.write_text(
+        json.dumps(
+            {
+                "codbase": codebase.upper(),
+                "date_to": date_to,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+class MockDataverse:
+    """Minimal stand-in for dry-run without Dataverse credentials."""
+
+    def upsert_by_field(self, *args, **kwargs):
+        return ("mock-guid", True)
+
+    def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+        return [
+            (str(r.get(match_field)), f"mock-{i}", True)
+            for i, r in enumerate(records)
+        ]
+
+    def find_one(self, *args, **kwargs):
+        return None
+
+    def find_many_by_field(self, *args, **kwargs):
+        return {}
+
+    def update_multiple(self, *args, **kwargs):
+        return None
+
+    def update(self, *args, **kwargs):
+        return None
+
+    def whoami(self):
+        return {"UserId": "dry-run"}
+
+
+def _print_entity(label: str, stats: dict | None) -> None:
+    if not stats:
+        return
+    print(f"\n{label}:")
+    print(f"  Processed: {stats.get('processed', 0)}")
+    print(f"  Created:   {stats.get('created', 0)}")
+    print(f"  Updated:   {stats.get('updated', 0)}")
+    print(f"  Failed:    {stats.get('failed', 0)}")
 
 
 def main():
     args = parse_args()
-    
-    # Setup logging
-    log_level = logging.DEBUG if args.verbose else (logging.WARNING if args.quiet else logging.INFO)
+
+    log_level = (
+        logging.DEBUG
+        if args.verbose
+        else (logging.WARNING if args.quiet else logging.INFO)
+    )
     setup_logging(level=log_level)
-    
     logger = logging.getLogger(__name__)
-    
-    # Load environment
+
     load_env()
-    
-    # Parse codebases
-    codebases = [c.strip().upper() for c in args.codbase.split(",")]
-    
-    # Load mapping configuration
+
+    codebases = [c.strip().upper() for c in args.codbase.split(",") if c.strip()]
+    sync_addresses = not args.skip_address
+    sync_hierarchy = not args.skip_hierarchy
+    sync_picklists = not args.skip_picklists
+
     config_dir = Path(args.config_dir) if args.config_dir else None
     try:
         config = load_mapping_config(config_dir)
-        logger.info("Loaded mapping configuration from %s", config_dir or "default location")
+        logger.info(
+            "Loaded mapping configuration from %s",
+            config_dir or "default location",
+        )
     except FileNotFoundError as e:
         logger.error("Configuration not found: %s", e)
         return 1
-    
-    # Validate-only mode
+
     if args.validate_only:
         logger.info("Running validation only...")
         validator = MappingValidator(config)
@@ -157,114 +239,124 @@ def main():
         result.log_all()
         print(f"\nValidation: {result.summary()}")
         return 0 if result.is_valid else 1
-    
-    # Connect to OneKey
+
     onekey_config = OneKeyConfig.from_env()
-    logger.info("Connecting to OneKey: %s (connector %s)", 
-                onekey_config.base_url, onekey_config.connector_id)
-    
+    logger.info(
+        "Connecting to OneKey: %s (connector %s)",
+        onekey_config.base_url,
+        onekey_config.connector_id,
+    )
     onekey = OneKeyClient(OneKeySession(onekey_config))
-    
-    # Connect to Dataverse (unless dry run)
-    dataverse = None
+
     if not args.dry_run:
         dataverse_config = DataverseConfig.from_env()
         logger.info("Connecting to Dataverse: %s", dataverse_config.environment_url)
         dataverse = DataverseClient(dataverse_config)
-        
-        # Verify connection
         identity = dataverse.whoami()
         logger.info("Dataverse user: %s", identity.get("UserId"))
     else:
-        logger.info("DRY RUN MODE - No Dataverse connection")
-        # Create a mock client for dry run
-        class MockDataverse:
-            def upsert_by_field(self, *args, **kwargs):
-                return ("mock-guid", True)
-            def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
-                return [
-                    (str(r.get(match_field)), f"mock-{i}", True)
-                    for i, r in enumerate(records)
-                ]
-            def find_one(self, *args, **kwargs):
-                return None
-            def find_many_by_field(self, *args, **kwargs):
-                return {}
+        logger.info("DRY RUN MODE - No Dataverse writes")
         dataverse = MockDataverse()
-    
-    # Create sync engine
+
     engine = create_sync_engine(
         onekey, dataverse, args.config_dir, bulk_batch_size=args.bulk_batch_size
     )
-    
-    # Run sync
+
     try:
         if args.delta:
-            # Delta sync
             date_from = args.date_from
-            date_to = args.date_to
-            
-            # Default to yesterday if not specified
+            date_to = args.date_to or datetime.now().strftime("%Y-%m-%d")
             if not date_from:
-                yesterday = datetime.now() - timedelta(days=1)
-                date_from = yesterday.strftime("%Y-%m-%d")
-            if not date_to:
-                date_to = datetime.now().strftime("%Y-%m-%d")
-            
+                # Prefer earliest watermark across codebases, else yesterday − 1h overlap.
+                marks = [
+                    load_watermark(args.watermark_dir, cb) for cb in codebases
+                ]
+                marks = [m for m in marks if m]
+                if marks:
+                    date_from = min(marks)
+                    # 1-hour overlap: rewind calendar day if time present, else keep date.
+                    logger.info("Using watermark date_from=%s", date_from)
+                else:
+                    yesterday = datetime.now() - timedelta(days=1)
+                    date_from = yesterday.strftime("%Y-%m-%d")
+
             logger.info("Starting delta sync: %s to %s", date_from, date_to)
             result = engine.sync_delta(
                 codebases=codebases,
-                date_from=f"{date_from}T00:00:00Z",
-                date_to=f"{date_to}T23:59:59Z",
-                include_address=args.with_address,
+                date_from=f"{date_from}T00:00:00Z"
+                if "T" not in date_from
+                else date_from,
+                date_to=f"{date_to}T23:59:59Z" if "T" not in date_to else date_to,
                 dry_run=args.dry_run,
+                sync_addresses=sync_addresses,
+                sync_hierarchy=sync_hierarchy,
+                sync_picklists=sync_picklists,
             )
+            if result.get("success") and not args.dry_run:
+                for cb in codebases:
+                    save_watermark(args.watermark_dir, cb, date_to)
         else:
-            # Full sync
             logger.info("Starting full sync for: %s", ", ".join(codebases))
             result = engine.sync_full(
                 codebases=codebases,
-                include_address=args.with_address,
                 max_records=args.max_records,
                 dry_run=args.dry_run,
                 hco_only=args.hco_only,
                 hcp_only=args.hcp_only,
+                sync_addresses=sync_addresses,
+                sync_hierarchy=sync_hierarchy,
+                sync_picklists=sync_picklists,
             )
-        
-        # Print summary
+
         print("\n" + "=" * 60)
         print("SYNC SUMMARY")
         print("=" * 60)
         print(f"Success: {result.get('success', False)}")
         print(f"Codebases: {', '.join(codebases)}")
-        
-        if "accounts" in result:
-            acc = result["accounts"]
-            print(f"\nAccounts:")
-            print(f"  Processed: {acc['processed']}")
-            print(f"  Created:   {acc['created']}")
-            print(f"  Updated:   {acc['updated']}")
-            print(f"  Failed:    {acc['failed']}")
-        
-        if "contacts" in result:
-            con = result["contacts"]
-            print(f"\nContacts:")
-            print(f"  Processed: {con['processed']}")
-            print(f"  Created:   {con['created']}")
-            print(f"  Updated:   {con['updated']}")
-            print(f"  Failed:    {con['failed']}")
-        
+        print(
+            f"Phases: picklists={'on' if sync_picklists else 'off'} "
+            f"address={'on' if sync_addresses else 'off'} "
+            f"hierarchy={'on' if sync_hierarchy else 'off'}"
+        )
+
+        if result.get("picklists"):
+            print(f"\nPicklists: {len(result['picklists'])} type(s) processed")
+
+        _print_entity("Accounts", result.get("accounts"))
+        _print_entity("Addresses (customeraddress)", result.get("addresses"))
+
+        hier = result.get("hierarchy") or {}
+        if hier:
+            print("\nHierarchy:")
+            print(f"  Edges:           {hier.get('edges', 0)}")
+            print(f"  Linked:          {hier.get('linked', 0)}")
+            print(f"  Already linked:  {hier.get('already_linked', 0)}")
+            print(f"  Missing child:   {hier.get('missing_child', 0)}")
+            print(f"  Missing parent:  {hier.get('missing_parent', 0)}")
+            print(f"  Failed:          {hier.get('failed', 0)}")
+
+        _print_entity("Contacts", result.get("contacts"))
+
+        if result.get("by_process_code"):
+            pc = result["by_process_code"]
+            print(f"\nCDC processCode: I={pc.get('I', 0)} U={pc.get('U', 0)} R={pc.get('R', 0)}")
+
+        gaps = result.get("picklist_gaps") or 0
+        if gaps:
+            print(f"\nPicklist gaps: {gaps}")
+            if result.get("picklist_gap_report"):
+                print(f"  Report: {result['picklist_gap_report']}")
+
         if result.get("errors"):
             print(f"\nErrors: {len(result['errors'])}")
             for error in result["errors"][:5]:
                 print(f"  - {error}")
             if len(result["errors"]) > 5:
                 print(f"  ... and {len(result['errors']) - 5} more")
-        
+
         print("=" * 60)
-        
         return 0 if result.get("success") else 1
-        
+
     finally:
         onekey.close()
         if hasattr(dataverse, "close"):

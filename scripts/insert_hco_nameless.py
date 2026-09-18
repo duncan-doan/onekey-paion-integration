@@ -113,7 +113,7 @@ def main():
         onekey, dataverse, bulk_batch_size=args.bulk_batch_size
     )
     key_field = engine.config.get_key_field("account")
-    key_name = key_field.target_field if key_field else "accountnumber"
+    key_name = key_field.target_field if key_field else "cr4ec_externalid"
 
     prepared = []
     logger.info("Extracting nameless HCOs from OneKey %s...", args.codbase)
@@ -134,7 +134,7 @@ def main():
             if not parent_id and not args.dry_run:
                 parent_id = engine._lookup_account(parent_eid)
 
-        payload = engine.transformer.transform_hco(hco, False, parent_id)
+        payload = engine.transformer.transform_hco(hco, parent_account_id=parent_id)
         if not (payload.get("name") or "").strip():
             payload["name"] = "noname"
         prepared.append((eid, payload, hco))

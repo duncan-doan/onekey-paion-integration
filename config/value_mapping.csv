@@ -269,7 +269,7 @@ VAL-STA-009,statecode,RED,Reduced Activity,1,Inactive,
 VAL-STA-010,statecode,RET,Retired,1,Inactive,
 VAL-STA-011,statecode,TCL,Temporarily Closed,1,Inactive,
 VAL-STA-012,statecode,TIN,Temporarily Inactive,1,Inactive,
-# Structure Code Mapping (structureTypeCode -> cree7_structuretype),,,,,,
+# Structure Code Mapping (structureTypeCode -> cr4ec_structuretype),,,,,,
 VAL-STR-001,structuretype,POR,Primary Organisation,1,Primary Organisation,
 VAL-STR-002,structuretype,ORG,Organisation,2,Organisation,
 VAL-STR-003,structuretype,DPT,Department,3,Department,
@@ -309,7 +309,7 @@ VAL-ADD-002,addresstype,L,Delivery address,2,Ship to,
 VAL-ADD-003,addresstype,M,Mailing address,5,Mail To,
 VAL-ADD-004,addresstype,P,Primary address,3,Primary,
 VAL-ADD-005,addresstype,S,Secondary address,4,Other,
-# HCO Type Code (workplace.typeCode -> cree7_type),,,,,,
+# HCO Type Code (workplace.typeCode -> cr4ec_type),,,,,,
 VAL-HCO-001,hcotype,ACA,Academic Institution,1,Academic Institution,Academic Institution
 VAL-HCO-002,hcotype,ACT,Acute Trust,2,Acute Trust,Acute Trust
 VAL-HCO-003,hcotype,ADD,Addiction Services Organisation,3,Addiction Services Organisation,Addiction Services Organisation

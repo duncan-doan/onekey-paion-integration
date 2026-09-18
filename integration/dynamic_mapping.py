@@ -129,10 +129,11 @@ class MappingConfig:
             key = fm.target_entity.lower()
             self._field_by_target.setdefault(key, []).append(fm)
         
-        # Value mappings by type - use source_code as key
+        # Value mappings by type - normalize type key for decode: lookups
         self._value_map = {}
         for vm in self.value_mappings:
-            self._value_map.setdefault(vm.mapping_type, {})[vm.source_code] = vm.target_value
+            type_key = (vm.mapping_type or "").lower().replace(" ", "")
+            self._value_map.setdefault(type_key, {})[vm.source_code] = vm.target_value
         
         # Entity definitions by name
         self._entity_by_name = {
@@ -158,7 +159,8 @@ class MappingConfig:
     
     def get_value(self, mapping_type: str, source_value: str, default: str = None) -> str | None:
         """Lookup a value transformation."""
-        return self._value_map.get(mapping_type, {}).get(str(source_value), default)
+        type_key = (mapping_type or "").lower().replace(" ", "")
+        return self._value_map.get(type_key, {}).get(str(source_value), default)
     
     def get_entity(self, platform: str, entity_name: str) -> EntityDefinition | None:
         """Get entity definition by platform and name."""

@@ -41,6 +41,9 @@ from .validation import (
 from .transform import TransformEngine, create_transform_engine
 from .dynamic_sync import DynamicSyncEngine, create_sync_engine
 from .sync_logger import SyncLogger, setup_logging
+from .picklist_gaps import PicklistGapCollector
+from .picklist_sync import sync_picklists_from_config, DEFAULT_TARGETS
+from .hierarchy import edges_from_hcos
 
 __all__ = [
     # Environment
@@ -82,4 +85,10 @@ __all__ = [
     # Logging
     "SyncLogger",
     "setup_logging",
+
+    # Migration helpers
+    "PicklistGapCollector",
+    "sync_picklists_from_config",
+    "DEFAULT_TARGETS",
+    "edges_from_hcos",
 ]

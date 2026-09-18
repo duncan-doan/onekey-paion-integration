@@ -4,7 +4,8 @@ constraint_id,platform,entity,field,constraint_type,constraint_value,error_actio
 # Used by validation module to check data before writing to Dataverse
 # ============================================================================================================
 # Account (HCO) Constraints
-CON-ACC-001,Dataverse,account,accountnumber,max_length,20,truncate,Primary key field; must fit OneKey workplaceEid
+CON-ACC-001,Dataverse,account,cr4ec_externalid,max_length,100,truncate,Primary key field (cr4ec_onekeyid); must fit OneKey workplaceEid
+CON-ACC-001b,Dataverse,account,accountnumber,max_length,20,truncate,Legacy display field; no longer the upsert key
 CON-ACC-002,Dataverse,account,name,max_length,160,truncate,Official name; required field
 CON-ACC-003,Dataverse,account,name,required,true,error,Name is mandatory for Account
 CON-ACC-004,Dataverse,account,description,max_length,2000,truncate,Multi-part description field
@@ -46,3 +47,10 @@ CON-CON-021,Dataverse,contact,emailaddress2,max_length,100,truncate,Secondary em
 CON-CON-022,Dataverse,contact,websiteurl,max_length,200,truncate,Website URL
 CON-CON-023,Dataverse,contact,yomifirstname,max_length,150,truncate,Phonetic first name
 CON-CON-024,Dataverse,contact,yomilastname,max_length,150,truncate,Phonetic last name
+# CustomerAddress Constraints
+CON-ADR-001,Dataverse,customeraddress,cr4ec_externalid,max_length,100,truncate,Composite key workplaceEid - addressEid; must fit both OneKey ids + separator
+CON-ADR-002,Dataverse,customeraddress,name,max_length,250,truncate,Address name / building label
+CON-ADR-003,Dataverse,customeraddress,line1,max_length,250,truncate,Street address
+CON-ADR-004,Dataverse,customeraddress,city,max_length,80,truncate,City
+CON-ADR-005,Dataverse,customeraddress,postalcode,max_length,20,truncate,Postal/ZIP code
+CON-ADR-006,Dataverse,customeraddress,country,max_length,80,truncate,Country

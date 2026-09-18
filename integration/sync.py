@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 def upsert_account(dataverse, hco, include_address=False):
     """Create or update one ``account`` from a flattened OneKey HCO.
 
-    Matches on ``accountnumber``, which holds the OneKey ``workplaceEid``, so
-    re-running a sync updates rather than duplicates.
+    Matches on ``cr4ec_externalid``, which holds the OneKey ``workplaceEid``,
+    so re-running a sync updates rather than duplicates.
 
     Returns:
         tuple[str, bool]: account id, and True when it was created.

@@ -4,13 +4,13 @@ entity_id,platform,entity_name,entity_set,primary_key,alternate_key,alternate_ke
 # Defines which entities exist and their key fields for upsert operations,,,,,,,,,,
 # ============================================================================================================,,,,,,,,,,
 # Dataverse Target Entities,,,,,,,,,,
-ENT-DV-001,Dataverse,account,accounts,accountid,Yes,cree7_externalid,TRUE,1,,Healthcare Organization (HCO); alternate key on accountnumber required for upsert by workplaceEid
-ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,cree7_externalid,TRUE,2,account,Healthcare Professional (HCP); alternate key on externaluseridentifier required for upsert by individualEid
-ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,No,cree7_externalid,FALSE,3,account|contact,Address records; currently blocked by existing alternate key issue
+ENT-DV-001,Dataverse,account,accounts,accountid,Yes,cr4ec_externalid,TRUE,1,,Healthcare Organization (HCO); alternate key on accountnumber required for upsert by workplaceEid
+ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,cr4ec_externalid,TRUE,2,account,Healthcare Professional (HCP); alternate key on externaluseridentifier required for upsert by individualEid
+ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,Yes,cr4ec_externalid,FALSE,3,account,Address per HCO (1-n). Upsert key cr4ec_externalid = workplaceEid - addressEid; shared OneKey addresses are duplicated per Account
 ENT-DV-004,Dataverse,connection,connections,connectionid,No,,FALSE,4,account,For HCO-to-HCO relationships (affiliations); optional
-ENT-DV-005,Dataverse,cree7_affiliation,cree7_affiliation,cree7_affiliationid,Yes,cree7_externalid,FALSE,4,contact,Custom entity for multi-workplace HCPs; optional
+ENT-DV-005,Dataverse,cr4ec_affiliation,cr4ec_affiliation,cr4ec_affiliationid,Yes,cr4ec_externalid,FALSE,4,contact,Custom entity for multi-workplace HCPs; optional
 # OneKey Source Entities (for reference/validation),,,,,,,,,,
 ENT-OK-001,OneKey,Workplace,N/A,workplaceEid,N/A,workplaceEid,TRUE,N/A,,Healthcare Organization source; entityType=WORKPLACE in search/refresh
 ENT-OK-002,OneKey,Individual,N/A,individualEid,N/A,individualEid,TRUE,N/A,,Healthcare Professional source; accessed via Activity
 ENT-OK-003,OneKey,Activity,N/A,activityEid,N/A,activityEid,TRUE,N/A,Workplace,HCP-HCO link source; entityType=ACTIVITY in search/refresh; ties Individual to Workplace
-ENT-OK-004,OneKey,Address,N/A,addressEid,N/A,addressEid,FALSE,N/A,Workplace,Embedded in workplaceAddresses; typeCode P=Primary
+ENT-OK-004,OneKey,Address,N/A,addressEid,N/A,addressEid,FALSE,N/A,Workplace,Embedded in workplaceAddresses; N-N to Workplace in OneKey — duplicated per HCO in Dataverse with composite key workplaceEid+addressEid

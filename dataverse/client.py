@@ -25,6 +25,7 @@ DEFAULT_LOOKUP_CHUNK_SIZE = 50
 _ENTITY_META = {
     "accounts": ("account", "accountid"),
     "contacts": ("contact", "contactid"),
+    "customeraddresses": ("customeraddress", "customeraddressid"),
 }
 
 

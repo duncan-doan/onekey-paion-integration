@@ -348,6 +348,72 @@ def test_flatten_hcp_pulls_person_specialty_and_workplace():
     assert row["isValid"] is True
 
 
+def test_flatten_hcp_falls_back_to_activity_eids_when_nested_entities_missing():
+    """Population ACTIVITY rows carry link EIDs only on the activity object."""
+    from onekey.parse import flatten_hcp as flatten
+
+    row = flatten(
+        {
+            "onekeyEid": "WUKA0000408401",
+            "entityType": "ACTIVITY",
+            "activity": {
+                "activityEid": "WUKA0000408401",
+                "individualEid": "WUKA00004084",
+                "workplaceEid": "WUKF06988766",
+                "statusCode": "3",
+            },
+            "individual": None,
+            "workplace": None,
+        }
+    )
+    assert row["individualEid"] == "WUKA00004084"
+    assert row["workplaceEid"] == "WUKF06988766"
+    assert row["activityEid"] == "WUKA0000408401"
+    assert row["firstName"] is None
+
+
+def test_compose_hcp_result_joins_population_entity_rows():
+    from onekey.parse import compose_hcp_result, flatten_hcp as flatten
+
+    composed = compose_hcp_result(
+        {
+            "entityType": "INDIVIDUAL",
+            "country": "GB",
+            "codBase": "WUK",
+            "individual": {
+                "individualEid": "WUKA00004084",
+                "firstName": "Jane",
+                "lastName": "Doe",
+                "statusCode": "3",
+                "typeCorporateLabel": "Pharmacist",
+            },
+        },
+        {
+            "onekeyEid": "WUKA0000408401",
+            "entityType": "ACTIVITY",
+            "activity": {
+                "activityEid": "WUKA0000408401",
+                "individualEid": "WUKA00004084",
+                "workplaceEid": "WUKF06988766",
+                "isMainActivity": True,
+            },
+        },
+        {
+            "entityType": "WORKPLACE",
+            "workplace": {
+                "workplaceEid": "WUKF06988766",
+                "officialName": "High Street Pharmacy",
+            },
+        },
+    )
+    row = flatten(composed)
+    assert row["individualEid"] == "WUKA00004084"
+    assert row["workplaceEid"] == "WUKF06988766"
+    assert row["firstName"] == "Jane"
+    assert row["lastName"] == "Doe"
+    assert row["workplaceName"] == "High Street Pharmacy"
+
+
 def test_primary_address_prefers_type_p_over_a_lower_rank_key():
     row = flatten_hcp(HCP_RESULT)
     assert row["address_street"] == "Hauptstr. 8"
@@ -389,3 +455,46 @@ def test_rows_keep_a_stable_column_set_with_or_without_an_address():
     with_address = flatten_hcp(HCP_RESULT)
     without_address = flatten_hcp({})
     assert set(with_address) == set(without_address)
+
+
+def test_primary_address_uses_short_label_when_long_missing():
+    """UK OneKey often only sends addressShortLabel + buildingLabel."""
+    from onekey.parse import primary_address
+
+    row = primary_address(
+        {
+            "workplaceAddresses": {
+                "P,1": {
+                    "typeCode": "P",
+                    "rank": 1,
+                    "buildingLabel": "St Cadoc's Hospital",
+                    "address": {
+                        "addressEid": "WUK01933424023",
+                        "addressShortLabel": "Lodge Road",
+                        "longPostalCode": "NP18 3XQ",
+                        "postalTownReference": {
+                            "villageLabel": "Caerleon",
+                            "dispatchLabel": "Newport",
+                            "country": "GB",
+                            "subdivisions": {
+                                "SUB.3": {
+                                    "typeCode": "COUNTY",
+                                    "longLocalizedLabel": "Gwent",
+                                },
+                                "SUB.5": {
+                                    "typeCode": "DISTRICT",
+                                    "longLocalizedLabel": "CAERLEON",
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        }
+    )
+    assert row["street"] == "Lodge Road"
+    assert row["buildingLabel"] == "St Cadoc's Hospital"
+    assert row["city"] == "Caerleon"
+    assert row["county"] == "Gwent"
+    assert row["district"] == "CAERLEON"
+    assert row["postalCode"] == "NP18 3XQ"

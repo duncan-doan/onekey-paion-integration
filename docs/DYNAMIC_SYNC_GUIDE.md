@@ -60,14 +60,14 @@ Defines field-level mapping from OneKey to Dataverse.
 | `source_field_path` | Full JSONPath (for reference) | workplace.workplaceEid |
 | `target_platform` | Target system | Dataverse |
 | `target_entity` | Target table | account, contact |
-| `target_field` | Target column | accountnumber, firstname |
+| `target_field` | Target column | cree7_externalid, firstname |
 | `target_field_type` | Data type | string, picklist, lookup |
 | `max_length` | Max string length | 50, 160 |
 | `is_required` | Mandatory field | true/false |
 | `is_key` | Upsert key field | true/false |
 | `is_lookup` | Foreign key lookup | true/false |
 | `lookup_entity` | Target lookup entity | account |
-| `lookup_key_field` | Lookup match field | accountnumber |
+| `lookup_key_field` | Lookup match field | cree7_externalid |
 | `transform_rule` | Transformation logic | direct, map:A=1, template:{value} |
 | `default_value` | Fallback value | Unknown |
 | `notes` | Documentation | |
@@ -303,52 +303,28 @@ class ValidationResult:
 ### Full Sync Order
 
 ```
-1. Load CSV Configuration
-       │
-2. Pre-Sync Validation
-       │
-3. FOR each codebase:
-       │
-       ├── Phase 1: Extract HCOs (Workplaces)
-       │       └── /pop/refreshMyOnekey
-       │
-       ├── Phase 2: Build HCO Hierarchy
-       │       └── Compute depth from managerWorkplaceEid
-       │
-       ├── Phase 3: Load Accounts (depth-first)
-       │       └── Parents before children
-       │       └── Cache workplaceEid → accountid
-       │
-       ├── Phase 4: Extract HCPs (Activities)
-       │       └── /pop/refreshMyOnekey
-       │
-       └── Phase 5: Load Contacts
-               └── Resolve account from workplaceEid
-               └── Link via parentcustomerid
+0. Upsert picklists from value_mapping.csv (load_picklist_values / Phase 0)
+1. Extract HCOs (Workplaces) → upsert Accounts (no parent bind yet)
+2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
+3. Link parentaccountid from managerWorkplaceEid
+4. Extract HCPs → upsert Contacts + parentcustomerid
 ```
+
+Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.
 
 ### Delta Sync Order
 
-```
-1. Load CSV Configuration
-       │
-2. Pre-Sync Validation
-       │
-3. FOR each codebase:
-       │
-       ├── Call CDC endpoint with date range
-       │       └── /pop/refreshMyOnekey?isoDateFrom=&isoDateTo=
-       │
-       ├── Group by entityType (WORKPLACE, ACTIVITY)
-       │
-       ├── Process WORKPLACE changes first
-       │       └── Check processCode (I/U/R)
-       │       └── Resolve parent hierarchy
-       │       └── Upsert Account
-       │
-       └── Process ACTIVITY changes
-               └── Resolve Account lookup
-               └── Upsert Contact
+Same phases for CDC window records: workplaces first, then addresses and
+hierarchy for those HCOs, then activities → contacts. Watermarks are stored
+under ``logs/sync_watermark_{CODEBASE}.json``.
+
+### CLI
+
+```bash
+python scripts/run_dynamic_sync.py --codbase WUK --max-records 100
+python scripts/run_dynamic_sync.py --delta --date-from 2026-09-07 --date-to 2026-09-11
+python scripts/run_dynamic_sync.py --skip-address --skip-hierarchy --skip-picklists
+python scripts/load_hco_addresses.py --full --codbase WUK --max-records 50
 ```
 
 ---
