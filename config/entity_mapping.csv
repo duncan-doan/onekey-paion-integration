@@ -1,98 +1,124 @@
-mapping_id,source_platform,source_entity,source_field,source_field_path,target_platform,target_entity,target_field,target_field_type,max_length,is_required,is_key,is_lookup,lookup_entity,lookup_key_field,transform_rule,default_value,notes
-# ============================================================================================================,,,,,,,,,,,,,,,,,
-# HCO (Workplace) -> Account Mapping,,,,,,,,,,,,,,,,,
-# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,
-# Target: Dataverse account entity,,,,,,,,,,,,,,,,,
-# ============================================================================================================,,,,,,,,,,,,,,,,,
-HCO-001,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,cr4ec_externalid,string,20,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; alternate key required in Dataverse
-HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,TRUE,FALSE,FALSE,,,coalesce:usualName,noname,Primary name; fallback to usualName then noname. Truncate to 160.
-HCO-003,OneKey,Workplace,typeCode,workplace.typeCode,Dataverse,account,cr4ec_type,picklist,,FALSE,FALSE,FALSE,,,decode:hcotype,,HCO type code; decode via CODE table
-HCO-004,OneKey,Workplace,typeLabel,workplace.typeCorporateLabel,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:HCO type: {value},,Part of description field
-HCO-005,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dataverse,account,industrycode,picklist,,FALSE,FALSE,FALSE,,,map:H=11|S=12|N=13|O=14,,H=Hospital S=Surgery N=NHS Est. Maps to Dataverse industrycode picklist
-HCO-006,OneKey,Workplace,specialtyCode,workplace.ada.SP_1.code,Dataverse,account,cr4ec_specialty1,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Primary specialty code (flatten_hco.specialtyCode)
-#HCO-007,OneKey,Workplace,specialtyCode,workplace.ada.SP_2.code,Dataverse,account,cr4ec_specialty2,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Requires multi-specialty flatten; re-enable when available
-#HCO-008,OneKey,Workplace,specialtyCode,workplace.ada.SP_3.code,Dataverse,account,cr4ec_specialty3,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Requires multi-specialty flatten; re-enable when available
-#HCO-009,OneKey,Workplace,specialtyCode,workplace.ada.SP_4.code,Dataverse,account,cr4ec_specialty4,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Requires multi-specialty flatten; re-enable when available
-#HCO-010,OneKey,Workplace,specialtyCode,workplace.ada.SP_5.code,Dataverse,account,cr4ec_specialty5,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Requires multi-specialty flatten; re-enable when available
-HCO-011,OneKey,Workplace,parentWorkplaceEid,workplace.managerWorkplaceEid,Dataverse,account,parentaccountid,lookup,,FALSE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Parent HCO hierarchy; lookup account by accountnumber
-HCO-012,OneKey,Workplace,stateCode,workplace.stateCode,Dataverse,account,statecode,state,,FALSE,FALSE,FALSE,,,decode:statecode,,3=Valid->Active(0); 9=Invalid->Inactive(1); 1=Created->Inactive
-HCO-013,OneKey,Workplace,codBase,codBase,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:Codebase: {value},,Part of description field
-HCO-014,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:OneKey EID: {value},,Part of description field
-HCO-015,OneKey,Workplace,isPrivacyLaw,isPrivacyLaw,Dataverse,account,msdyn_gdproptout,boolean,,FALSE,FALSE,FALSE,,,direct,,Privacy law flag; review legal meaning before using
-HCO-016,OneKey,Workplace,telephone,workplace.telephones.1_1.callNumberForSearch,Dataverse,account,telephone1,string,50,FALSE,FALSE,FALSE,,,direct,,Main phone
-HCO-017,OneKey,Workplace,telephone,workplace.telephones.1_2.callNumberForSearch,Dataverse,account,telephone2,string,50,FALSE,FALSE,FALSE,,,direct,,Other phone
-HCO-018,OneKey,Workplace,noPhone,workplace.deniedAccesses.noPhone,Dataverse,account,donotphone,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not call flag
-HCO-019,OneKey,Workplace,noEmail,workplace.deniedAccesses.noEmail,Dataverse,account,donotemail,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not email flag
-HCO-020,OneKey,Workplace,noMail,workplace.deniedAccesses.noMail,Dataverse,account,donotpostalmail,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not mail flag
-HCO-021,OneKey,Workplace,noFax,workplace.deniedAccesses.noFax,Dataverse,account,donotfax,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not fax flag
-HCO-022,OneKey,Workplace,noVisit,workplace.deniedAccesses.noVisit,Dataverse,account,cr4ec_donotvisit,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not visit; mapped to donotsendmm; REVIEW: may need custom field
-HCO-023,OneKey,Workplace,structureTypeCode,workplace.structureTypeCode,Dataverse,account,cr4ec_structuretype,picklist,,FALSE,FALSE,FALSE,,,decode:structure type,,decode via CODE table
-# ============================================================================================================,,,,,,,,,,,,,,,,,
-# HCP (Individual/Activity) -> Contact Mapping  ,,,,,,,,,,,,,,,,,
-# Source: flatten_hcp() output from onekey/parse.py,,,,,,,,,,,,,,,,,
-# Target: Dataverse contact entity,,,,,,,,,,,,,,,,,
-# ============================================================================================================,,,,,,,,,,,,,,,,,
-HCP-001,OneKey,Individual,individualEid,individual.individualEid,Dataverse,contact,cr4ec_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; one Contact per Individual (not per Activity)
-HCP-002,OneKey,Individual,firstName,individual.firstName,Dataverse,contact,firstname,string,50,FALSE,FALSE,FALSE,,,direct,,First name; UK may have initial only (e.g. M.)
-HCP-003,OneKey,Individual,lastName,individual.lastName,Dataverse,contact,lastname,string,50,TRUE,FALSE,FALSE,,,coalesce:individualEid,Unknown,Last name (mandatory); fallback to individualEid or Unknown
-#HCP-005,OneKey,Individual,title,individual.titleCode,Dataverse,contact,cr4ec_title,picklist,,FALSE,FALSE,FALSE,,,decode:title,,Not present on paion-crm-dev; re-enable when attribute exists
-HCP-004,OneKey,Individual,genderCode,individual.genderCode,Dataverse,contact,gendercode,picklist,,FALSE,FALSE,FALSE,,,map:M=1|F=2,,M=Male(1) F=Female(2); leave blank for unknown
-#HCP-006,OneKey,Individual,prefixNameCode,individual.prefixNameCode,Dataverse,contact,salutation,picklist,,FALSE,FALSE,FALSE,,,decode:salutation,,prefixNameCode
-HCP-007,OneKey,Individual,typeLabel,individual.typeCorporateLabel,Dataverse,contact,jobtitle,string,100,FALSE,FALSE,FALSE,,,direct,,Professional type (Doctor/Pharmacist/Dentist); base for jobtitle
-HCP-008,OneKey,Individual,specialtyLabel,individual.ada.SP_1.codeCorporateLabel,Dataverse,contact,jobtitle,string,100,FALSE,FALSE,FALSE,,,append: - {value},,Primary specialty; appended to typeLabel for full jobtitle
-HCP-009,OneKey,Individual,stateCode,individual.stateCode,Dataverse,contact,statecode,state,,FALSE,FALSE,FALSE,,,decode:statecode,,decode from CODE
-HCP-010,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,contact,parentcustomerid,lookup,,FALSE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Link to workplace Account; binds via parentcustomerid_account@odata.bind
-HCP-011,OneKey,Workplace,usualName,workplace.usualName,Dataverse,contact,department,string,100,FALSE,FALSE,FALSE,,,direct,,Department name if workplace is a department (typeCode ABT/ACT)
-HCP-012,OneKey,Activity,activityEid,activity.activityEid,Dataverse,contact,description,string,2000,FALSE,FALSE,FALSE,,,template:OneKey Activity: {value},,Part of description; track which activity this contact represents
-HCP-013,OneKey,Individual,individualEid,individual.individualEid,Dataverse,contact,description,string,2000,FALSE,FALSE,FALSE,,,template:OneKey Individual: {value},,Part of description
-HCP-014,OneKey,Workplace,workplaceName,workplace.officialName,Dataverse,contact,description,string,2000,FALSE,FALSE,FALSE,,,template:Workplace: {value},,Part of description
-HCP-015,OneKey,Individual,codBase,codBase,Dataverse,contact,description,string,2000,FALSE,FALSE,FALSE,,,template:Source: IQVIA OneKey ({value}),,Part of description
-HCP-016,OneKey,Individual,isPrivacyLaw,isPrivacyLaw,Dataverse,contact,msdyn_gdproptout,boolean,,FALSE,FALSE,FALSE,,,direct,,Privacy law flag
-# Address Mapping,,,,,,,,,,,,,,,,,
-# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,
-# Target: Dataverse address entity,,,,,,,,,,,,,,,,,
-# ============================================================================================================,,,,,,,,,,,,,,,,,
-ADR-001,OneKey,Workplace,address_buildingLabel,workplace.workplaceAddresses.P_1.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Building / site name (fallback to street/city in transform)
-ADR-002,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_1.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Street; UK uses addressShortLabel (addressLongLabel often absent)
-ADR-003,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_1.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City/village; fallback to dispatchLabel in flatten
-ADR-004,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_1.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code
-ADR-005,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_1.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name
-ADR-006,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_1.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE
-ADR-007,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,direct,,Composite key base: workplaceEid. Shared OneKey addresses are duplicated per HCO (Dataverse Account→Address stays 1-n).
-ADR-008,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_1.address.addressEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,append: - {value},,"Composite key: {workplaceEid} - {addressEid} on cr4ec_externalid so two HCOs on the same address get distinct rows"
-ADR-009,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Bind address to its Account (1-n). Parent resolved by account.cr4ec_externalid = workplaceEid.
-ADR-010,OneKey,Workplace,address_county,workplace.workplaceAddresses.P_1.address.postalTownReference.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County (SUB.3 / typeCode COUNTY)
-ADR-010b,OneKey,Workplace,address_district,workplace.workplaceAddresses.P_1.address.postalTownReference.subdivisions.SUB.5.longLocalizedLabel,Dataverse,customeraddress,line2,string,250,FALSE,FALSE,FALSE,,,direct,,District (SUB.5); stored on line2 when no dedicated district column
-ADR-010c,OneKey,Workplace,address_buildingLabel,workplace.workplaceAddresses.P_1.buildingLabel,Dataverse,customeraddress,line3,string,250,FALSE,FALSE,FALSE,,,direct,,Building also on line3 for forms; name remains primaryADR-011,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_2.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name
-ADR-012,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_2.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal
-ADR-013,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_2.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel
-ADR-014,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_2.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code
-ADR-015,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_2.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name
-ADR-016,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_2.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE
-ADR-017,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,direct,,Composite key base (P_2): workplaceEid; duplicate address row per HCO
-ADR-018,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_2.address.addressEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,append: - {value},,"Composite key: {workplaceEid} - {addressEid}"
-ADR-019,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Bind address to Account (1-n) via workplaceEid
-#ADR-020,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_2.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County
-ADR-011,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_3.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name
-ADR-012,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_3.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal
-ADR-013,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_3.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel
-ADR-014,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_3.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code
-ADR-015,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_3.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name
-ADR-016,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_3.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE
-ADR-017,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,direct,,Composite key base (P_3): workplaceEid; duplicate address row per HCO
-ADR-018,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_3.address.addressEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,append: - {value},,"Composite key: {workplaceEid} - {addressEid}"
-ADR-019,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Bind address to Account (1-n) via workplaceEid
-#ADR-020,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_3.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County
-ADR-011,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_4.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name
-ADR-012,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_4.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal
-ADR-013,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_4.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel
-ADR-014,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_4.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code
-ADR-015,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_4.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name
-ADR-016,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_4.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE
-ADR-017,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,direct,,Composite key base (P_4): workplaceEid; duplicate address row per HCO
-ADR-018,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_4.address.addressEid,Dataverse,customeraddress,cr4ec_externalid,string,100,TRUE,TRUE,FALSE,,,append: - {value},,"Composite key: {workplaceEid} - {addressEid}"
-ADR-019,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,cr4ec_externalid,lookup_by_key,,Bind address to Account (1-n) via workplaceEid
-#ADR-020,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_4.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County
-# RELATION -> HCO HCO Mapping,,,,,,,,,,,,,,,,,
-# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,
-# Target: Dataverse Affiliation entity,,,,,,,,,,,,,,,,,
+mapping_id,source_platform,source_entity,source_field,source_field_path,target_platform,target_entity,target_field,target_field_type,max_length,is_required,is_key,is_lookup,lookup_entity,lookup_key_field,transform_rule,default_value,notes,,,,,,,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# HCO (Workplace) -> Account Mapping,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Target: Dataverse account entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+HCO-001,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,ts_externalid,string,20,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; alternate key required in Dataverse,,,,,,,,,,,,,,,,,
+HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,TRUE,FALSE,FALSE,,,coalesce:usualName,noname,Primary name; fallback to usualName then noname. Truncate to 160.,,,,,,,,,,,,,,,,,
+HCO-003,OneKey,Workplace,typeCode,workplace.typeCode,Dataverse,account,ts_type,picklist,,FALSE,FALSE,FALSE,,,decode:hcotype,,HCO type code; decode via CODE table,,,,,,,,,,,,,,,,,
+HCO-004,OneKey,Workplace,typeLabel,workplace.typeCorporateLabel,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:HCO type: {value},,Part of description field,,,,,,,,,,,,,,,,,
+HCO-005,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dataverse,account,industrycode,picklist,,FALSE,FALSE,FALSE,,,map:H=11|S=12|N=13|O=14,,H=Hospital S=Surgery N=NHS Est. Maps to Dataverse industrycode picklist,,,,,,,,,,,,,,,,,
+HCO-006,OneKey,Workplace,specialtyLabel,workplace.ada.SP_1.codeCorporateLabel,Dataverse,account,ts_specialty1,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Part of description field,,,,,,,,,,,,,,,,,
+HCO-007,OneKey,Workplace,specialtyLabel,workplace.ada.SP_2.codeCorporateLabel,Dataverse,account,ts_specialty2,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Part of description field,,,,,,,,,,,,,,,,,
+HCO-008,OneKey,Workplace,specialtyLabel,workplace.ada.SP_3.codeCorporateLabel,Dataverse,account,ts_specialty3,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Part of description field,,,,,,,,,,,,,,,,,
+HCO-009,OneKey,Workplace,specialtyLabel,workplace.ada.SP_4.codeCorporateLabel,Dataverse,account,ts_specialty4,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Part of description field,,,,,,,,,,,,,,,,,
+HCO-010,OneKey,Workplace,specialtyLabel,workplace.ada.SP_5.codeCorporateLabel,Dataverse,account,ts_specialty5,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,Part of description field,,,,,,,,,,,,,,,,,
+HCO-011,OneKey,Workplace,parentWorkplaceEid,workplace.managerWorkplaceEid,Dataverse,account,parentaccountid,lookup,,FALSE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Parent HCO hierarchy; lookup account by accountnumber,,,,,,,,,,,,,,,,,
+HCO-012,OneKey,Workplace,stateCode,workplace.stateCode,Dataverse,account,statecode,state,,FALSE,FALSE,FALSE,,,decode:statecode,,3=Valid->Active(0); 9=Invalid->Inactive(1); 1=Created->Inactive,,,,,,,,,,,,,,,,,
+HCO-013,OneKey,Workplace,codBase,codBase,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:Codebase: {value},,Part of description field,,,,,,,,,,,,,,,,,
+HCO-014,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:OneKey EID: {value},,Part of description field,,,,,,,,,,,,,,,,,
+HCO-015,OneKey,Workplace,isPrivacyLaw,isPrivacyLaw,Dataverse,account,msdyn_gdproptout,boolean,,FALSE,FALSE,FALSE,,,direct,,Privacy law flag; review legal meaning before using,,,,,,,,,,,,,,,,,
+HCO-016,OneKey,Workplace,telephone,workplace.telephones.1_1.callNumberForSearch,Dataverse,account,telephone1,string,50,FALSE,FALSE,FALSE,,,direct,,Main phone,,,,,,,,,,,,,,,,,
+HCO-017,OneKey,Workplace,telephone,workplace.telephones.1_2.callNumberForSearch,Dataverse,account,telephone2,string,50,FALSE,FALSE,FALSE,,,direct,,Other phone,,,,,,,,,,,,,,,,,
+HCO-018,OneKey,Workplace,noPhone,workplace.deniedAccesses.noPhone,Dataverse,account,donotphone,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not call flag,,,,,,,,,,,,,,,,,
+HCO-019,OneKey,Workplace,noEmail,workplace.deniedAccesses.noEmail,Dataverse,account,donotemail,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not email flag,,,,,,,,,,,,,,,,,
+HCO-020,OneKey,Workplace,noMail,workplace.deniedAccesses.noMail,Dataverse,account,donotpostalmail,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not mail flag,,,,,,,,,,,,,,,,,
+HCO-021,OneKey,Workplace,noFax,workplace.deniedAccesses.noFax,Dataverse,account,donotfax,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not fax flag,,,,,,,,,,,,,,,,,
+HCO-022,OneKey,Workplace,noVisit,workplace.deniedAccesses.noVisit,Dataverse,account,ts_donotvisit,boolean,,FALSE,FALSE,FALSE,,,direct,,Do not visit; mapped to donotsendmm; REVIEW: may need custom field,,,,,,,,,,,,,,,,,
+HCO-023,OneKey,Workplace,structureTypeCode,workplace.structureTypeCode,Dataverse,account,ts_structuretype,picklist,,FALSE,FALSE,FALSE,,,decode:structure type,,decode via CODE table,,,,,,,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# HCP (Individual/Activity) -> Contact Mapping  ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Source: flatten_hcp() output from onekey/parse.py,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Target: Dataverse contact entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+HCP-001,OneKey,Individual,individualEid,individual.individualEid,Dataverse,contact,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; one Contact per Individual (not per Activity),,,,,,,,,,,,,,,,,
+HCP-002,OneKey,Individual,firstName,individual.firstName,Dataverse,contact,firstname,string,50,FALSE,FALSE,FALSE,,,direct,,First name; UK may have initial only (e.g. M.),,,,,,,,,,,,,,,,,
+HCP-003,OneKey,Individual,lastName,individual.lastName,Dataverse,contact,lastname,string,50,TRUE,FALSE,FALSE,,,coalesce:individualEid,Unknown,Last name (mandatory); fallback to individualEid or Unknown,,,,,,,,,,,,,,,,,
+HCP-004,OneKey,Individual,genderCode,individual.genderCode,Dataverse,contact,gendercode,picklist,,FALSE,FALSE,FALSE,,,map:M=1|F=2,,M=Male(1) F=Female(2); leave blank for unknown,,,,,,,,,,,,,,,,,
+HCP-005,OneKey,Individual,title,individual.titleCode,Dataverse,contact,ts_title,picklist,,FALSE,FALSE,FALSE,,,decode:title,,Decode title code to label (e.g. 03->Dr); use titleCode over prefixNameCode,,,,,,,,,,,,,,,,,
+HCP-006,OneKey,Individual,typeLabel,individual.typeCorporateLabel,Dataverse,contact,jobtitle,string,100,FALSE,FALSE,FALSE,,,direct,,Professional type (Doctor/Pharmacist/Dentist); base for jobtitle,,,,,,,,,,,,,,,,,
+HCP-006,OneKey,Individual,typeLabel,individual.typeCode,Dataverse,contact,ts7_type,picklist,,FALSE,FALSE,FALSE,,,decode:hcptype,,Professional type; decode via CODE table get field COD_SHORT_LBL,,,,,,,,,,,,,,,,,
+HCP-007,OneKey,Individual,stateCode,individual.stateCode,Dataverse,contact,statecode,state,,FALSE,FALSE,FALSE,,,decode:statecode,,decode from CODE,,,,,,,,,,,,,,,,,
+HCP-008,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,contact,parentcustomerid,lookup,,FALSE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Link to workplace Account; binds via parentcustomerid_account@odata.bind,,,,,,,,,,,,,,,,,
+HCP-009,OneKey,Workplace,usualName,workplace.usualName,Dataverse,contact,department,string,100,FALSE,FALSE,FALSE,,,direct,,Department name if workplace is a department (typeCode ABT/ACT),,,,,,,,,,,,,,,,,
+HCP-010,OneKey,Individual,isPrivacyLaw,isPrivacyLaw,Dataverse,contact,msdyn_gdproptout,boolean,,FALSE,FALSE,FALSE,,,direct,,Privacy law flag,,,,,,,,,,,,,,,,,
+HCP-011,OneKey,Individual,preferredLanguageEID,individual.preferredLanguageEID,Dataverse,contact,ts_preferredlanguage,picklist,,FALSE,FALSE,FALSE,,,decode:preflanguage,,decode via CODE table,,,,,,,,,,,,,,,,,
+HCP-012,OneKey,Individual,specialty,individual.ada.SP_1.code,Dataverse,contact,ts_specialty1,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,decode via CODE table,,,,,,,,,,,,,,,,,
+HCP-013,OneKey,Individual,specialty,individual.ada.SP_2.code,Dataverse,contact,ts_specialty2,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,decode via CODE table,,,,,,,,,,,,,,,,,
+HCP-014,OneKey,Individual,specialty,individual.ada.SP_3.code,Dataverse,contact,ts_specialty3,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,decode via CODE table,,,,,,,,,,,,,,,,,
+HCP-015,OneKey,Individual,specialty,individual.ada.SP_4.code,Dataverse,contact,ts_specialty4,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,decode via CODE table,,,,,,,,,,,,,,,,,
+HCP-016,OneKey,Individual,specialty,individual.ada.SP_5.code,Dataverse,contact,ts_specialty5,picklist,,FALSE,FALSE,FALSE,,,decode:specialty,,decode via CODE table,,,,,,,,,,,,,,,,,
+# Address Mapping,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Target: Dataverse address entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+ADR-001,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_1.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name,,,,,,,,,,,,,,,,,
+ADR-002,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_1.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal,,,,,,,,,,,,,,,,,
+ADR-003,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_1.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel,,,,,,,,,,,,,,,,,
+ADR-004,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_1.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code,,,,,,,,,,,,,,,,,
+ADR-005,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_1.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name,,,,,,,,,,,,,,,,,
+ADR-006,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_1.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE,,,,,,,,,,,,,,,,,
+ADR-007,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-008,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_1.address.addressEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,append: - {value},,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-009,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Join on ADR_ID_ONEKEY -> WORKPLACE_ADDRESS_RELATION.ADR_ID_ONEKEY to get WKP_ID_ONEKEY; resolve to account via accountnumber. Account only.,,,,,,,,,,,,,,,,,
+#ADR-010,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_1.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County,,,,,,,,,,,,,,,,,
+ADR-011,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_2.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name,,,,,,,,,,,,,,,direct,,Address name
+ADR-012,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_2.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal,,,,,,,,,,,,,,,,,
+ADR-013,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_2.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel,,,,,,,,,,,,,,,,,
+ADR-014,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_2.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code,,,,,,,,,,,,,,,,,
+ADR-015,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_2.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name,,,,,,,,,,,,,,,,,
+ADR-016,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_2.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE,,,,,,,,,,,,,,,,,
+ADR-017,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-018,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_2.address.addressEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,append: - {value},,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-019,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Join on ADR_ID_ONEKEY -> WORKPLACE_ADDRESS_RELATION.ADR_ID_ONEKEY to get WKP_ID_ONEKEY; resolve to account via accountnumber. Account only.,,,,,,,,,,,,,,,,,
+#ADR-020,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_2.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County,,,,,,,,,,,,,,,,,
+ADR-021,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_3.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name,,,,,,,,,,,,,,,,,
+ADR-022,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_3.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal,,,,,,,,,,,,,,,,,
+ADR-023,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_3.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel,,,,,,,,,,,,,,,,,
+ADR-024,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_3.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code,,,,,,,,,,,,,,,,,
+ADR-025,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_3.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name,,,,,,,,,,,,,,,,,
+ADR-026,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_3.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE,,,,,,,,,,,,,,,,,
+ADR-027,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-028,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_3.address.addressEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,append: - {value},,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-029,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Join on ADR_ID_ONEKEY -> WORKPLACE_ADDRESS_RELATION.ADR_ID_ONEKEY to get WKP_ID_ONEKEY; resolve to account via accountnumber. Account only.,,,,,,,,,,,,,,,,,
+#ADR-030,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_3.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County,,,,,,,,,,,,,,,,,
+ADR-031,OneKey,Workplace,buildingLabel,workplace.workplaceAddresses.P_4.buildingLabel,Dataverse,customeraddress,name,string,250,TRUE,FALSE,FALSE,,,direct,,Address name,,,,,,,,,,,,,,,,,
+ADR-032,OneKey,Workplace,address_street,workplace.workplaceAddresses.P_4.address.addressShortLabel,Dataverse,customeraddress,line1,string,250,FALSE,FALSE,FALSE,,,direct,,Primary address street; typeCode P = Principal,,,,,,,,,,,,,,,,,
+ADR-033,OneKey,Workplace,address_city,workplace.workplaceAddresses.P_4.address.postalTownReference.villageLabel,Dataverse,customeraddress,city,string,80,FALSE,FALSE,FALSE,,,direct,,City; fallback to dispatchLabel,,,,,,,,,,,,,,,,,
+ADR-034,OneKey,Workplace,address_postalCode,workplace.workplaceAddresses.P_4.address.longPostalCode,Dataverse,customeraddress,postalcode,string,20,FALSE,FALSE,FALSE,,,direct,,Postal/ZIP code,,,,,,,,,,,,,,,,,
+ADR-035,OneKey,Workplace,address_country,workplace.workplaceAddresses.P_4.address.postalTownReference.country,Dataverse,customeraddress,country,string,80,FALSE,FALSE,FALSE,,,direct,,ISO country code or full name,,,,,,,,,,,,,,,,,
+ADR-036,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_4.typeCode,Dataverse,customeraddress,addresstypecode,picklist,,FALSE,FALSE,FALSE,,,decode:addresstype,,decode with CODE,,,,,,,,,,,,,,,,,
+ADR-037,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-038,OneKey,Workplace,addressEid,workplace.workplaceAddresses.P_4.address.addressEid,Dataverse,customeraddress,ts_externalid,string,50,TRUE,TRUE,FALSE,,,append: - {value},,Primary key for upsert via ts_externalid alternate key,,,,,,,,,,,,,,,,,
+ADR-039,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,customeraddress,parentid,lookup,,TRUE,FALSE,TRUE,account,ts_externalid,lookup_by_key,,Join on ADR_ID_ONEKEY -> WORKPLACE_ADDRESS_RELATION.ADR_ID_ONEKEY to get WKP_ID_ONEKEY; resolve to account via accountnumber. Account only.,,,,,,,,,,,,,,,,,
+#ADR-040,OneKey,Workplace,address_addressType,workplace.workplaceAddresses.P_4.address.subdivisions.SUB.3.longLocalizedLabel,Dataverse,customeraddress,county,string,80,FALSE,FALSE,FALSE,,,direct,,County,,,,,,,,,,,,,,,,,
+# RELATION -> HCO HCO Mapping,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Source: flatten_hco() output from onekey/parse.py,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Target: Dataverse Affiliation entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# AFF (Activity) -> Affiliation Mapping,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Source: ACTIVITY sheet,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# Target: Dataverse ts_affiliation entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# from_to_type = composite key: IND_ID_ONEKEY + WKP_ID_ONEKEY. ts_fromid = Individual (from). Some fields may be blank for Relation-sourced rows.,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+# ====================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+AFF-001,OneKey,Activity,activityEid,activity.activityEid,Dataverse,ts_affiliation,ts_externalid,string,50,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; ACT_ID_ONEKEY is the alternate key,,,,,,,,,,,,,,,,,
+AFF-002,OneKey,Activity,individualEid,activity.individualEid,Dataverse,ts_affiliation,ts_compoundkey,string,50,FALSE,FALSE,FALSE,,,direct,,Reference field; 2-part composite of IND + WKP,,,,,,,,,,,,,,,,,
+AFF-002,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,ts_affiliation,ts_compoundkey,string,50,FALSE,FALSE,FALSE,,,append: - {value},,Reference field; 2-part composite of IND + WKP,,,,,,,,,,,,,,,,,
+AFF-003,OneKey,Activity,individualEid,activity.individualEid,Dataverse,ts_affiliation,ts_fromid,lookup,,TRUE,FALSE,FALSE,contact,ts_externalid,lookup_by_key,,From/child ID = Individual OneKey ID,,,,,,,,,,,,,,,,,
+AFF-004,OneKey,Activity,workplaceEid,activity.workplaceEid,Dataverse,ts_affiliation,ts_toid,lookup,,TRUE,FALSE,FALSE,account,ts_externalid,lookup_by_key,,To/Parent ID = Workplace OneKey ID,,,,,,,,,,,,,,,,,
+AFF-005,OneKey,Activity,isMainActivity,activity.isMainActivity,Dataverse,ts_affiliation,ts_isprimary,boolean,,FALSE,FALSE,FALSE,,,direct,FALSE,Is primary affiliation; default false,,,,,,,,,,,,,,,,,
+AFF-006,OneKey,Activity,role,activity.ada.TIH_1.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 1 of 10; multi-select; all ROLE_1-10 feed into same field; decode via CODE table,,,,,,,,,,,,,,,,,
+AFF-007,OneKey,Activity,ROLE_2,activity.ada.TIH_2.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 2; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-008,OneKey,Activity,ROLE_3,activity.ada.TIH_3.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 3; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-009,OneKey,Activity,ROLE_4,activity.ada.TIH_4.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 4; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-010,OneKey,Activity,ROLE_5,activity.ada.TIH_5.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 5; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-011,OneKey,Activity,ROLE_6,activity.ada.TIH_6.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 6; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-012,OneKey,Activity,ROLE_7,activity.ada.TIH_7.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 7; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-013,OneKey,Activity,ROLE_8,activity.ada.TIH_8.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 8; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-014,OneKey,Activity,ROLE_9,activity.ada.TIH_9.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 9; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-015,OneKey,Activity,ROLE_10,activity.ada.TIH_10.code,Dataverse,ts_affiliation,ts_role,multi-select picklist,,FALSE,FALSE,FALSE,,,decode:role,,Role 10; appended to multi-select,,,,,,,,,,,,,,,,,
+AFF-016,OneKey,Activity,workingStatusCode,activity.workingStatusCode,Dataverse,ts_affiliation,ts_workingstatus,picklist,,FALSE,FALSE,FALSE,,,decode:workingstatus,,Decode via CODE table; options 1-6; blank for Relation-sourced rows,,,,,,,,,,,,,,,,,
+AFF-017,OneKey,Activity,stateCode,activity.stateCode,Dataverse,ts_affiliation,statecode,picklist,,FALSE,FALSE,FALSE,,,decode:statecode,,Source STATE_CODE -> ts_state options 1-11; decode via CODE table,,,,,,,,,,,,,,,,,
+AFF-018,OneKey,Activity,activityStartDate,activity.activityStartDate,Dataverse,ts_affiliation,ts_startdate,datetime,,FALSE,FALSE,FALSE,,,direct,,Activity start date,,,,,,,,,,,,,,,,,
+AFF-019,OneKey,Activity,activityEndDate,activity.activityEndDate,Dataverse,ts_affiliation,ts_enddate,datetime,,FALSE,FALSE,FALSE,,,direct,,Activity end date,,,,,,,,,,,,,,,,,
+# ====================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,

@@ -6,11 +6,6 @@ mapping_id,mapping_type,source_code,source_value,target_value,target_label,notes
 # Gender Code Mapping (individual.genderCode -> contact.gendercode),,,,,,
 VAL-GEN-001,gendercode,M,Male,1,Male,OneKey M -> Dataverse Male (1)
 VAL-GEN-002,gendercode,F,Female,2,Female,OneKey F -> Dataverse Female (2)
-# Status Code Mapping (statusCode -> statecode),,,,,,
-VAL-STA-001,statecode,3,Valid,0,Active,OneKey Valid -> Dataverse Active
-VAL-STA-002,statecode,9,Invalid,1,Inactive,OneKey Invalid -> Dataverse Inactive
-VAL-STA-003,statecode,1,Created,1,Inactive,OneKey Created (pending) -> Dataverse Inactive
-VAL-STA-004,statecode,6,Deceased,1,Inactive,OneKey Deceased -> Dataverse Inactive
 # Status Reason Mapping (statusCode -> statuscode),,,,,,
 VAL-STR-001,statuscode,3,Valid,1,Active,Active status reason
 VAL-STR-002,statuscode,9,Invalid,2,Inactive,Inactive status reason
@@ -23,18 +18,6 @@ VAL-IND-003,industrycode,N,NHS Establishment,13,NHS Establishment,NHS Est / Clin
 VAL-IND-004,industrycode,O,Office,14,Office,Office / Other
 VAL-IND-005,industrycode,P,Pharmacy,15,Pharmacy,Pharmacy
 VAL-IND-006,industrycode,L,Laboratory,16,Laboratory,Lab facility
-# HCP Professional Type Code (individual.typeCode -> typecode decode),,,,,,
-VAL-TYP-001,typecode,M,Physician,Doctor,Doctor,Medical Practitioner / Physician
-VAL-TYP-002,typecode,P,Pharmacist,Pharmacist,Pharmacist,Pharmacist
-VAL-TYP-003,typecode,D,Dentist,Dentist,Dentist,Dentist
-VAL-TYP-004,typecode,N,Nurse,Nurse,Nurse,Nurse
-VAL-TYP-005,typecode,A,Administrator,Administrator,Healthcare Administrator,Healthcare Administrator
-VAL-TYP-006,typecode,Z,Other,Other,Other Healthcare Professional,Other HCP type
-VAL-TYP-007,typecode,V,Veterinarian,Veterinarian,Veterinarian,Veterinarian (some markets)
-# Address Type Code (workplaceAddresses.typeCode -> address1_addresstypecode),,,,,,
-VAL-ADR-001,addresstypecode,P,Primary,3,Primary,Primary/Principal address
-VAL-ADR-002,addresstypecode,S,Secondary,4,Other,Secondary address
-VAL-ADR-003,addresstypecode,M,Mailing,5,Mail,Mailing address
 # Process Code Mapping (CDC processCode),,,,,,
 VAL-PRC-001,processcode,I,Insert,insert,Insert,New record created in OneKey
 VAL-PRC-002,processcode,U,Update,update,Update,Existing record modified
@@ -47,6 +30,8 @@ VAL-COD-004,codebase,WSE,Sweden,SE,Sweden,Sweden codebase
 VAL-COD-005,codebase,WDK,Denmark,DK,Denmark,Denmark codebase
 VAL-COD-006,codebase,WNO,Norway,NO,Norway,Norway codebase
 VAL-COD-007,codebase,WFI,Finland,FI,Finland,Finland codebase
+# Preferred language mapping for HCP,,,,,,
+VAL-PLN-001,language,en,English,126870001,English,English UK
 # Language Code Mapping (for portal LCID if needed),,,,,,
 VAL-LNG-001,language,en_GB,English (UK),1033,English,English UK
 VAL-LNG-002,language,de,German,1031,German,German
@@ -56,206 +41,206 @@ VAL-LNG-005,language,da,Danish,1030,Danish,Danish
 VAL-LNG-006,language,no,Norwegian,1044,Norwegian,Norwegian
 VAL-LNG-007,language,fi,Finnish,1035,Finnish,Finnish
 # Specialty mapping,,,,,,
-VAL-SPE-001,specialty,01,General Medicine,1,General Medicine,
-VAL-SPE-002,specialty,02,Asthma,2,Asthma,
-VAL-SPE-003,specialty,03,Anatomical Pathology,3,Anatomical Pathology,
-VAL-SPE-004,specialty,04,Anaesthesiology,4,Anaesthesiology,
-VAL-SPE-005,specialty,05,Homeopathy,5,Homeopathy,
-VAL-SPE-006,specialty,06,Gastroenterology,6,Gastroenterology,
-VAL-SPE-007,specialty,07,Biochemistry,7,Biochemistry,
-VAL-SPE-008,specialty,08,Cardiology,8,Cardiology,
-VAL-SPE-009,specialty,09,Sports Medicine,9,Sports Medicine,
-VAL-SPE-010,specialty,0B,HIV Medicine,10,HIV Medicine,
-VAL-SPE-011,specialty,0X,Aesthetic Medicine,11,Aesthetic Medicine,
-VAL-SPE-012,specialty,10,Cardiovascular/Vascular Surgery,12,Cardiovascular/Vascular Surgery,
-VAL-SPE-013,specialty,11,General Surgery,13,General Surgery,
-VAL-SPE-014,specialty,12,Oral Surgery,14,Oral Surgery,
-VAL-SPE-015,specialty,13,Child Surgery,15,Child Surgery,
-VAL-SPE-016,specialty,14,Cardiothoracic Surgery,16,Cardiothoracic Surgery,
-VAL-SPE-017,specialty,15,Plastic Surgery & Burns,17,Plastic Surgery & Burns,
-VAL-SPE-018,specialty,16,Dermatology,18,Dermatology,
-VAL-SPE-019,specialty,17,Hospital Laboratory,19,Hospital Laboratory,
-VAL-SPE-020,specialty,18,Endocrinology,20,Endocrinology,
-VAL-SPE-021,specialty,19,Chronic Obstructive Pulmonaru Disease,21,Chronic Obstructive Pulmonaru Disease,
-VAL-SPE-022,specialty,1B,Psychology,22,Psychology,
-VAL-SPE-023,specialty,1D,Hospital Laboratory,23,Hospital Laboratory,
-VAL-SPE-024,specialty,1N,Physiology,24,Physiology,
-VAL-SPE-025,specialty,1W,Motor Neurone Disease,25,Motor Neurone Disease,
-VAL-SPE-026,specialty,1Z,Epileptology,26,Epileptology,
-VAL-SPE-027,specialty,20,Pharmacy,27,Pharmacy,
-VAL-SPE-028,specialty,21,Geriatrics,28,Geriatrics,
-VAL-SPE-029,specialty,22,Haematology,29,Haematology,
-VAL-SPE-030,specialty,23,Minor Surgery,30,Minor Surgery,
-VAL-SPE-031,specialty,24,Allergology,31,Allergology,
-VAL-SPE-032,specialty,25,Substance Abuse,32,Substance Abuse,
-VAL-SPE-033,specialty,26,Sports Medicine,33,Sports Medicine,
-VAL-SPE-034,specialty,27,HIV,34,HIV,
-VAL-SPE-035,specialty,28,Venereology,35,Venereology,
-VAL-SPE-036,specialty,29,Endoscopy,36,Endoscopy,
-VAL-SPE-037,specialty,2A,Pain Management,37,Pain Management,
-VAL-SPE-038,specialty,2X,Head & Neck,38,Head & Neck,
-VAL-SPE-039,specialty,2Z,Colorectal Surgery,39,Colorectal Surgery,
-VAL-SPE-040,specialty,30,Forensic Sciences,40,Forensic Sciences,
-VAL-SPE-041,specialty,31,Nuclear Medicine,41,Nuclear Medicine,
-VAL-SPE-042,specialty,33,Occupational Health,42,Occupational Health,
-VAL-SPE-043,specialty,34,Microbiology,43,Microbiology,
-VAL-SPE-044,specialty,35,Nephrology,44,Nephrology,
-VAL-SPE-045,specialty,36,Pneumology,45,Pneumology,
-VAL-SPE-046,specialty,37,Neurosurgery,46,Neurosurgery,
-VAL-SPE-047,specialty,38,Neuro Psychiatry,47,Neuro Psychiatry,
-VAL-SPE-048,specialty,39,Neurology,48,Neurology,
-VAL-SPE-049,specialty,3A,Neurophysiology,49,Neurophysiology,
-VAL-SPE-050,specialty,3B,Hepatology,50,Hepatology,
-VAL-SPE-051,specialty,3E,Wholesaler,51,Wholesaler,
-VAL-SPE-052,specialty,3K,Podiatry,52,Podiatry,
-VAL-SPE-053,specialty,3L,Midwife,53,Midwife,
-VAL-SPE-054,specialty,3P,Lipidology,54,Lipidology,
-VAL-SPE-055,specialty,3Y,Medical and Rehabilitation Devices,55,Medical and Rehabilitation Devices,
-VAL-SPE-056,specialty,40,Obstetrics and Gynaecology,56,Obstetrics and Gynaecology,
-VAL-SPE-057,specialty,41,Ophthalmology,57,Ophthalmology,
-VAL-SPE-058,specialty,42,Oncology,58,Oncology,
-VAL-SPE-059,specialty,43,Otorhinolaryngology,59,Otorhinolaryngology,
-VAL-SPE-060,specialty,44,Paediatrics,60,Paediatrics,
-VAL-SPE-061,specialty,45,Psychiatry,61,Psychiatry,
-VAL-SPE-062,specialty,46,Radiology,62,Radiology,
-VAL-SPE-063,specialty,47,Radiotherapy,63,Radiotherapy,
-VAL-SPE-064,specialty,48,Rehabilitation,64,Rehabilitation,
-VAL-SPE-065,specialty,49,Rheumatology,65,Rheumatology,
-VAL-SPE-066,specialty,4M,General Medicine,66,General Medicine,
-VAL-SPE-067,specialty,4P,Purchase,67,Purchase,
-VAL-SPE-068,specialty,50,Women's Health,68,Women's Health,
-VAL-SPE-069,specialty,51,Urology,69,Urology,
-VAL-SPE-070,specialty,52,Embryology,70,Embryology,
-VAL-SPE-071,specialty,53,Orthopaedics,71,Orthopaedics,
-VAL-SPE-072,specialty,54,Tropical Medicine,72,Tropical Medicine,
-VAL-SPE-073,specialty,55,Emergency Medicine,73,Emergency Medicine,
-VAL-SPE-074,specialty,58,Physiotherapy,74,Physiotherapy,
-VAL-SPE-075,specialty,5B,Cardiothoracic Surgery,75,Cardiothoracic Surgery,
-VAL-SPE-076,specialty,5C,Community Nursing,76,Community Nursing,
-VAL-SPE-077,specialty,5F,Dentistry,77,Dentistry,
-VAL-SPE-078,specialty,61,Maternity,78,Maternity,
-VAL-SPE-079,specialty,62,Neonatology,79,Neonatology,
-VAL-SPE-080,specialty,69,Child and Adolescent Psychiatry,80,Child and Adolescent Psychiatry,
-VAL-SPE-081,specialty,6B,Cytology,81,Cytology,
-VAL-SPE-082,specialty,6C,Metabolic Medicine,82,Metabolic Medicine,
-VAL-SPE-083,specialty,6D,Transplant Surgery,83,Transplant Surgery,
-VAL-SPE-084,specialty,6E,Bacteriology,84,Bacteriology,
-VAL-SPE-085,specialty,6F,Clinical Pharmacology,85,Clinical Pharmacology,
-VAL-SPE-086,specialty,6Q,Medicine,86,Medicine,
-VAL-SPE-087,specialty,6T,Hospital Medicine,87,Hospital Medicine,
-VAL-SPE-088,specialty,6U,Tertiary Care Nurse,88,Tertiary Care Nurse,
-VAL-SPE-089,specialty,6X,Hospice and Palliative Medicine,89,Hospice and Palliative Medicine,
-VAL-SPE-090,specialty,6Y,Dystonia Care,90,Dystonia Care,
-VAL-SPE-091,specialty,71,Public Health,91,Public Health,
-VAL-SPE-092,specialty,73,Paediatric Cardiology,92,Paediatric Cardiology,
-VAL-SPE-093,specialty,74,Infectious Diseases,93,Infectious Diseases,
-VAL-SPE-094,specialty,75,Dentistry,94,Dentistry,
-VAL-SPE-095,specialty,76,Dispensing institution,95,Dispensing institution,
-VAL-SPE-096,specialty,77,Intensive Care Medicine,96,Intensive Care Medicine,
-VAL-SPE-097,specialty,78,Burns,97,Burns,
-VAL-SPE-098,specialty,7A,Renal,98,Renal,
-VAL-SPE-099,specialty,7B,Pathology,99,Pathology,
-VAL-SPE-100,specialty,7C,Maternity,100,Maternity,
-VAL-SPE-101,specialty,7D,Virology,101,Virology,
-VAL-SPE-102,specialty,7E,Histopathology,102,Histopathology,
-VAL-SPE-103,specialty,7F,Cytohistopathology,103,Cytohistopathology,
-VAL-SPE-104,specialty,7G,Audiology,104,Audiology,
-VAL-SPE-105,specialty,7H,GU Medicine,105,GU Medicine,
-VAL-SPE-106,specialty,7I,Professorial Unit,106,Professorial Unit,
-VAL-SPE-107,specialty,7J,Child Health,107,Child Health,
-VAL-SPE-108,specialty,7K,Paediatrics Radiology,108,Paediatrics Radiology,
-VAL-SPE-109,specialty,7L,Neuropathology,109,Neuropathology,
-VAL-SPE-110,specialty,7M,Paediatrics Surgery,110,Paediatrics Surgery,
-VAL-SPE-111,specialty,7N,Otolaryngology,111,Otolaryngology,
-VAL-SPE-112,specialty,7O,Pharmacology,112,Pharmacology,
-VAL-SPE-113,specialty,7P,Spinal Injuries,113,Spinal Injuries,
-VAL-SPE-114,specialty,7Q,Cytopathology,114,Cytopathology,
-VAL-SPE-115,specialty,7R,Learning Disability,115,Learning Disability,
-VAL-SPE-116,specialty,7S,Neuroradiology,116,Neuroradiology,
-VAL-SPE-117,specialty,7T,Neuropsychology,117,Neuropsychology,
-VAL-SPE-118,specialty,7U,Geriatric Psychiatry,118,Geriatric Psychiatry,
-VAL-SPE-119,specialty,7V,Histology,119,Histology,
-VAL-SPE-120,specialty,7W,Respiratory Medicine,120,Respiratory Medicine,
-VAL-SPE-121,specialty,7X,Oral and Maxillofacial Surgery,121,Oral and Maxillofacial Surgery,
-VAL-SPE-122,specialty,7Y,Epidemiology,122,Epidemiology,
-VAL-SPE-123,specialty,7Z,Psychotherapy,123,Psychotherapy,
-VAL-SPE-124,specialty,81,Genetics,124,Genetics,
-VAL-SPE-125,specialty,82,Tropical Medicine,125,Tropical Medicine,
-VAL-SPE-126,specialty,83,Aviation Medicine,126,Aviation Medicine,
-VAL-SPE-127,specialty,85,Other/Non Medical,127,Other/Non Medical,
-VAL-SPE-128,specialty,86,Endoscopy,128,Endoscopy,
-VAL-SPE-129,specialty,87,Chemical Pathology,129,Chemical Pathology,
-VAL-SPE-130,specialty,88,Retail Chemist,130,Retail Chemist,
-VAL-SPE-131,specialty,8O,Dental Nurse,131,Dental Nurse,
-VAL-SPE-132,specialty,8P,Dental Therapist,132,Dental Therapist,
-VAL-SPE-133,specialty,8Q,Dental Hygienist,133,Dental Hygienist,
-VAL-SPE-134,specialty,8T,Oral Medicine,134,Oral Medicine,
-VAL-SPE-135,specialty,8U,Chemical Pathology,135,Chemical Pathology,
-VAL-SPE-136,specialty,8W,Coronary Care,136,Coronary Care,
-VAL-SPE-137,specialty,91,Physician's Assistant,137,Physician's Assistant,
-VAL-SPE-138,specialty,95,Orthodontics,138,Orthodontics,
-VAL-SPE-139,specialty,96,Dietetics,139,Dietetics,
-VAL-SPE-140,specialty,97,Diabetology,140,Diabetology,
-VAL-SPE-141,specialty,99,General Practice,141,General Practice,
-VAL-SPE-142,specialty,9K,Child Health,142,Child Health,
-VAL-SPE-143,specialty,9X,Healthcare Administration,143,Healthcare Administration,
-VAL-SPE-144,specialty,A2,IT Manager,144,IT Manager,
-VAL-SPE-145,specialty,A3,Clinical Oncology,145,Clinical Oncology,
-VAL-SPE-146,specialty,A5,Liaison Psychiatry,146,Liaison Psychiatry,
-VAL-SPE-147,specialty,A6,Allergies,147,Allergies,
-VAL-SPE-148,specialty,A7,Immunology,148,Immunology,
-VAL-SPE-149,specialty,A8,Medical Oncology,149,Medical Oncology,
-VAL-SPE-150,specialty,A9,Parkinsons Disease,150,Parkinsons Disease,
-VAL-SPE-151,specialty,AY,Other Administration,151,Other Administration,
-VAL-SPE-152,specialty,B1,New Clinical Serology,152,New Clinical Serology,
-VAL-SPE-153,specialty,B3,Hepatology,153,Hepatology,
-VAL-SPE-154,specialty,B7,Community Psychiatric Nurses,154,Community Psychiatric Nurses,
-VAL-SPE-155,specialty,BE,Biomedical Engineering,155,Biomedical Engineering,
-VAL-SPE-156,specialty,C3,Asthma,156,Asthma,
-VAL-SPE-157,specialty,C6,Bariatric Surgery,157,Bariatric Surgery,
-VAL-SPE-158,specialty,C7,Family Planning,158,Family Planning,
-VAL-SPE-159,specialty,D1,Dental Nurse,159,Dental Nurse,
-VAL-SPE-160,specialty,D2,Occupational Therapy,160,Occupational Therapy,
-VAL-SPE-161,specialty,D3,Biology,161,Biology,
-VAL-SPE-162,specialty,D6,Speech-Language Pathology,162,Speech-Language Pathology,
-VAL-SPE-163,specialty,D7,Fertility and Reproductive Health,163,Fertility and Reproductive Health,
-VAL-SPE-164,specialty,DI,Dental Hygienist,164,Dental Hygienist,
-VAL-SPE-165,specialty,DX,Dental Therapist,165,Dental Therapist,
-VAL-SPE-166,specialty,DY,Dental Nurse,166,Dental Nurse,
-VAL-SPE-167,specialty,E7,Surgery,167,Surgery,
-VAL-SPE-168,specialty,E8,Medicine,168,Medicine,
-VAL-SPE-169,specialty,G6,Addiction Medicine,169,Addiction Medicine,
-VAL-SPE-170,specialty,H7,Cystic Fibrosis,170,Cystic Fibrosis,
-VAL-SPE-171,specialty,I7,Neurological disorders,171,Neurological disorders,
-VAL-SPE-172,specialty,J4,Research,172,Research,
-VAL-SPE-173,specialty,J7,Elderly care,173,Elderly care,
-VAL-SPE-174,specialty,K7,Medicine,174,Medicine,
-VAL-SPE-175,specialty,L1,Forensic Psychiatry,175,Forensic Psychiatry,
-VAL-SPE-176,specialty,M5,Community Health,176,Community Health,
-VAL-SPE-177,specialty,M6,Community Psychiatric Nurses,177,Community Psychiatric Nurses,
-VAL-SPE-178,specialty,M8,Women's & Children's Health,178,Women's & Children's Health,
-VAL-SPE-179,specialty,N7,Trauma/ITU,179,Trauma/ITU,
-VAL-SPE-180,specialty,N8,Multiple Sclerosis,180,Multiple Sclerosis,
-VAL-SPE-181,specialty,R9,Paediatric Haematology,181,Paediatric Haematology,
-VAL-SPE-182,specialty,S2,Paediatric Cardiology,182,Paediatric Cardiology,
-VAL-SPE-183,specialty,S4,Paediatrics Radiology,183,Paediatrics Radiology,
-VAL-SPE-184,specialty,S5,Paed.Oncology,184,Paed.Oncology,
-VAL-SPE-185,specialty,S7,Embriology,185,Embriology,
-VAL-SPE-186,specialty,SG,Breast Care,186,Breast Care,
-VAL-SPE-187,specialty,T9,Cardiac Rehabi,187,Cardiac Rehabi,
-VAL-SPE-188,specialty,TH,Theatre,188,Theatre,
-VAL-SPE-189,specialty,U0,Alternative Medicine,189,Alternative Medicine,
-VAL-SPE-190,specialty,U1,Chief Dietician,190,Chief Dietician,
-VAL-SPE-191,specialty,U2,District Nursing,191,District Nursing,
-VAL-SPE-192,specialty,U3,Manager/Advisor,192,Manager/Advisor,
-VAL-SPE-193,specialty,U4,Superintendant,193,Superintendant,
-VAL-SPE-194,specialty,U5,Senior Dietician,194,Senior Dietician,
-VAL-SPE-195,specialty,U6,Occupational Therapy,195,Occupational Therapy,
-VAL-SPE-196,specialty,V6,Urinary Continence,196,Urinary Continence,
-VAL-SPE-197,specialty,W2,Sleep Medicine,197,Sleep Medicine,
-VAL-SPE-198,specialty,Z5,Clinical Pathology,198,Clinical Pathology,
-VAL-SPE-199,specialty,Z9,Client Specific Specialty,199,Client Specific Specialty,
-VAL-SPE-200,specialty,ZZ,Client Specific Specialty,200,Client Specific Specialty,
+VAL-SPE-001,specialty,01,General Medicine,126870001,General Medicine,
+VAL-SPE-002,specialty,02,Asthma,126870002,Asthma,
+VAL-SPE-003,specialty,03,Anatomical Pathology,126870003,Anatomical Pathology,
+VAL-SPE-004,specialty,04,Anaesthesiology,126870004,Anaesthesiology,
+VAL-SPE-005,specialty,05,Homeopathy,126870005,Homeopathy,
+VAL-SPE-006,specialty,06,Gastroenterology,126870006,Gastroenterology,
+VAL-SPE-007,specialty,07,Biochemistry,126870007,Biochemistry,
+VAL-SPE-008,specialty,08,Cardiology,126870008,Cardiology,
+VAL-SPE-009,specialty,09,Sports Medicine,126870009,Sports Medicine,
+VAL-SPE-010,specialty,0B,HIV Medicine,126870010,HIV Medicine,
+VAL-SPE-011,specialty,0X,Aesthetic Medicine,126870011,Aesthetic Medicine,
+VAL-SPE-012,specialty,10,Cardiovascular/Vascular Surgery,126870012,Cardiovascular/Vascular Surgery,
+VAL-SPE-013,specialty,11,General Surgery,126870013,General Surgery,
+VAL-SPE-014,specialty,12,Oral Surgery,126870014,Oral Surgery,
+VAL-SPE-015,specialty,13,Child Surgery,126870015,Child Surgery,
+VAL-SPE-016,specialty,14,Cardiothoracic Surgery,126870016,Cardiothoracic Surgery,
+VAL-SPE-017,specialty,15,Plastic Surgery & Burns,126870017,Plastic Surgery & Burns,
+VAL-SPE-018,specialty,16,Dermatology,126870018,Dermatology,
+VAL-SPE-019,specialty,17,Hospital Laboratory,126870019,Hospital Laboratory,
+VAL-SPE-020,specialty,18,Endocrinology,126870020,Endocrinology,
+VAL-SPE-021,specialty,19,Chronic Obstructive Pulmonaru Disease,126870021,Chronic Obstructive Pulmonaru Disease,
+VAL-SPE-022,specialty,1B,Psychology,126870022,Psychology,
+VAL-SPE-023,specialty,1D,Hospital Laboratory,126870023,Hospital Laboratory,
+VAL-SPE-024,specialty,1N,Physiology,126870024,Physiology,
+VAL-SPE-025,specialty,1W,Motor Neurone Disease,126870025,Motor Neurone Disease,
+VAL-SPE-026,specialty,1Z,Epileptology,126870026,Epileptology,
+VAL-SPE-027,specialty,20,Pharmacy,126870027,Pharmacy,
+VAL-SPE-028,specialty,21,Geriatrics,126870028,Geriatrics,
+VAL-SPE-029,specialty,22,Haematology,126870029,Haematology,
+VAL-SPE-030,specialty,23,Minor Surgery,126870030,Minor Surgery,
+VAL-SPE-031,specialty,24,Allergology,126870031,Allergology,
+VAL-SPE-032,specialty,25,Substance Abuse,126870032,Substance Abuse,
+VAL-SPE-033,specialty,26,Sports Medicine,126870033,Sports Medicine,
+VAL-SPE-034,specialty,27,HIV,126870034,HIV,
+VAL-SPE-035,specialty,28,Venereology,126870035,Venereology,
+VAL-SPE-036,specialty,29,Endoscopy,126870036,Endoscopy,
+VAL-SPE-037,specialty,2A,Pain Management,126870037,Pain Management,
+VAL-SPE-038,specialty,2X,Head & Neck,126870038,Head & Neck,
+VAL-SPE-039,specialty,2Z,Colorectal Surgery,126870039,Colorectal Surgery,
+VAL-SPE-040,specialty,30,Forensic Sciences,126870040,Forensic Sciences,
+VAL-SPE-041,specialty,31,Nuclear Medicine,126870041,Nuclear Medicine,
+VAL-SPE-042,specialty,33,Occupational Health,126870042,Occupational Health,
+VAL-SPE-043,specialty,34,Microbiology,126870043,Microbiology,
+VAL-SPE-044,specialty,35,Nephrology,126870044,Nephrology,
+VAL-SPE-045,specialty,36,Pneumology,126870045,Pneumology,
+VAL-SPE-046,specialty,37,Neurosurgery,126870046,Neurosurgery,
+VAL-SPE-047,specialty,38,Neuro Psychiatry,126870047,Neuro Psychiatry,
+VAL-SPE-048,specialty,39,Neurology,126870048,Neurology,
+VAL-SPE-049,specialty,3A,Neurophysiology,126870049,Neurophysiology,
+VAL-SPE-050,specialty,3B,Hepatology,126870050,Hepatology,
+VAL-SPE-051,specialty,3E,Wholesaler,126870051,Wholesaler,
+VAL-SPE-052,specialty,3K,Podiatry,126870052,Podiatry,
+VAL-SPE-053,specialty,3L,Midwife,126870053,Midwife,
+VAL-SPE-054,specialty,3P,Lipidology,126870054,Lipidology,
+VAL-SPE-055,specialty,3Y,Medical and Rehabilitation Devices,126870055,Medical and Rehabilitation Devices,
+VAL-SPE-056,specialty,40,Obstetrics and Gynaecology,126870056,Obstetrics and Gynaecology,
+VAL-SPE-057,specialty,41,Ophthalmology,126870057,Ophthalmology,
+VAL-SPE-058,specialty,42,Oncology,126870058,Oncology,
+VAL-SPE-059,specialty,43,Otorhinolaryngology,126870059,Otorhinolaryngology,
+VAL-SPE-060,specialty,44,Paediatrics,126870060,Paediatrics,
+VAL-SPE-061,specialty,45,Psychiatry,126870061,Psychiatry,
+VAL-SPE-062,specialty,46,Radiology,126870062,Radiology,
+VAL-SPE-063,specialty,47,Radiotherapy,126870063,Radiotherapy,
+VAL-SPE-064,specialty,48,Rehabilitation,126870064,Rehabilitation,
+VAL-SPE-065,specialty,49,Rheumatology,126870065,Rheumatology,
+VAL-SPE-066,specialty,4M,General Medicine,126870066,General Medicine,
+VAL-SPE-067,specialty,4P,Purchase,126870067,Purchase,
+VAL-SPE-068,specialty,50,Women's Health,126870068,Women's Health,
+VAL-SPE-069,specialty,51,Urology,126870069,Urology,
+VAL-SPE-070,specialty,52,Embryology,126870070,Embryology,
+VAL-SPE-071,specialty,53,Orthopaedics,126870071,Orthopaedics,
+VAL-SPE-072,specialty,54,Tropical Medicine,126870072,Tropical Medicine,
+VAL-SPE-073,specialty,55,Emergency Medicine,126870073,Emergency Medicine,
+VAL-SPE-074,specialty,58,Physiotherapy,126870074,Physiotherapy,
+VAL-SPE-075,specialty,5B,Cardiothoracic Surgery,126870075,Cardiothoracic Surgery,
+VAL-SPE-076,specialty,5C,Community Nursing,126870076,Community Nursing,
+VAL-SPE-077,specialty,5F,Dentistry,126870077,Dentistry,
+VAL-SPE-078,specialty,61,Maternity,126870078,Maternity,
+VAL-SPE-079,specialty,62,Neonatology,126870079,Neonatology,
+VAL-SPE-080,specialty,69,Child and Adolescent Psychiatry,126870080,Child and Adolescent Psychiatry,
+VAL-SPE-081,specialty,6B,Cytology,126870081,Cytology,
+VAL-SPE-082,specialty,6C,Metabolic Medicine,126870082,Metabolic Medicine,
+VAL-SPE-083,specialty,6D,Transplant Surgery,126870083,Transplant Surgery,
+VAL-SPE-084,specialty,6E,Bacteriology,126870084,Bacteriology,
+VAL-SPE-085,specialty,6F,Clinical Pharmacology,126870085,Clinical Pharmacology,
+VAL-SPE-086,specialty,6Q,Medicine,126870086,Medicine,
+VAL-SPE-087,specialty,6T,Hospital Medicine,126870087,Hospital Medicine,
+VAL-SPE-088,specialty,6U,Tertiary Care Nurse,126870088,Tertiary Care Nurse,
+VAL-SPE-089,specialty,6X,Hospice and Palliative Medicine,126870089,Hospice and Palliative Medicine,
+VAL-SPE-090,specialty,6Y,Dystonia Care,126870090,Dystonia Care,
+VAL-SPE-091,specialty,71,Public Health,126870091,Public Health,
+VAL-SPE-092,specialty,73,Paediatric Cardiology,126870092,Paediatric Cardiology,
+VAL-SPE-093,specialty,74,Infectious Diseases,126870093,Infectious Diseases,
+VAL-SPE-094,specialty,75,Dentistry,126870094,Dentistry,
+VAL-SPE-095,specialty,76,Dispensing institution,126870095,Dispensing institution,
+VAL-SPE-096,specialty,77,Intensive Care Medicine,126870096,Intensive Care Medicine,
+VAL-SPE-097,specialty,78,Burns,126870097,Burns,
+VAL-SPE-098,specialty,7A,Renal,126870098,Renal,
+VAL-SPE-099,specialty,7B,Pathology,126870099,Pathology,
+VAL-SPE-100,specialty,7C,Maternity,126870100,Maternity,
+VAL-SPE-101,specialty,7D,Virology,126870101,Virology,
+VAL-SPE-102,specialty,7E,Histopathology,126870102,Histopathology,
+VAL-SPE-103,specialty,7F,Cytohistopathology,126870103,Cytohistopathology,
+VAL-SPE-104,specialty,7G,Audiology,126870104,Audiology,
+VAL-SPE-105,specialty,7H,GU Medicine,126870105,GU Medicine,
+VAL-SPE-106,specialty,7I,Professorial Unit,126870106,Professorial Unit,
+VAL-SPE-107,specialty,7J,Child Health,126870107,Child Health,
+VAL-SPE-108,specialty,7K,Paediatrics Radiology,126870108,Paediatrics Radiology,
+VAL-SPE-109,specialty,7L,Neuropathology,126870109,Neuropathology,
+VAL-SPE-110,specialty,7M,Paediatrics Surgery,126870110,Paediatrics Surgery,
+VAL-SPE-111,specialty,7N,Otolaryngology,126870111,Otolaryngology,
+VAL-SPE-112,specialty,7O,Pharmacology,126870112,Pharmacology,
+VAL-SPE-113,specialty,7P,Spinal Injuries,126870113,Spinal Injuries,
+VAL-SPE-114,specialty,7Q,Cytopathology,126870114,Cytopathology,
+VAL-SPE-115,specialty,7R,Learning Disability,126870115,Learning Disability,
+VAL-SPE-116,specialty,7S,Neuroradiology,126870116,Neuroradiology,
+VAL-SPE-117,specialty,7T,Neuropsychology,126870117,Neuropsychology,
+VAL-SPE-118,specialty,7U,Geriatric Psychiatry,126870118,Geriatric Psychiatry,
+VAL-SPE-119,specialty,7V,Histology,126870119,Histology,
+VAL-SPE-120,specialty,7W,Respiratory Medicine,126870120,Respiratory Medicine,
+VAL-SPE-121,specialty,7X,Oral and Maxillofacial Surgery,126870121,Oral and Maxillofacial Surgery,
+VAL-SPE-122,specialty,7Y,Epidemiology,126870122,Epidemiology,
+VAL-SPE-123,specialty,7Z,Psychotherapy,126870123,Psychotherapy,
+VAL-SPE-124,specialty,81,Genetics,126870124,Genetics,
+VAL-SPE-125,specialty,82,Tropical Medicine,126870125,Tropical Medicine,
+VAL-SPE-126,specialty,83,Aviation Medicine,126870126,Aviation Medicine,
+VAL-SPE-127,specialty,85,Other/Non Medical,126870127,Other/Non Medical,
+VAL-SPE-128,specialty,86,Endoscopy,126870128,Endoscopy,
+VAL-SPE-129,specialty,87,Chemical Pathology,126870129,Chemical Pathology,
+VAL-SPE-130,specialty,88,Retail Chemist,126870130,Retail Chemist,
+VAL-SPE-131,specialty,8O,Dental Nurse,126870131,Dental Nurse,
+VAL-SPE-132,specialty,8P,Dental Therapist,126870132,Dental Therapist,
+VAL-SPE-133,specialty,8Q,Dental Hygienist,126870133,Dental Hygienist,
+VAL-SPE-134,specialty,8T,Oral Medicine,126870134,Oral Medicine,
+VAL-SPE-135,specialty,8U,Chemical Pathology,126870135,Chemical Pathology,
+VAL-SPE-136,specialty,8W,Coronary Care,126870136,Coronary Care,
+VAL-SPE-137,specialty,91,Physician's Assistant,126870137,Physician's Assistant,
+VAL-SPE-138,specialty,95,Orthodontics,126870138,Orthodontics,
+VAL-SPE-139,specialty,96,Dietetics,126870139,Dietetics,
+VAL-SPE-140,specialty,97,Diabetology,126870140,Diabetology,
+VAL-SPE-141,specialty,99,General Practice,126870141,General Practice,
+VAL-SPE-142,specialty,9K,Child Health,126870142,Child Health,
+VAL-SPE-143,specialty,9X,Healthcare Administration,126870143,Healthcare Administration,
+VAL-SPE-144,specialty,A2,IT Manager,126870144,IT Manager,
+VAL-SPE-145,specialty,A3,Clinical Oncology,126870145,Clinical Oncology,
+VAL-SPE-146,specialty,A5,Liaison Psychiatry,126870146,Liaison Psychiatry,
+VAL-SPE-147,specialty,A6,Allergies,126870147,Allergies,
+VAL-SPE-148,specialty,A7,Immunology,126870148,Immunology,
+VAL-SPE-149,specialty,A8,Medical Oncology,126870149,Medical Oncology,
+VAL-SPE-150,specialty,A9,Parkinsons Disease,126870150,Parkinsons Disease,
+VAL-SPE-151,specialty,AY,Other Administration,126870151,Other Administration,
+VAL-SPE-152,specialty,B1,New Clinical Serology,126870152,New Clinical Serology,
+VAL-SPE-153,specialty,B3,Hepatology,126870153,Hepatology,
+VAL-SPE-154,specialty,B7,Community Psychiatric Nurses,126870154,Community Psychiatric Nurses,
+VAL-SPE-155,specialty,BE,Biomedical Engineering,126870155,Biomedical Engineering,
+VAL-SPE-156,specialty,C3,Asthma,126870156,Asthma,
+VAL-SPE-157,specialty,C6,Bariatric Surgery,126870157,Bariatric Surgery,
+VAL-SPE-158,specialty,C7,Family Planning,126870158,Family Planning,
+VAL-SPE-159,specialty,D1,Dental Nurse,126870159,Dental Nurse,
+VAL-SPE-160,specialty,D2,Occupational Therapy,126870160,Occupational Therapy,
+VAL-SPE-161,specialty,D3,Biology,126870161,Biology,
+VAL-SPE-162,specialty,D6,Speech-Language Pathology,126870162,Speech-Language Pathology,
+VAL-SPE-163,specialty,D7,Fertility and Reproductive Health,126870163,Fertility and Reproductive Health,
+VAL-SPE-164,specialty,DI,Dental Hygienist,126870164,Dental Hygienist,
+VAL-SPE-165,specialty,DX,Dental Therapist,126870165,Dental Therapist,
+VAL-SPE-166,specialty,DY,Dental Nurse,126870166,Dental Nurse,
+VAL-SPE-167,specialty,E7,Surgery,126870167,Surgery,
+VAL-SPE-168,specialty,E8,Medicine,126870168,Medicine,
+VAL-SPE-169,specialty,G6,Addiction Medicine,126870169,Addiction Medicine,
+VAL-SPE-170,specialty,H7,Cystic Fibrosis,126870170,Cystic Fibrosis,
+VAL-SPE-171,specialty,I7,Neurological disorders,126870171,Neurological disorders,
+VAL-SPE-172,specialty,J4,Research,126870172,Research,
+VAL-SPE-173,specialty,J7,Elderly care,126870173,Elderly care,
+VAL-SPE-174,specialty,K7,Medicine,126870174,Medicine,
+VAL-SPE-175,specialty,L1,Forensic Psychiatry,126870175,Forensic Psychiatry,
+VAL-SPE-176,specialty,M5,Community Health,126870176,Community Health,
+VAL-SPE-177,specialty,M6,Community Psychiatric Nurses,126870177,Community Psychiatric Nurses,
+VAL-SPE-178,specialty,M8,Women's & Children's Health,126870178,Women's & Children's Health,
+VAL-SPE-179,specialty,N7,Trauma/ITU,126870179,Trauma/ITU,
+VAL-SPE-180,specialty,N8,Multiple Sclerosis,126870180,Multiple Sclerosis,
+VAL-SPE-181,specialty,R9,Paediatric Haematology,126870181,Paediatric Haematology,
+VAL-SPE-182,specialty,S2,Paediatric Cardiology,126870182,Paediatric Cardiology,
+VAL-SPE-183,specialty,S4,Paediatrics Radiology,126870183,Paediatrics Radiology,
+VAL-SPE-184,specialty,S5,Paed.Oncology,126870184,Paed.Oncology,
+VAL-SPE-185,specialty,S7,Embriology,126870185,Embriology,
+VAL-SPE-186,specialty,SG,Breast Care,126870186,Breast Care,
+VAL-SPE-187,specialty,T9,Cardiac Rehabi,126870187,Cardiac Rehabi,
+VAL-SPE-188,specialty,TH,Theatre,126870188,Theatre,
+VAL-SPE-189,specialty,U0,Alternative Medicine,126870189,Alternative Medicine,
+VAL-SPE-190,specialty,U1,Chief Dietician,126870190,Chief Dietician,
+VAL-SPE-191,specialty,U2,District Nursing,126870191,District Nursing,
+VAL-SPE-192,specialty,U3,Manager/Advisor,126870192,Manager/Advisor,
+VAL-SPE-193,specialty,U4,Superintendant,126870193,Superintendant,
+VAL-SPE-194,specialty,U5,Senior Dietician,126870194,Senior Dietician,
+VAL-SPE-195,specialty,U6,Occupational Therapy,126870195,Occupational Therapy,
+VAL-SPE-196,specialty,V6,Urinary Continence,126870196,Urinary Continence,
+VAL-SPE-197,specialty,W2,Sleep Medicine,126870197,Sleep Medicine,
+VAL-SPE-198,specialty,Z5,Clinical Pathology,126870198,Clinical Pathology,
+VAL-SPE-199,specialty,Z9,Client Specific Specialty,126870199,Client Specific Specialty,
+VAL-SPE-200,specialty,ZZ,Client Specific Specialty,126870200,Client Specific Specialty,
 # State Code Mapping (stateCode -> statecode),,,,,,
 VAL-STA-001,statecode,ACT,Active,0,Active,
 VAL-STA-002,statecode,CLO,Closed,1,Inactive,
@@ -269,39 +254,39 @@ VAL-STA-009,statecode,RED,Reduced Activity,1,Inactive,
 VAL-STA-010,statecode,RET,Retired,1,Inactive,
 VAL-STA-011,statecode,TCL,Temporarily Closed,1,Inactive,
 VAL-STA-012,statecode,TIN,Temporarily Inactive,1,Inactive,
-# Structure Code Mapping (structureTypeCode -> cr4ec_structuretype),,,,,,
-VAL-STR-001,structuretype,POR,Primary Organisation,1,Primary Organisation,
-VAL-STR-002,structuretype,ORG,Organisation,2,Organisation,
-VAL-STR-003,structuretype,DPT,Department,3,Department,
+# Structure Code Mapping (structureTypeCode -> cree7_structuretype),,,,,,
+VAL-STR-001,structuretype,POR,Primary Organisation,126870001,Primary Organisation,
+VAL-STR-002,structuretype,ORG,Organisation,126870002,Organisation,
+VAL-STR-003,structuretype,DPT,Department,126870003,Department,
 # Title Code Mapping (individual.titleCode -> title decode),,,,,,
-VAL-TIT-001,title,02,Mx,1,Mx,Mx
-VAL-TIT-002,title,03,Doctor,2,Doctor,Doctor
-VAL-TIT-003,title,11,Professor,3,Professor,Professor
-VAL-TIT-004,title,12,Mr,4,Mr,Mr
-VAL-TIT-005,title,13,Mrs,5,Mrs,Mrs
-VAL-TIT-006,title,14,Miss,6,Miss,Miss
-VAL-TIT-007,title,20,Unknown,7,Unknown,Unknown
-VAL-TIT-008,title,21,Sir,8,Sir,Sir
-VAL-TIT-009,title,22,Ms,9,Ms,Ms
-VAL-TIT-010,title,31,Sister,10,Sister,Sister
-VAL-TIT-011,title,32,Nurse,11,Nurse,Nurse
-VAL-TIT-012,title,33,Baroness,12,Baroness,Baroness
-VAL-TIT-013,title,34,Canon,13,Canon,Canon
-VAL-TIT-014,title,35,Colonel,14,Colonel,Colonel
-VAL-TIT-015,title,36,Dame,15,Dame,Dame
-VAL-TIT-016,title,37,Lady,16,Lady,Lady
-VAL-TIT-017,title,38,Lord,17,Lord,Lord
-VAL-TIT-018,title,39,Lt Colonel,18,Lt Colonel,Lt Colonel
-VAL-TIT-019,title,40,Major,19,Major,Major
-VAL-TIT-020,title,41,Mother,20,Mother,Mother
-VAL-TIT-021,title,42,Reverend,21,Reverend,Reverend
-VAL-TIT-022,title,43,The,22,The,The
-VAL-TIT-023,title,44,Archbishop,23,Archbishop,Archbishop
-VAL-TIT-024,title,45,Bishop,24,Bishop,Bishop
-VAL-TIT-025,title,46,Duke,25,Duke,Duke
-VAL-TIT-026,title,47,Earl,26,Earl,Earl
-VAL-TIT-027,title,48,Marquess,27,Marquess,Marquess
-VAL-TIT-028,title,49,Viscount,28,Viscount,Viscount
+VAL-TIT-001,title,02,Mx,126870001,Mx,Mx
+VAL-TIT-002,title,03,Doctor,126870002,Doctor,Doctor
+VAL-TIT-003,title,11,Professor,126870003,Professor,Professor
+VAL-TIT-004,title,12,Mr,126870004,Mr,Mr
+VAL-TIT-005,title,13,Mrs,126870005,Mrs,Mrs
+VAL-TIT-006,title,14,Miss,126870006,Miss,Miss
+VAL-TIT-007,title,20,Unknown,126870007,Unknown,Unknown
+VAL-TIT-008,title,21,Sir,126870008,Sir,Sir
+VAL-TIT-009,title,22,Ms,126870009,Ms,Ms
+VAL-TIT-010,title,31,Sister,126870010,Sister,Sister
+VAL-TIT-011,title,32,Nurse,126870011,Nurse,Nurse
+VAL-TIT-012,title,33,Baroness,126870012,Baroness,Baroness
+VAL-TIT-013,title,34,Canon,126870013,Canon,Canon
+VAL-TIT-014,title,35,Colonel,126870014,Colonel,Colonel
+VAL-TIT-015,title,36,Dame,126870015,Dame,Dame
+VAL-TIT-016,title,37,Lady,126870016,Lady,Lady
+VAL-TIT-017,title,38,Lord,126870017,Lord,Lord
+VAL-TIT-018,title,39,Lt Colonel,126870018,Lt Colonel,Lt Colonel
+VAL-TIT-019,title,40,Major,126870019,Major,Major
+VAL-TIT-020,title,41,Mother,126870020,Mother,Mother
+VAL-TIT-021,title,42,Reverend,126870021,Reverend,Reverend
+VAL-TIT-022,title,43,The,126870022,The,The
+VAL-TIT-023,title,44,Archbishop,126870023,Archbishop,Archbishop
+VAL-TIT-024,title,45,Bishop,126870024,Bishop,Bishop
+VAL-TIT-025,title,46,Duke,126870025,Duke,Duke
+VAL-TIT-026,title,47,Earl,126870026,Earl,Earl
+VAL-TIT-027,title,48,Marquess,126870027,Marquess,Marquess
+VAL-TIT-028,title,49,Viscount,126870028,Viscount,Viscount
 # Salutation Mapping (individual.prefixNameCode -> salutation),,,,,,
 # Address Type Mapping,,,,,,
 VAL-ADD-001,addresstype,F,Billing address,1,Bill To,
@@ -309,129 +294,618 @@ VAL-ADD-002,addresstype,L,Delivery address,2,Ship to,
 VAL-ADD-003,addresstype,M,Mailing address,5,Mail To,
 VAL-ADD-004,addresstype,P,Primary address,3,Primary,
 VAL-ADD-005,addresstype,S,Secondary address,4,Other,
-# HCO Type Code (workplace.typeCode -> cr4ec_type),,,,,,
-VAL-HCO-001,hcotype,ACA,Academic Institution,1,Academic Institution,Academic Institution
-VAL-HCO-002,hcotype,ACT,Acute Trust,2,Acute Trust,Acute Trust
-VAL-HCO-003,hcotype,ADD,Addiction Services Organisation,3,Addiction Services Organisation,Addiction Services Organisation
-VAL-HCO-004,hcotype,AMT,Ambulance Trust,4,Ambulance Trust,Ambulance Trust
-VAL-HCO-005,hcotype,ASS,Association,5,Association,Association
-VAL-HCO-006,hcotype,BLO,Blood Transfusion Organisation,6,Blood Transfusion Organisation,Blood Transfusion Organisation
-VAL-HCO-007,hcotype,CAC,Cash & Carry,7,Cash & Carry,Cash & Carry
-VAL-HCO-008,hcotype,CAR,Cardiac Network,8,Cardiac Network,Cardiac Network
-VAL-HCO-009,hcotype,CHP,Community Health Partnerships,9,Community Health Partnerships,Community Health Partnerships
-VAL-HCO-010,hcotype,CHR,Charity,10,Charity,Charity
-VAL-HCO-011,hcotype,CLD,Clinical Directorate,11,Clinical Directorate,Clinical Directorate
-VAL-HCO-012,hcotype,CLH,Clinic Hospital,12,Clinic Hospital,Clinic Hospital
-VAL-HCO-013,hcotype,CLI,Clinic,13,Clinic,Clinic
-VAL-HCO-014,hcotype,CMH,Community Mental Health Team,14,Community Mental Health Team,Community Mental Health Team
-VAL-HCO-015,hcotype,CNC,Network,15,Network,Network
-VAL-HCO-016,hcotype,CNL,Local Council,16,Local Council,Local Council
-VAL-HCO-017,hcotype,CNT,Community Nurse Base Team,17,Community Nurse Base Team,Community Nurse Base Team
-VAL-HCO-018,hcotype,CRE,Research Organisation,18,Research Organisation,Research Organisation
-VAL-HCO-019,hcotype,CSN,Clinical Senate,19,Clinical Senate,Clinical Senate
-VAL-HCO-020,hcotype,CSU,Commissioning Service Support Unit,20,Commissioning Service Support Unit,Commissioning Service Support Unit
-VAL-HCO-021,hcotype,CTE,Committee,21,Committee,Committee
-VAL-HCO-022,hcotype,CTO,Care Trust,22,Care Trust,Care Trust
-VAL-HCO-023,hcotype,DAC,Dispensing Appliance Contractor,23,Dispensing Appliance Contractor,Dispensing Appliance Contractor
-VAL-HCO-024,hcotype,DAT,Drug Action Team Centre,24,Drug Action Team Centre,Drug Action Team Centre
-VAL-HCO-025,hcotype,DEN,Dentist,25,Dentist,Dentist
-VAL-HCO-026,hcotype,DEP,Dentist Private,26,Dentist Private,Dentist Private
-VAL-HCO-027,hcotype,DHS,Directorate of Health & Social Care,27,Directorate of Health & Social Care,Directorate of Health & Social Care
-VAL-HCO-028,hcotype,DPR,Dental Practice,28,Dental Practice,Dental Practice
-VAL-HCO-029,hcotype,DRC,DO NOT USE  NEW CODE Drug & Therapeutic Committee,29,DO NOT USE  NEW CODE Drug & Therapeutic Committee,DO NOT USE  NEW CODE Drug & Therapeutic Committee
-VAL-HCO-030,hcotype,DSG,Dispensing Surgery,30,Dispensing Surgery,Dispensing Surgery
-VAL-HCO-031,hcotype,DSP,Dispensing Practice,31,Dispensing Practice,Dispensing Practice
-VAL-HCO-032,hcotype,DST,Drugstore,32,Drugstore,Drugstore
-VAL-HCO-033,hcotype,DTC,Diagnostic and Treatment Centre (NHS),33,Diagnostic and Treatment Centre (NHS),Diagnostic and Treatment Centre (NHS)
-VAL-HCO-034,hcotype,E,optician,34,optician,optician
-VAL-HCO-035,hcotype,FDT,Foundation Trust,35,Foundation Trust,Foundation Trust
-VAL-HCO-036,hcotype,FER,Fertility Clinic,36,Fertility Clinic,Fertility Clinic
-VAL-HCO-037,hcotype,FIC,Fictious Health Care Centre,37,Fictious Health Care Centre,Fictious Health Care Centre
-VAL-HCO-038,hcotype,FPC,Family Planning Clinic,38,Family Planning Clinic,Family Planning Clinic
-VAL-HCO-039,hcotype,GOV,Government,39,Government,Government
-VAL-HCO-040,hcotype,GPC,Clinical Commissioning Group,40,Clinical Commissioning Group,Clinical Commissioning Group
-VAL-HCO-041,hcotype,GPF,GP Federation,41,GP Federation,GP Federation
-VAL-HCO-042,hcotype,GPP,GP Practice,42,GP Practice,GP Practice
-VAL-HCO-043,hcotype,GST,Grocery Store,43,Grocery Store,Grocery Store
-VAL-HCO-044,hcotype,HAC,Health Authority Cluster,44,Health Authority Cluster,Health Authority Cluster
-VAL-HCO-045,hcotype,HAU,Health Board / Agency,45,Health Board / Agency,Health Board / Agency
-VAL-HCO-046,hcotype,HBS,Health Board,46,Health Board,Health Board
-VAL-HCO-047,hcotype,HCR,Homecare Provider,47,Homecare Provider,Homecare Provider
-VAL-HCO-048,hcotype,HOM,Home,48,Home,Home
-VAL-HCO-049,hcotype,HOS,Hospital,49,Hospital,Hospital
-VAL-HCO-050,hcotype,HPU,Health Prom Unit,50,Health Prom Unit,Health Prom Unit
-VAL-HCO-051,hcotype,HSP,Hospital,51,Hospital,Hospital
-VAL-HCO-052,hcotype,HSS,Health & Social Services Board,52,Health & Social Services Board,Health & Social Services Board
-VAL-HCO-053,hcotype,HWB,Health and Wellbeing Board,53,Health and Wellbeing Board,Health and Wellbeing Board
-VAL-HCO-054,hcotype,ICS,Integrated Care System,54,Integrated Care System,Integrated Care System
-VAL-HCO-055,hcotype,IND,Independent Providers,55,Independent Providers,Independent Providers
-VAL-HCO-056,hcotype,INP,Inpractice,56,Inpractice,Inpractice
-VAL-HCO-057,hcotype,ISF,Infosante Sales False Inst.,57,Infosante Sales False Inst.,Infosante Sales False Inst.
-VAL-HCO-058,hcotype,IST,infoSanté Sales,58,infoSanté Sales,infoSanté Sales
-VAL-HCO-059,hcotype,ITP,Internet Pharmacy,59,Internet Pharmacy,Internet Pharmacy
-VAL-HCO-060,hcotype,LAT,Local Area Team,60,Local Area Team,Local Area Team
-VAL-HCO-061,hcotype,LCG,Local Health and Social Care Group,61,Local Health and Social Care Group,Local Health and Social Care Group
-VAL-HCO-062,hcotype,LHA,Health Authority,62,Health Authority,Health Authority
-VAL-HCO-063,hcotype,LHB,Local Health Board,63,Local Health Board,Local Health Board
-VAL-HCO-064,hcotype,LMC,Local Medical Committee,64,Local Medical Committee,Local Medical Committee
-VAL-HCO-065,hcotype,LPC,Local Pharmaceutical Committee,65,Local Pharmaceutical Committee,Local Pharmaceutical Committee
-VAL-HCO-066,hcotype,LSP,Local Service Providers',66,Local Service Providers',Local Service Providers'
-VAL-HCO-067,hcotype,MAN,Manufacturer,67,Manufacturer,Manufacturer
-VAL-HCO-068,hcotype,MCN,Managed Clinical Network,68,Managed Clinical Network,Managed Clinical Network
-VAL-HCO-069,hcotype,MHT,Mental Health Trust,69,Mental Health Trust,Mental Health Trust
-VAL-HCO-070,hcotype,MIL,Military Organisation,70,Military Organisation,Military Organisation
-VAL-HCO-071,hcotype,MIS,Miscellaneous Health Care Centre,71,Miscellaneous Health Care Centre,Miscellaneous Health Care Centre
-VAL-HCO-072,hcotype,NDC,Non-Dispensing Chemist,72,Non-Dispensing Chemist,Non-Dispensing Chemist
-VAL-HCO-073,hcotype,NHC,Convalescent Home,73,Convalescent Home,Convalescent Home
-VAL-HCO-074,hcotype,NHH,Hospice,74,Hospice,Hospice
-VAL-HCO-075,hcotype,NHO,Nursing Home,75,Nursing Home,Nursing Home
-VAL-HCO-076,hcotype,NHP,Respite Care,76,Respite Care,Respite Care
-VAL-HCO-077,hcotype,NHR,Residential Home,77,Residential Home,Residential Home
-VAL-HCO-078,hcotype,NHS,Sheltered Housing,78,Sheltered Housing,Sheltered Housing
-VAL-HCO-079,hcotype,NPC,New Primary Care Trust,79,New Primary Care Trust,New Primary Care Trust
-VAL-HCO-080,hcotype,OCC,Occupational Health Organisation,80,Occupational Health Organisation,Occupational Health Organisation
-VAL-HCO-081,hcotype,ODT,Outpatient/Day Treatment Organisation,81,Outpatient/Day Treatment Organisation,Outpatient/Day Treatment Organisation
-VAL-HCO-082,hcotype,OHP,Outsourced Hospital Pharmacy,82,Outsourced Hospital Pharmacy,Outsourced Hospital Pharmacy
-VAL-HCO-083,hcotype,OPT,Opticians,83,Opticians,Opticians
-VAL-HCO-084,hcotype,PAS,Purchasing and Supply Agency,84,Purchasing and Supply Agency,Purchasing and Supply Agency
-VAL-HCO-085,hcotype,PAT,Patients Association,85,Patients Association,Patients Association
-VAL-HCO-086,hcotype,PBC,Practice Based Commissioning,86,Practice Based Commissioning,Practice Based Commissioning
-VAL-HCO-087,hcotype,PBP,Place Based Partnership,87,Place Based Partnership,Place Based Partnership
-VAL-HCO-088,hcotype,PCC,Primary Care Trust Cluster,88,Primary Care Trust Cluster,Primary Care Trust Cluster
-VAL-HCO-089,hcotype,PCG,Primary Care Group,89,Primary Care Group,Primary Care Group
-VAL-HCO-090,hcotype,PCL,Primary Care Organisation Locality,90,Primary Care Organisation Locality,Primary Care Organisation Locality
-VAL-HCO-091,hcotype,PCN,Primary Care Network,91,Primary Care Network,Primary Care Network
-VAL-HCO-092,hcotype,PCO,Primary Care Organisation,92,Primary Care Organisation,Primary Care Organisation
-VAL-HCO-093,hcotype,PCT,Primary Care Trust,93,Primary Care Trust,Primary Care Trust
-VAL-HCO-094,hcotype,PHO,Private Hospital Organisation,94,Private Hospital Organisation,Private Hospital Organisation
-VAL-HCO-095,hcotype,PHU,Pharmacy Hub,95,Pharmacy Hub,Pharmacy Hub
-VAL-HCO-096,hcotype,PPR,Private Practice,96,Private Practice,Private Practice
-VAL-HCO-097,hcotype,PRI,Prison Organisation,97,Prison Organisation,Prison Organisation
-VAL-HCO-098,hcotype,PTC,Private Diagnostic and Treatment Centre (Private),98,Private Diagnostic and Treatment Centre (Private),Private Diagnostic and Treatment Centre (Private)
-VAL-HCO-099,hcotype,PVP,Private Pharmacy,99,Private Pharmacy,Private Pharmacy
-VAL-HCO-100,hcotype,QIB,QuintilesIMS Brick,100,QuintilesIMS Brick,QuintilesIMS Brick
-VAL-HCO-101,hcotype,RCB,Regional Commissioning Board,101,Regional Commissioning Board,Regional Commissioning Board
-VAL-HCO-102,hcotype,RCC,Retail Chemist Chain,102,Retail Chemist Chain,Retail Chemist Chain
-VAL-HCO-103,hcotype,RCH,Retail Chemist,103,Retail Chemist,Retail Chemist
-VAL-HCO-104,hcotype,RCO,Retail Chemist Chain Office/Warehouse,104,Retail Chemist Chain Office/Warehouse,Retail Chemist Chain Office/Warehouse
-VAL-HCO-105,hcotype,RES,Resource Centre,105,Resource Centre,Resource Centre
-VAL-HCO-106,hcotype,RHO,Regional Executive,106,Regional Executive,Regional Executive
-VAL-HCO-107,hcotype,RTL,Retail Shop,107,Retail Shop,Retail Shop
-VAL-HCO-108,hcotype,SAA,Substance and Alcohol Abuse Location,108,Substance and Alcohol Abuse Location,Substance and Alcohol Abuse Location
-VAL-HCO-109,hcotype,SAL,Sales,109,Sales,Sales
-VAL-HCO-110,hcotype,SCH,Special Needs School,110,Special Needs School,Special Needs School
-VAL-HCO-111,hcotype,SCO,Secondary Care Other,111,Secondary Care Other,Secondary Care Other
-VAL-HCO-112,hcotype,SHA,Strategic Health Board,112,Strategic Health Board,Strategic Health Board
-VAL-HCO-113,hcotype,SIP,Self Incorporated Practice,113,Self Incorporated Practice,Self Incorporated Practice
-VAL-HCO-114,hcotype,SOC,Society/Advocacy Group,114,Society/Advocacy Group,Society/Advocacy Group
-VAL-HCO-115,hcotype,SPH,Special Health Authority/Board,115,Special Health Authority/Board,Special Health Authority/Board
-VAL-HCO-116,hcotype,STP,Sustainability & Transformation Plan,116,Sustainability & Transformation Plan,Sustainability & Transformation Plan
-VAL-HCO-117,hcotype,SUP,Supplies Authority,117,Supplies Authority,Supplies Authority
-VAL-HCO-118,hcotype,SUR,Surgery,118,Surgery,Surgery
-VAL-HCO-119,hcotype,SYN,syndicat interhospitalier,119,syndicat interhospitalier,syndicat interhospitalier
-VAL-HCO-120,hcotype,TCO,Tertiary Care Organisation,120,Tertiary Care Organisation,Tertiary Care Organisation
-VAL-HCO-121,hcotype,THO,NHS Trust,121,NHS Trust,NHS Trust
-VAL-HCO-122,hcotype,VAN,Vanguard,122,Vanguard,Vanguard
-VAL-HCO-123,hcotype,WCH,Wholesaler,123,Wholesaler,Wholesaler
-VAL-HCO-124,hcotype,WIC,Walk in Centre,124,Walk in Centre,Walk in Centre
-VAL-HCO-125,hcotype,ZZZ,Client Specific Institution,125,Client Specific Institution,Client Specific Institution
+# HCO Type Code (workplace.typeCode -> cree7_type),,,,,,
+VAL-HCO-001,hcotype,ACA,Academic Institution,126870001,Academic Institution,Academic Institution
+VAL-HCO-002,hcotype,ACT,Acute Trust,126870002,Acute Trust,Acute Trust
+VAL-HCO-003,hcotype,ADD,Addiction Services Organisation,126870003,Addiction Services Organisation,Addiction Services Organisation
+VAL-HCO-004,hcotype,AMT,Ambulance Trust,126870004,Ambulance Trust,Ambulance Trust
+VAL-HCO-005,hcotype,ASS,Association,126870005,Association,Association
+VAL-HCO-006,hcotype,BLO,Blood Transfusion Organisation,126870006,Blood Transfusion Organisation,Blood Transfusion Organisation
+VAL-HCO-007,hcotype,CAC,Cash & Carry,126870007,Cash & Carry,Cash & Carry
+VAL-HCO-008,hcotype,CAR,Cardiac Network,126870008,Cardiac Network,Cardiac Network
+VAL-HCO-009,hcotype,CHP,Community Health Partnerships,126870009,Community Health Partnerships,Community Health Partnerships
+VAL-HCO-010,hcotype,CHR,Charity,126870010,Charity,Charity
+VAL-HCO-011,hcotype,CLD,Clinical Directorate,126870011,Clinical Directorate,Clinical Directorate
+VAL-HCO-012,hcotype,CLH,Clinic Hospital,126870012,Clinic Hospital,Clinic Hospital
+VAL-HCO-013,hcotype,CLI,Clinic,126870013,Clinic,Clinic
+VAL-HCO-014,hcotype,CMH,Community Mental Health Team,126870014,Community Mental Health Team,Community Mental Health Team
+VAL-HCO-015,hcotype,CNC,Network,126870015,Network,Network
+VAL-HCO-016,hcotype,CNL,Local Council,126870016,Local Council,Local Council
+VAL-HCO-017,hcotype,CNT,Community Nurse Base Team,126870017,Community Nurse Base Team,Community Nurse Base Team
+VAL-HCO-018,hcotype,CRE,Research Organisation,126870018,Research Organisation,Research Organisation
+VAL-HCO-019,hcotype,CSN,Clinical Senate,126870019,Clinical Senate,Clinical Senate
+VAL-HCO-020,hcotype,CSU,Commissioning Service Support Unit,126870020,Commissioning Service Support Unit,Commissioning Service Support Unit
+VAL-HCO-021,hcotype,CTE,Committee,126870021,Committee,Committee
+VAL-HCO-022,hcotype,CTO,Care Trust,126870022,Care Trust,Care Trust
+VAL-HCO-023,hcotype,DAC,Dispensing Appliance Contractor,126870023,Dispensing Appliance Contractor,Dispensing Appliance Contractor
+VAL-HCO-024,hcotype,DAT,Drug Action Team Centre,126870024,Drug Action Team Centre,Drug Action Team Centre
+VAL-HCO-025,hcotype,DEN,Dentist,126870025,Dentist,Dentist
+VAL-HCO-026,hcotype,DEP,Dentist Private,126870026,Dentist Private,Dentist Private
+VAL-HCO-027,hcotype,DHS,Directorate of Health & Social Care,126870027,Directorate of Health & Social Care,Directorate of Health & Social Care
+VAL-HCO-028,hcotype,DPR,Dental Practice,126870028,Dental Practice,Dental Practice
+VAL-HCO-029,hcotype,DRC,DO NOT USE  NEW CODE Drug & Therapeutic Committee,126870029,DO NOT USE  NEW CODE Drug & Therapeutic Committee,DO NOT USE  NEW CODE Drug & Therapeutic Committee
+VAL-HCO-030,hcotype,DSG,Dispensing Surgery,126870030,Dispensing Surgery,Dispensing Surgery
+VAL-HCO-031,hcotype,DSP,Dispensing Practice,126870031,Dispensing Practice,Dispensing Practice
+VAL-HCO-032,hcotype,DST,Drugstore,126870032,Drugstore,Drugstore
+VAL-HCO-033,hcotype,DTC,Diagnostic and Treatment Centre (NHS),126870033,Diagnostic and Treatment Centre (NHS),Diagnostic and Treatment Centre (NHS)
+VAL-HCO-034,hcotype,E,optician,126870034,optician,optician
+VAL-HCO-035,hcotype,FDT,Foundation Trust,126870035,Foundation Trust,Foundation Trust
+VAL-HCO-036,hcotype,FER,Fertility Clinic,126870036,Fertility Clinic,Fertility Clinic
+VAL-HCO-037,hcotype,FIC,Fictious Health Care Centre,126870037,Fictious Health Care Centre,Fictious Health Care Centre
+VAL-HCO-038,hcotype,FPC,Family Planning Clinic,126870038,Family Planning Clinic,Family Planning Clinic
+VAL-HCO-039,hcotype,GOV,Government,126870039,Government,Government
+VAL-HCO-040,hcotype,GPC,Clinical Commissioning Group,126870040,Clinical Commissioning Group,Clinical Commissioning Group
+VAL-HCO-041,hcotype,GPF,GP Federation,126870041,GP Federation,GP Federation
+VAL-HCO-042,hcotype,GPP,GP Practice,126870042,GP Practice,GP Practice
+VAL-HCO-043,hcotype,GST,Grocery Store,126870043,Grocery Store,Grocery Store
+VAL-HCO-044,hcotype,HAC,Health Authority Cluster,126870044,Health Authority Cluster,Health Authority Cluster
+VAL-HCO-045,hcotype,HAU,Health Board / Agency,126870045,Health Board / Agency,Health Board / Agency
+VAL-HCO-046,hcotype,HBS,Health Board,126870046,Health Board,Health Board
+VAL-HCO-047,hcotype,HCR,Homecare Provider,126870047,Homecare Provider,Homecare Provider
+VAL-HCO-048,hcotype,HOM,Home,126870048,Home,Home
+VAL-HCO-049,hcotype,HOS,Hospital,126870049,Hospital,Hospital
+VAL-HCO-050,hcotype,HPU,Health Prom Unit,126870050,Health Prom Unit,Health Prom Unit
+VAL-HCO-051,hcotype,HSP,Hospital,126870051,Hospital,Hospital
+VAL-HCO-052,hcotype,HSS,Health & Social Services Board,126870052,Health & Social Services Board,Health & Social Services Board
+VAL-HCO-053,hcotype,HWB,Health and Wellbeing Board,126870053,Health and Wellbeing Board,Health and Wellbeing Board
+VAL-HCO-054,hcotype,ICS,Integrated Care System,126870054,Integrated Care System,Integrated Care System
+VAL-HCO-055,hcotype,IND,Independent Providers,126870055,Independent Providers,Independent Providers
+VAL-HCO-056,hcotype,INP,Inpractice,126870056,Inpractice,Inpractice
+VAL-HCO-057,hcotype,ISF,Infosante Sales False Inst.,126870057,Infosante Sales False Inst.,Infosante Sales False Inst.
+VAL-HCO-058,hcotype,IST,infoSanté Sales,126870058,infoSanté Sales,infoSanté Sales
+VAL-HCO-059,hcotype,ITP,Internet Pharmacy,126870059,Internet Pharmacy,Internet Pharmacy
+VAL-HCO-060,hcotype,LAT,Local Area Team,126870060,Local Area Team,Local Area Team
+VAL-HCO-061,hcotype,LCG,Local Health and Social Care Group,126870061,Local Health and Social Care Group,Local Health and Social Care Group
+VAL-HCO-062,hcotype,LHA,Health Authority,126870062,Health Authority,Health Authority
+VAL-HCO-063,hcotype,LHB,Local Health Board,126870063,Local Health Board,Local Health Board
+VAL-HCO-064,hcotype,LMC,Local Medical Committee,126870064,Local Medical Committee,Local Medical Committee
+VAL-HCO-065,hcotype,LPC,Local Pharmaceutical Committee,126870065,Local Pharmaceutical Committee,Local Pharmaceutical Committee
+VAL-HCO-066,hcotype,LSP,Local Service Providers',126870066,Local Service Providers',Local Service Providers'
+VAL-HCO-067,hcotype,MAN,Manufacturer,126870067,Manufacturer,Manufacturer
+VAL-HCO-068,hcotype,MCN,Managed Clinical Network,126870068,Managed Clinical Network,Managed Clinical Network
+VAL-HCO-069,hcotype,MHT,Mental Health Trust,126870069,Mental Health Trust,Mental Health Trust
+VAL-HCO-070,hcotype,MIL,Military Organisation,126870070,Military Organisation,Military Organisation
+VAL-HCO-071,hcotype,MIS,Miscellaneous Health Care Centre,126870071,Miscellaneous Health Care Centre,Miscellaneous Health Care Centre
+VAL-HCO-072,hcotype,NDC,Non-Dispensing Chemist,126870072,Non-Dispensing Chemist,Non-Dispensing Chemist
+VAL-HCO-073,hcotype,NHC,Convalescent Home,126870073,Convalescent Home,Convalescent Home
+VAL-HCO-074,hcotype,NHH,Hospice,126870074,Hospice,Hospice
+VAL-HCO-075,hcotype,NHO,Nursing Home,126870075,Nursing Home,Nursing Home
+VAL-HCO-076,hcotype,NHP,Respite Care,126870076,Respite Care,Respite Care
+VAL-HCO-077,hcotype,NHR,Residential Home,126870077,Residential Home,Residential Home
+VAL-HCO-078,hcotype,NHS,Sheltered Housing,126870078,Sheltered Housing,Sheltered Housing
+VAL-HCO-079,hcotype,NPC,New Primary Care Trust,126870079,New Primary Care Trust,New Primary Care Trust
+VAL-HCO-080,hcotype,OCC,Occupational Health Organisation,126870080,Occupational Health Organisation,Occupational Health Organisation
+VAL-HCO-081,hcotype,ODT,Outpatient/Day Treatment Organisation,126870081,Outpatient/Day Treatment Organisation,Outpatient/Day Treatment Organisation
+VAL-HCO-082,hcotype,OHP,Outsourced Hospital Pharmacy,126870082,Outsourced Hospital Pharmacy,Outsourced Hospital Pharmacy
+VAL-HCO-083,hcotype,OPT,Opticians,126870083,Opticians,Opticians
+VAL-HCO-084,hcotype,PAS,Purchasing and Supply Agency,126870084,Purchasing and Supply Agency,Purchasing and Supply Agency
+VAL-HCO-085,hcotype,PAT,Patients Association,126870085,Patients Association,Patients Association
+VAL-HCO-086,hcotype,PBC,Practice Based Commissioning,126870086,Practice Based Commissioning,Practice Based Commissioning
+VAL-HCO-087,hcotype,PBP,Place Based Partnership,126870087,Place Based Partnership,Place Based Partnership
+VAL-HCO-088,hcotype,PCC,Primary Care Trust Cluster,126870088,Primary Care Trust Cluster,Primary Care Trust Cluster
+VAL-HCO-089,hcotype,PCG,Primary Care Group,126870089,Primary Care Group,Primary Care Group
+VAL-HCO-090,hcotype,PCL,Primary Care Organisation Locality,126870090,Primary Care Organisation Locality,Primary Care Organisation Locality
+VAL-HCO-091,hcotype,PCN,Primary Care Network,126870091,Primary Care Network,Primary Care Network
+VAL-HCO-092,hcotype,PCO,Primary Care Organisation,126870092,Primary Care Organisation,Primary Care Organisation
+VAL-HCO-093,hcotype,PCT,Primary Care Trust,126870093,Primary Care Trust,Primary Care Trust
+VAL-HCO-094,hcotype,PHO,Private Hospital Organisation,126870094,Private Hospital Organisation,Private Hospital Organisation
+VAL-HCO-095,hcotype,PHU,Pharmacy Hub,126870095,Pharmacy Hub,Pharmacy Hub
+VAL-HCO-096,hcotype,PPR,Private Practice,126870096,Private Practice,Private Practice
+VAL-HCO-097,hcotype,PRI,Prison Organisation,126870097,Prison Organisation,Prison Organisation
+VAL-HCO-098,hcotype,PTC,Private Diagnostic and Treatment Centre (Private),126870098,Private Diagnostic and Treatment Centre (Private),Private Diagnostic and Treatment Centre (Private)
+VAL-HCO-099,hcotype,PVP,Private Pharmacy,126870099,Private Pharmacy,Private Pharmacy
+VAL-HCO-100,hcotype,QIB,QuintilesIMS Brick,126870100,QuintilesIMS Brick,QuintilesIMS Brick
+VAL-HCO-101,hcotype,RCB,Regional Commissioning Board,126870101,Regional Commissioning Board,Regional Commissioning Board
+VAL-HCO-102,hcotype,RCC,Retail Chemist Chain,126870102,Retail Chemist Chain,Retail Chemist Chain
+VAL-HCO-103,hcotype,RCH,Retail Chemist,126870103,Retail Chemist,Retail Chemist
+VAL-HCO-104,hcotype,RCO,Retail Chemist Chain Office/Warehouse,126870104,Retail Chemist Chain Office/Warehouse,Retail Chemist Chain Office/Warehouse
+VAL-HCO-105,hcotype,RES,Resource Centre,126870105,Resource Centre,Resource Centre
+VAL-HCO-106,hcotype,RHO,Regional Executive,126870106,Regional Executive,Regional Executive
+VAL-HCO-107,hcotype,RTL,Retail Shop,126870107,Retail Shop,Retail Shop
+VAL-HCO-108,hcotype,SAA,Substance and Alcohol Abuse Location,126870108,Substance and Alcohol Abuse Location,Substance and Alcohol Abuse Location
+VAL-HCO-109,hcotype,SAL,Sales,126870109,Sales,Sales
+VAL-HCO-110,hcotype,SCH,Special Needs School,126870110,Special Needs School,Special Needs School
+VAL-HCO-111,hcotype,SCO,Secondary Care Other,126870111,Secondary Care Other,Secondary Care Other
+VAL-HCO-112,hcotype,SHA,Strategic Health Board,126870112,Strategic Health Board,Strategic Health Board
+VAL-HCO-113,hcotype,SIP,Self Incorporated Practice,126870113,Self Incorporated Practice,Self Incorporated Practice
+VAL-HCO-114,hcotype,SOC,Society/Advocacy Group,126870114,Society/Advocacy Group,Society/Advocacy Group
+VAL-HCO-115,hcotype,SPH,Special Health Authority/Board,126870115,Special Health Authority/Board,Special Health Authority/Board
+VAL-HCO-116,hcotype,STP,Sustainability & Transformation Plan,126870116,Sustainability & Transformation Plan,Sustainability & Transformation Plan
+VAL-HCO-117,hcotype,SUP,Supplies Authority,126870117,Supplies Authority,Supplies Authority
+VAL-HCO-118,hcotype,SUR,Surgery,126870118,Surgery,Surgery
+VAL-HCO-119,hcotype,SYN,syndicat interhospitalier,126870119,syndicat interhospitalier,syndicat interhospitalier
+VAL-HCO-120,hcotype,TCO,Tertiary Care Organisation,126870120,Tertiary Care Organisation,Tertiary Care Organisation
+VAL-HCO-121,hcotype,THO,NHS Trust,126870121,NHS Trust,NHS Trust
+VAL-HCO-122,hcotype,VAN,Vanguard,126870122,Vanguard,Vanguard
+VAL-HCO-123,hcotype,WCH,Wholesaler,126870123,Wholesaler,Wholesaler
+VAL-HCO-124,hcotype,WIC,Walk in Centre,126870124,Walk in Centre,Walk in Centre
+VAL-HCO-125,hcotype,ZZZ,Client Specific Institution,126870125,Client Specific Institution,Client Specific Institution
+# Affiliation Role Mapping,,,,,,
+VAL-ROL-001,role,10,Accountable Officer,126870001,Accountable Officer,Accountable Officer
+VAL-ROL-002,role,11,Councillor,126870002,Councillor,Councillor
+VAL-ROL-003,role,12,Local Authority Director,126870003,Local Authority Director,Local Authority Director
+VAL-ROL-004,role,13,Healthwatch Representative,126870004,Healthwatch Representative,Healthwatch Representative
+VAL-ROL-005,role,14,Patient Representative,126870005,Patient Representative,Patient Representative
+VAL-ROL-006,role,15,Managing Director ,126870006,Managing Director ,Managing Director 
+VAL-ROL-007,role,16,Business Information Director,126870007,Business Information Director,Business Information Director
+VAL-ROL-008,role,17,Business Information Manager,126870008,Business Information Manager,Business Information Manager
+VAL-ROL-009,role,19,Memory Clinic Staff,126870009,Memory Clinic Staff,Memory Clinic Staff
+VAL-ROL-010,role,20,Hospital Optometrist,126870010,Hospital Optometrist,Hospital Optometrist
+VAL-ROL-011,role,21,Hospital Orthoptist,126870011,Hospital Orthoptist,Hospital Orthoptist
+VAL-ROL-012,role,22,Marketing Manager,126870012,Marketing Manager,Marketing Manager
+VAL-ROL-013,role,23,External Affairs & Policy Director,126870013,External Affairs & Policy Director,External Affairs & Policy Director
+VAL-ROL-014,role,24,Category Manager,126870014,Category Manager,Category Manager
+VAL-ROL-015,role,25,Sustainability & Transformation Plans Lead,126870015,Sustainability & Transformation Plans Lead,Sustainability & Transformation Plans Lead
+VAL-ROL-016,role,26,Paramedic Practitioner,126870016,Paramedic Practitioner,Paramedic Practitioner
+VAL-ROL-017,role,27,Clinical Trials Coordinator,126870017,Clinical Trials Coordinator,Clinical Trials Coordinator
+VAL-ROL-018,role,28,Surgeon,126870018,Surgeon,Surgeon
+VAL-ROL-019,role,29,Private Consultant,126870019,Private Consultant,Private Consultant
+VAL-ROL-020,role,30,Private Nurse,126870020,Private Nurse,Private Nurse
+VAL-ROL-021,role,31,Private Pharmacist,126870021,Private Pharmacist,Private Pharmacist
+VAL-ROL-022,role,9D,Dean,126870022,Dean,Dean
+VAL-ROL-023,role,A0,Agency Member,126870023,Agency Member,Agency Member
+VAL-ROL-024,role,A1,Asthma Lead,126870024,Asthma Lead,Asthma Lead
+VAL-ROL-025,role,A2,Breast Care Nurse,126870025,Breast Care Nurse,Breast Care Nurse
+VAL-ROL-026,role,A3,Network Pharmacist,126870026,Network Pharmacist,Network Pharmacist
+VAL-ROL-027,role,A4,Cardiac Rehabilitation Nurse,126870027,Cardiac Rehabilitation Nurse,Cardiac Rehabilitation Nurse
+VAL-ROL-028,role,A5,Child Protection Nurse,126870028,Child Protection Nurse,Child Protection Nurse
+VAL-ROL-029,role,A6,Childrens Services Lead,126870029,Childrens Services Lead,Childrens Services Lead
+VAL-ROL-030,role,A7,Colorectal Nurse,126870030,Colorectal Nurse,Colorectal Nurse
+VAL-ROL-031,role,A8,Commissioning Manager,126870031,Commissioning Manager,Commissioning Manager
+VAL-ROL-032,role,A9,Community Disease Control,126870032,Community Disease Control,Community Disease Control
+VAL-ROL-033,role,AA,Health Advisor,126870033,Health Advisor,Health Advisor
+VAL-ROL-034,role,AB,Senior Health Advisor,126870034,Senior Health Advisor,Senior Health Advisor
+VAL-ROL-035,role,AC,Acupuncturist,126870035,Acupuncturist,Acupuncturist
+VAL-ROL-036,role,AD,Administrator,126870036,Administrator,Administrator
+VAL-ROL-037,role,AE,Assistant Chief Executive,126870037,Assistant Chief Executive,Assistant Chief Executive
+VAL-ROL-038,role,AF,Medical Care Practitioner,126870038,Medical Care Practitioner,Medical Care Practitioner
+VAL-ROL-039,role,AG,Anti Coagulent Nurse,126870039,Anti Coagulent Nurse,Anti Coagulent Nurse
+VAL-ROL-040,role,AH,Associate Head,126870040,Associate Head,Associate Head
+VAL-ROL-041,role,AI,Diabetes Facilitator,126870041,Diabetes Facilitator,Diabetes Facilitator
+VAL-ROL-042,role,AJ,Point of Care Co-ordinator,126870042,Point of Care Co-ordinator,Point of Care Co-ordinator
+VAL-ROL-043,role,AK,Practice Developement Nurse,126870043,Practice Developement Nurse,Practice Developement Nurse
+VAL-ROL-044,role,AL,ABLC Nurse,126870044,ABLC Nurse,ABLC Nurse
+VAL-ROL-045,role,AM,Professional allied to Medicine,126870045,Professional allied to Medicine,Professional allied to Medicine
+VAL-ROL-046,role,AN,Admiral Nurse,126870046,Admiral Nurse,Admiral Nurse
+VAL-ROL-047,role,AO,Laboratory Manager,126870047,Laboratory Manager,Laboratory Manager
+VAL-ROL-048,role,AP,Apheresis Nurse,126870048,Apheresis Nurse,Apheresis Nurse
+VAL-ROL-049,role,AS,Associate Specialist,126870049,Associate Specialist,Associate Specialist
+VAL-ROL-050,role,AT,Aseptic Pharmacist,126870050,Aseptic Pharmacist,Aseptic Pharmacist
+VAL-ROL-051,role,AU,Medical Audit Manager,126870051,Medical Audit Manager,Medical Audit Manager
+VAL-ROL-052,role,B1,BMS grade 1,126870052,BMS grade 1,BMS grade 1
+VAL-ROL-053,role,B2,BMS grade 2,126870053,BMS grade 2,BMS grade 2
+VAL-ROL-054,role,B3,BMS grade 3,126870054,BMS grade 3,BMS grade 3
+VAL-ROL-055,role,B4,BMS grade 4,126870055,BMS grade 4,BMS grade 4
+VAL-ROL-056,role,B5,Community Nurse Manager,126870056,Community Nurse Manager,Community Nurse Manager
+VAL-ROL-057,role,B6,Community Psychiatric Nurse Manager,126870057,Community Psychiatric Nurse Manager,Community Psychiatric Nurse Manager
+VAL-ROL-058,role,B7,Consultant Member,126870058,Consultant Member,Consultant Member
+VAL-ROL-059,role,B8,Chronic Obstructive Pulmonary Disease Lead,126870059,Chronic Obstructive Pulmonary Disease Lead,Chronic Obstructive Pulmonary Disease Lead
+VAL-ROL-060,role,B9,Corporate Management,126870060,Corporate Management,Corporate Management
+VAL-ROL-061,role,BA,Prinicpal Biomedical Scientist,126870061,Prinicpal Biomedical Scientist,Prinicpal Biomedical Scientist
+VAL-ROL-062,role,BB,Senior Biomedical,126870062,Senior Biomedical,Senior Biomedical
+VAL-ROL-063,role,BC,Biochemist,126870063,Biochemist,Biochemist
+VAL-ROL-064,role,BD,Board Member,126870064,Board Member,Board Member
+VAL-ROL-065,role,BE,Chief Biomedical Scientist,126870065,Chief Biomedical Scientist,Chief Biomedical Scientist
+VAL-ROL-066,role,BF,Clinical Commissioning Group Manager,126870066,Clinical Commissioning Group Manager,Clinical Commissioning Group Manager
+VAL-ROL-067,role,BL,PBC/GPC Lead,126870067,PBC/GPC Lead,PBC/GPC Lead
+VAL-ROL-068,role,BM,Business Manager,126870068,Business Manager,Business Manager
+VAL-ROL-069,role,BP,Principal Biochemist,126870069,Principal Biochemist,Principal Biochemist
+VAL-ROL-070,role,BS,Biomedical Scientist,126870070,Biomedical Scientist,Biomedical Scientist
+VAL-ROL-071,role,BT,Transplant Coordinator,126870071,Transplant Coordinator,Transplant Coordinator
+VAL-ROL-072,role,C1,Cystic Fibrosis Nurse,126870072,Cystic Fibrosis Nurse,Cystic Fibrosis Nurse
+VAL-ROL-073,role,C2,Dental Officer,126870073,Dental Officer,Dental Officer
+VAL-ROL-074,role,C3,Dentist Member,126870074,Dentist Member,Dentist Member
+VAL-ROL-075,role,C4,Deputy Practice Manager,126870075,Deputy Practice Manager,Deputy Practice Manager
+VAL-ROL-076,role,C5,Development Director,126870076,Development Director,Development Director
+VAL-ROL-077,role,C6,Diabetes Lead,126870077,Diabetes Lead,Diabetes Lead
+VAL-ROL-078,role,C7,Dietetic Assistant,126870078,Dietetic Assistant,Dietetic Assistant
+VAL-ROL-079,role,C8,Dietetic Services Manager,126870079,Dietetic Services Manager,Dietetic Services Manager
+VAL-ROL-080,role,C9,Director of Communications,126870080,Director of Communications,Director of Communications
+VAL-ROL-081,role,CA,Clinical Assistant,126870081,Clinical Assistant,Clinical Assistant
+VAL-ROL-082,role,CB,Committee Member,126870082,Committee Member,Committee Member
+VAL-ROL-083,role,CC,Clinical Oncologist,126870083,Clinical Oncologist,Clinical Oncologist
+VAL-ROL-084,role,CD,Contracts Director,126870084,Contracts Director,Contracts Director
+VAL-ROL-085,role,CE,Chief Executive,126870085,Chief Executive,Chief Executive
+VAL-ROL-086,role,CF,Chief Officer,126870086,Chief Officer,Chief Officer
+VAL-ROL-087,role,CG,Clinical Governance Lead,126870087,Clinical Governance Lead,Clinical Governance Lead
+VAL-ROL-088,role,CH,Chair,126870088,Chair,Chair
+VAL-ROL-089,role,CI,Clinical Pharmacist,126870089,Clinical Pharmacist,Clinical Pharmacist
+VAL-ROL-090,role,CJ,Charge Nurse,126870090,Charge Nurse,Charge Nurse
+VAL-ROL-091,role,CK,Community Nurse,126870091,Community Nurse,Community Nurse
+VAL-ROL-092,role,CL,Head of Clinical Development,126870092,Head of Clinical Development,Head of Clinical Development
+VAL-ROL-093,role,CM,Clinical Medical Officer,126870093,Clinical Medical Officer,Clinical Medical Officer
+VAL-ROL-094,role,CN,Clinical Director,126870094,Clinical Director,Clinical Director
+VAL-ROL-095,role,CO,Director of Commissioning,126870095,Director of Commissioning,Director of Commissioning
+VAL-ROL-096,role,CP,Consultant in Public Health,126870096,Consultant in Public Health,Consultant in Public Health
+VAL-ROL-097,role,CQ,Clinical Fellow,126870097,Clinical Fellow,Clinical Fellow
+VAL-ROL-098,role,CR,Specialist Registrar,126870098,Specialist Registrar,Specialist Registrar
+VAL-ROL-099,role,CS,Consultant,126870099,Consultant,Consultant
+VAL-ROL-100,role,CT,Chief Dietitian,126870100,Chief Dietitian,Chief Dietitian
+VAL-ROL-101,role,CU,Community Psychiatric Nurse,126870101,Community Psychiatric Nurse,Community Psychiatric Nurse
+VAL-ROL-102,role,CV,Coronary Heart Disease Prevention Nurse,126870102,Coronary Heart Disease Prevention Nurse,Coronary Heart Disease Prevention Nurse
+VAL-ROL-103,role,CW,Network Member,126870103,Network Member,Network Member
+VAL-ROL-104,role,CX,Commissioning Lead,126870104,Commissioning Lead,Commissioning Lead
+VAL-ROL-105,role,CY,Coronary Heart Disease Lead,126870105,Coronary Heart Disease Lead,Coronary Heart Disease Lead
+VAL-ROL-106,role,CZ,Clinical Psychologist,126870106,Clinical Psychologist,Clinical Psychologist
+VAL-ROL-107,role,D0,Dental Hygienist,126870107,Dental Hygienist,Dental Hygienist
+VAL-ROL-108,role,D1,Director of Community Care,126870108,Director of Community Care,Director of Community Care
+VAL-ROL-109,role,D2,Director of Infection Control,126870109,Director of Infection Control,Director of Infection Control
+VAL-ROL-110,role,D3,Director of Public Health Laboratory,126870110,Director of Public Health Laboratory,Director of Public Health Laboratory
+VAL-ROL-111,role,D4,Director/Head of Midwifery,126870111,Director/Head of Midwifery,Director/Head of Midwifery
+VAL-ROL-112,role,D5,District Nurse Manager,126870112,District Nurse Manager,District Nurse Manager
+VAL-ROL-113,role,D6,Educational Nurse,126870113,Educational Nurse,Educational Nurse
+VAL-ROL-114,role,D7,Elderly Care Lead,126870114,Elderly Care Lead,Elderly Care Lead
+VAL-ROL-115,role,D8,Estates & Facilities Director,126870115,Estates & Facilities Director,Estates & Facilities Director
+VAL-ROL-116,role,D9,Estates & Facilities Manager,126870116,Estates & Facilities Manager,Estates & Facilities Manager
+VAL-ROL-117,role,DA,Director of Health Care Purchasing,126870117,Director of Health Care Purchasing,Director of Health Care Purchasing
+VAL-ROL-118,role,DB,Diabetes Specialist Nurse,126870118,Diabetes Specialist Nurse,Diabetes Specialist Nurse
+VAL-ROL-119,role,DC,Director of Primary Care,126870119,Director of Primary Care,Director of Primary Care
+VAL-ROL-120,role,DD,Deputy Director of Public Health,126870120,Deputy Director of Public Health,Deputy Director of Public Health
+VAL-ROL-121,role,DE,DAT Manager,126870121,DAT Manager,DAT Manager
+VAL-ROL-122,role,DF,Director of Finance,126870122,Director of Finance,Director of Finance
+VAL-ROL-123,role,DG,Dispensing General Practitioner,126870123,Dispensing General Practitioner,Dispensing General Practitioner
+VAL-ROL-124,role,DH,Director of Health Policy,126870124,Director of Health Policy,Director of Health Policy
+VAL-ROL-125,role,DI,Director of Health & Social Care,126870125,Director of Health & Social Care,Director of Health & Social Care
+VAL-ROL-126,role,DJ,Drug Action Team Coordinator,126870126,Drug Action Team Coordinator,Drug Action Team Coordinator
+VAL-ROL-127,role,DK,Drug Worker,126870127,Drug Worker,Drug Worker
+VAL-ROL-128,role,DL,Dental Nurse,126870128,Dental Nurse,Dental Nurse
+VAL-ROL-129,role,DM,Development Manager,126870129,Development Manager,Development Manager
+VAL-ROL-130,role,DN,Dentist,126870130,Dentist,Dentist
+VAL-ROL-131,role,DO,District Pharmacy Officer,126870131,District Pharmacy Officer,District Pharmacy Officer
+VAL-ROL-132,role,DP,Director of Public Health,126870132,Director of Public Health,Director of Public Health
+VAL-ROL-133,role,DQ,Dispensary Assistant,126870133,Dispensary Assistant,Dispensary Assistant
+VAL-ROL-134,role,DR,Director,126870134,Director,Director
+VAL-ROL-135,role,DS,Dispenser,126870135,Dispenser,Dispenser
+VAL-ROL-136,role,DT,District Nurse,126870136,District Nurse,District Nurse
+VAL-ROL-137,role,DU,Director of Purchasing,126870137,Director of Purchasing,Director of Purchasing
+VAL-ROL-138,role,DV,DVT Nurse,126870138,DVT Nurse,DVT Nurse
+VAL-ROL-139,role,DW,Director of Modernisation,126870139,Director of Modernisation,Director of Modernisation
+VAL-ROL-140,role,DX,Director of Performance,126870140,Director of Performance,Director of Performance
+VAL-ROL-141,role,DY,Divisional Director,126870141,Divisional Director,Divisional Director
+VAL-ROL-142,role,DZ,Directorate Manager,126870142,Directorate Manager,Directorate Manager
+VAL-ROL-143,role,E1,Falls Lead,126870143,Falls Lead,Falls Lead
+VAL-ROL-144,role,E2,Feeding Adviser,126870144,Feeding Adviser,Feeding Adviser
+VAL-ROL-145,role,E3,Finance Manager,126870145,Finance Manager,Finance Manager
+VAL-ROL-146,role,E4,Flu Coordinator,126870146,Flu Coordinator,Flu Coordinator
+VAL-ROL-147,role,E5,Forces Doctor,126870147,Forces Doctor,Forces Doctor
+VAL-ROL-148,role,E6,GP Member,126870148,GP Member,GP Member
+VAL-ROL-149,role,E7,HA Member,126870149,HA Member,HA Member
+VAL-ROL-150,role,E8,Haemophilia Director,126870150,Haemophilia Director,Haemophilia Director
+VAL-ROL-151,role,E9,Head of Medicines Management,126870151,Head of Medicines Management,Head of Medicines Management
+VAL-ROL-152,role,EA,Collaborative Developement Manager,126870152,Collaborative Developement Manager,Collaborative Developement Manager
+VAL-ROL-153,role,EB,Drug Action Team Commissioner,126870153,Drug Action Team Commissioner,Drug Action Team Commissioner
+VAL-ROL-154,role,EC,Clinical Lead,126870154,Clinical Lead,Clinical Lead
+VAL-ROL-155,role,ED,Non Executive Director,126870155,Non Executive Director,Non Executive Director
+VAL-ROL-156,role,EE,Electro Biomedical Engineer,126870156,Electro Biomedical Engineer,Electro Biomedical Engineer
+VAL-ROL-157,role,EF,CCG Member,126870157,CCG Member,CCG Member
+VAL-ROL-158,role,EM,Clinical Embryologist,126870158,Clinical Embryologist,Clinical Embryologist
+VAL-ROL-159,role,EX,Executive Member,126870159,Executive Member,Executive Member
+VAL-ROL-160,role,F1,Health Improvement Adviser,126870160,Health Improvement Adviser,Health Improvement Adviser
+VAL-ROL-161,role,F2,Health Visitor Manager,126870161,Health Visitor Manager,Health Visitor Manager
+VAL-ROL-162,role,F3,Health Improvement Programme Lead,126870162,Health Improvement Programme Lead,Health Improvement Programme Lead
+VAL-ROL-163,role,F4,Hospital Nurse Manager,126870163,Hospital Nurse Manager,Hospital Nurse Manager
+VAL-ROL-164,role,F5,Human Resource Manager,126870164,Human Resource Manager,Human Resource Manager
+VAL-ROL-165,role,F6,Immunisation Coordinator,126870165,Immunisation Coordinator,Immunisation Coordinator
+VAL-ROL-166,role,F7,Independent Prescriber,126870166,Independent Prescriber,Independent Prescriber
+VAL-ROL-167,role,F8,Occupational General Practitioner,126870167,Occupational General Practitioner,Occupational General Practitioner
+VAL-ROL-168,role,F9,IT Director,126870168,IT Director,IT Director
+VAL-ROL-169,role,FC,Facilitator,126870169,Facilitator,Facilitator
+VAL-ROL-170,role,FH,FHSA Advisor,126870170,FHSA Advisor,FHSA Advisor
+VAL-ROL-171,role,FM,First Minister,126870171,First Minister,First Minister
+VAL-ROL-172,role,FP,Formulary Pharmacist,126870172,Formulary Pharmacist,Formulary Pharmacist
+VAL-ROL-173,role,G1,Lay Member,126870173,Lay Member,Lay Member
+VAL-ROL-174,role,G2,Lead Cancer Clinician,126870174,Lead Cancer Clinician,Lead Cancer Clinician
+VAL-ROL-175,role,G3,Lead Cancer Nurse,126870175,Lead Cancer Nurse,Lead Cancer Nurse
+VAL-ROL-176,role,G4,Long Term Conditions Lead,126870176,Long Term Conditions Lead,Long Term Conditions Lead
+VAL-ROL-177,role,G5,Long Term Conditions Manager,126870177,Long Term Conditions Manager,Long Term Conditions Manager
+VAL-ROL-178,role,G6,Long Term Conditions Nurse,126870178,Long Term Conditions Nurse,Long Term Conditions Nurse
+VAL-ROL-179,role,G7,Medical Technical Officer,126870179,Medical Technical Officer,Medical Technical Officer
+VAL-ROL-180,role,G8,Mental Health Director,126870180,Mental Health Director,Mental Health Director
+VAL-ROL-181,role,G9,Mental Health Manager,126870181,Mental Health Manager,Mental Health Manager
+VAL-ROL-182,role,GA,Manager/Advisor,126870182,Manager/Advisor,Manager/Advisor
+VAL-ROL-183,role,GB,Clinical Services Manager,126870183,Clinical Services Manager,Clinical Services Manager
+VAL-ROL-184,role,GC,Clinical Governance Manager,126870184,Clinical Governance Manager,Clinical Governance Manager
+VAL-ROL-185,role,GL,General Practitioner-Locum,126870185,General Practitioner-Locum,General Practitioner-Locum
+VAL-ROL-186,role,GM,General Manager,126870186,General Manager,General Manager
+VAL-ROL-187,role,GN,GP Trainer,126870187,GP Trainer,GP Trainer
+VAL-ROL-188,role,GP,General Practitioner,126870188,General Practitioner,General Practitioner
+VAL-ROL-189,role,GR,Clinical Research Lead,126870189,Clinical Research Lead,Clinical Research Lead
+VAL-ROL-190,role,GS,GP with Extended Roles,126870190,GP with Extended Roles,GP with Extended Roles
+VAL-ROL-191,role,GT,GP Registrar,126870191,GP Registrar,GP Registrar
+VAL-ROL-192,role,GV,Governor,126870192,Governor,Governor
+VAL-ROL-193,role,H1,Mental Health Worker,126870193,Mental Health Worker,Mental Health Worker
+VAL-ROL-194,role,H2,Midwifery Manager,126870194,Midwifery Manager,Midwifery Manager
+VAL-ROL-195,role,H3,Multiple Sclerosis Nurse,126870195,Multiple Sclerosis Nurse,Multiple Sclerosis Nurse
+VAL-ROL-196,role,H4,Nurse Member,126870196,Nurse Member,Nurse Member
+VAL-ROL-197,role,H5,Nursery Nurse,126870197,Nursery Nurse,Nursery Nurse
+VAL-ROL-198,role,H6,Nursing Home Matron,126870198,Nursing Home Matron,Nursing Home Matron
+VAL-ROL-199,role,H7,Nursing Officer,126870199,Nursing Officer,Nursing Officer
+VAL-ROL-200,role,H8,Obesity Lead,126870200,Obesity Lead,Obesity Lead
+VAL-ROL-201,role,H9,Occupational Nurse,126870201,Occupational Nurse,Occupational Nurse
+VAL-ROL-202,role,HA,Pharmacy Advisor,126870202,Pharmacy Advisor,Pharmacy Advisor
+VAL-ROL-203,role,HB,Haemodialysis Nurse,126870203,Haemodialysis Nurse,Haemodialysis Nurse
+VAL-ROL-204,role,HC,Head of Planning and Contracts,126870204,Head of Planning and Contracts,Head of Planning and Contracts
+VAL-ROL-205,role,HD,Head of Research & Development,126870205,Head of Research & Development,Head of Research & Development
+VAL-ROL-206,role,HE,Haematology Pharmacist,126870206,Haematology Pharmacist,Haematology Pharmacist
+VAL-ROL-207,role,HF,Deputy Head of Research & Development,126870207,Deputy Head of Research & Development,Deputy Head of Research & Development
+VAL-ROL-208,role,HG,Heart Failure Nurse,126870208,Heart Failure Nurse,Heart Failure Nurse
+VAL-ROL-209,role,HH,Health Care Assistant,126870209,Health Care Assistant,Health Care Assistant
+VAL-ROL-210,role,HI,Health Improvement Manager,126870210,Health Improvement Manager,Health Improvement Manager
+VAL-ROL-211,role,HJ,Parkinson's Disease Nurse,126870211,Parkinson's Disease Nurse,Parkinson's Disease Nurse
+VAL-ROL-212,role,HK,CAP Dialysis Nurse,126870212,CAP Dialysis Nurse,CAP Dialysis Nurse
+VAL-ROL-213,role,HL,Sexual Health Leader,126870213,Sexual Health Leader,Sexual Health Leader
+VAL-ROL-214,role,HM,Health Policy Manager,126870214,Health Policy Manager,Health Policy Manager
+VAL-ROL-215,role,HN,Chest Pain Nurse,126870215,Chest Pain Nurse,Chest Pain Nurse
+VAL-ROL-216,role,HO,House Officer,126870216,House Officer,House Officer
+VAL-ROL-217,role,HP,Hospital Practitioner,126870217,Hospital Practitioner,Hospital Practitioner
+VAL-ROL-218,role,HQ,Health Services Representative,126870218,Health Services Representative,Health Services Representative
+VAL-ROL-219,role,HR,Human Resources Director,126870219,Human Resources Director,Human Resources Director
+VAL-ROL-220,role,HS,Director of Health Strategy,126870220,Director of Health Strategy,Director of Health Strategy
+VAL-ROL-221,role,HT,Health Strategy Manager,126870221,Health Strategy Manager,Health Strategy Manager
+VAL-ROL-222,role,HV,Health Visitor,126870222,Health Visitor,Health Visitor
+VAL-ROL-223,role,HZ,Haemovigilance Officer,126870223,Haemovigilance Officer,Haemovigilance Officer
+VAL-ROL-224,role,I1,Operations Director,126870224,Operations Director,Operations Director
+VAL-ROL-225,role,I2,Operations Manager,126870225,Operations Manager,Operations Manager
+VAL-ROL-226,role,I3,Optometrist Member,126870226,Optometrist Member,Optometrist Member
+VAL-ROL-227,role,I4,Pharmaceutical Executive Comittee Member,126870227,Pharmaceutical Executive Comittee Member,Pharmaceutical Executive Comittee Member
+VAL-ROL-228,role,I5,Perfusionist,126870228,Perfusionist,Perfusionist
+VAL-ROL-229,role,I6,Pharmacist Member,126870229,Pharmacist Member,Pharmacist Member
+VAL-ROL-230,role,I7,Pharmacy Manager,126870230,Pharmacy Manager,Pharmacy Manager
+VAL-ROL-231,role,I8,Plaster Technician,126870231,Plaster Technician,Plaster Technician
+VAL-ROL-232,role,I9,PPI Lead (Public/Patient Inv),126870232,PPI Lead (Public/Patient Inv),PPI Lead (Public/Patient Inv)
+VAL-ROL-233,role,IB,IBD Nurse,126870233,IBD Nurse,IBD Nurse
+VAL-ROL-234,role,IC,Infection Control Nurse,126870234,Infection Control Nurse,Infection Control Nurse
+VAL-ROL-235,role,ID,Continence Nurse,126870235,Continence Nurse,Continence Nurse
+VAL-ROL-236,role,IE,Continence Adviser,126870236,Continence Adviser,Continence Adviser
+VAL-ROL-237,role,IM,IM & T Lead,126870237,IM & T Lead,IM & T Lead
+VAL-ROL-238,role,IN,Infusion Nurse,126870238,Infusion Nurse,Infusion Nurse
+VAL-ROL-239,role,IP,Implantologist,126870239,Implantologist,Implantologist
+VAL-ROL-240,role,IR,IT Manager,126870240,IT Manager,IT Manager
+VAL-ROL-241,role,IT,IT Lead,126870241,IT Lead,IT Lead
+VAL-ROL-242,role,J1,Practice Representative,126870242,Practice Representative,Practice Representative
+VAL-ROL-243,role,J2,Primary Care Dev Lead,126870243,Primary Care Dev Lead,Primary Care Dev Lead
+VAL-ROL-244,role,J3,Private General Practitioner,126870244,Private General Practitioner,Private General Practitioner
+VAL-ROL-245,role,J4,Professor,126870245,Professor,Professor
+VAL-ROL-246,role,J5,Public Health Lead,126870246,Public Health Lead,Public Health Lead
+VAL-ROL-247,role,J6,Public Health Member,126870247,Public Health Member,Public Health Member
+VAL-ROL-248,role,J7,Public Health Specialist,126870248,Public Health Specialist,Public Health Specialist
+VAL-ROL-249,role,J8,Quality Assurance Pharmacist,126870249,Quality Assurance Pharmacist,Quality Assurance Pharmacist
+VAL-ROL-250,role,J9,Quality Director,126870250,Quality Director,Quality Director
+VAL-ROL-251,role,K1,Quality Manager,126870251,Quality Manager,Quality Manager
+VAL-ROL-252,role,K2,Rapid Response Nurse,126870252,Rapid Response Nurse,Rapid Response Nurse
+VAL-ROL-253,role,K3,Renal Lead,126870253,Renal Lead,Renal Lead
+VAL-ROL-254,role,K4,Respiratory Lead,126870254,Respiratory Lead,Respiratory Lead
+VAL-ROL-255,role,K5,Salaried GP,126870255,Salaried GP,Salaried GP
+VAL-ROL-256,role,K6,SCBU Manager,126870256,SCBU Manager,SCBU Manager
+VAL-ROL-257,role,K7,SCBU Nurse,126870257,SCBU Nurse,SCBU Nurse
+VAL-ROL-258,role,K8,SCBU Sister,126870258,SCBU Sister,SCBU Sister
+VAL-ROL-259,role,K9,Service Improvement Facilitator,126870259,Service Improvement Facilitator,Service Improvement Facilitator
+VAL-ROL-260,role,KM,Catering Manager,126870260,Catering Manager,Catering Manager
+VAL-ROL-261,role,L1,Service Improvement Lead,126870261,Service Improvement Lead,Service Improvement Lead
+VAL-ROL-262,role,L2,Smoking Cessation Adviser,126870262,Smoking Cessation Adviser,Smoking Cessation Adviser
+VAL-ROL-263,role,L3,Smoking Cessation Lead,126870263,Smoking Cessation Lead,Smoking Cessation Lead
+VAL-ROL-264,role,L4,Speech & Language Therapist,126870264,Speech & Language Therapist,Speech & Language Therapist
+VAL-ROL-265,role,L5,Sterile Services Manager,126870265,Sterile Services Manager,Sterile Services Manager
+VAL-ROL-266,role,L6,Strategic Planning Manager,126870266,Strategic Planning Manager,Strategic Planning Manager
+VAL-ROL-267,role,L7,Stroke Prevention Lead,126870267,Stroke Prevention Lead,Stroke Prevention Lead
+VAL-ROL-268,role,L8,Substance Misuse Lead,126870268,Substance Misuse Lead,Substance Misuse Lead
+VAL-ROL-269,role,L9,Superintendent Pharmacist,126870269,Superintendent Pharmacist,Superintendent Pharmacist
+VAL-ROL-270,role,LA,Liaison Nurse,126870270,Liaison Nurse,Liaison Nurse
+VAL-ROL-271,role,LB,Local Service Providers',126870271,Local Service Providers',Local Service Providers'
+VAL-ROL-272,role,LC,Lecturer,126870272,Lecturer,Lecturer
+VAL-ROL-273,role,LD,Locality Director,126870273,Locality Director,Locality Director
+VAL-ROL-274,role,LE,Lead Manager,126870274,Lead Manager,Lead Manager
+VAL-ROL-275,role,LF,Collaborative Lead,126870275,Collaborative Lead,Collaborative Lead
+VAL-ROL-276,role,LI,Liaison Officer,126870276,Liaison Officer,Liaison Officer
+VAL-ROL-277,role,LM,Locality Manager,126870277,Locality Manager,Locality Manager
+VAL-ROL-278,role,LN,Clinical Lead,126870278,Clinical Lead,Clinical Lead
+VAL-ROL-279,role,LO,Locum Consultant,126870279,Locum Consultant,Locum Consultant
+VAL-ROL-280,role,LP,Prescribing Lead,126870280,Prescribing Lead,Prescribing Lead
+VAL-ROL-281,role,LQ,Physicist,126870281,Physicist,Physicist
+VAL-ROL-282,role,LS,Medical Laboratory Scientific Officer,126870282,Medical Laboratory Scientific Officer,Medical Laboratory Scientific Officer
+VAL-ROL-283,role,LY,Lymphoedema Nurse,126870283,Lymphoedema Nurse,Lymphoedema Nurse
+VAL-ROL-284,role,LZ,Lead Clinician,126870284,Lead Clinician,Lead Clinician
+VAL-ROL-285,role,M1,Supplementary Prescriber,126870285,Supplementary Prescriber,Supplementary Prescriber
+VAL-ROL-286,role,M2,Theatre Manager,126870286,Theatre Manager,Theatre Manager
+VAL-ROL-287,role,M3,Treatment Room Nurse,126870287,Treatment Room Nurse,Treatment Room Nurse
+VAL-ROL-288,role,M4,Trust/Hospital Hotel Services,126870288,Trust/Hospital Hotel Services,Trust/Hospital Hotel Services
+VAL-ROL-289,role,M5,Unit General Manager,126870289,Unit General Manager,Unit General Manager
+VAL-ROL-290,role,M6,Vocational GP Registrar,126870290,Vocational GP Registrar,Vocational GP Registrar
+VAL-ROL-291,role,M7,Wholesale Pharmacy Manager,126870291,Wholesale Pharmacy Manager,Wholesale Pharmacy Manager
+VAL-ROL-292,role,M8,Director of Public Health Nursing,126870292,Director of Public Health Nursing,Director of Public Health Nursing
+VAL-ROL-293,role,M9,PBC Development Manager,126870293,PBC Development Manager,PBC Development Manager
+VAL-ROL-294,role,MA,Medical Adviser,126870294,Medical Adviser,Medical Adviser
+VAL-ROL-295,role,MB,Chemotherapy Nurse,126870295,Chemotherapy Nurse,Chemotherapy Nurse
+VAL-ROL-296,role,MC,Midwife Community,126870296,Midwife Community,Midwife Community
+VAL-ROL-297,role,MD,Medical Director,126870297,Medical Director,Medical Director
+VAL-ROL-298,role,ME,Mental Health Lead,126870298,Mental Health Lead,Mental Health Lead
+VAL-ROL-299,role,MF,Community Manager,126870299,Community Manager,Community Manager
+VAL-ROL-300,role,MG,Modern Matron,126870300,Modern Matron,Modern Matron
+VAL-ROL-301,role,MH,Midwife Hospital,126870301,Midwife Hospital,Midwife Hospital
+VAL-ROL-302,role,MI,Medicines Management,126870302,Medicines Management,Medicines Management
+VAL-ROL-303,role,MJ,Deputy Matron,126870303,Deputy Matron,Deputy Matron
+VAL-ROL-304,role,MK,Community Matron,126870304,Community Matron,Community Matron
+VAL-ROL-305,role,ML,Medical Oncologist,126870305,Medical Oncologist,Medical Oncologist
+VAL-ROL-306,role,MM,MacMillan Nurse,126870306,MacMillan Nurse,MacMillan Nurse
+VAL-ROL-307,role,MN,Matron,126870307,Matron,Matron
+VAL-ROL-308,role,MO,Medical Officer,126870308,Medical Officer,Medical Officer
+VAL-ROL-309,role,MP,Member of Parliament,126870309,Member of Parliament,Member of Parliament
+VAL-ROL-310,role,MS,Minister of Health & Social Services,126870310,Minister of Health & Social Services,Minister of Health & Social Services
+VAL-ROL-311,role,MT,Marie Curie Nurse,126870311,Marie Curie Nurse,Marie Curie Nurse
+VAL-ROL-312,role,N1,Director of Therapies & Health Science,126870312,Director of Therapies & Health Science,Director of Therapies & Health Science
+VAL-ROL-313,role,N2,Physician Associate,126870313,Physician Associate,Physician Associate
+VAL-ROL-314,role,N9,Dental Nurse,126870314,Dental Nurse,Dental Nurse
+VAL-ROL-315,role,NA,Nurse Adviser,126870315,Nurse Adviser,Nurse Adviser
+VAL-ROL-316,role,NB,Nurse Prescriber,126870316,Nurse Prescriber,Nurse Prescriber
+VAL-ROL-317,role,NC,Nurse Co-ordinator,126870317,Nurse Co-ordinator,Nurse Co-ordinator
+VAL-ROL-318,role,ND,Nursing Director,126870318,Nursing Director,Nursing Director
+VAL-ROL-319,role,NE,Nurse Technician,126870319,Nurse Technician,Nurse Technician
+VAL-ROL-320,role,NF,Nurse Facilitator,126870320,Nurse Facilitator,Nurse Facilitator
+VAL-ROL-321,role,NG,Nurse Partner,126870321,Nurse Partner,Nurse Partner
+VAL-ROL-322,role,NH,Nursing Home Nurse,126870322,Nursing Home Nurse,Nursing Home Nurse
+VAL-ROL-323,role,NL,Nurse Lead,126870323,Nurse Lead,Nurse Lead
+VAL-ROL-324,role,NM,Nurse Manager,126870324,Nurse Manager,Nurse Manager
+VAL-ROL-325,role,NN,Nutritionist,126870325,Nutritionist,Nutritionist
+VAL-ROL-326,role,NO,Chief Nursing Officer,126870326,Chief Nursing Officer,Chief Nursing Officer
+VAL-ROL-327,role,NP,Nurse Practitioner,126870327,Nurse Practitioner,Nurse Practitioner
+VAL-ROL-328,role,NR,Nurse,126870328,Nurse,Nurse
+VAL-ROL-329,role,NS,Clinical Nurse Specialist,126870329,Clinical Nurse Specialist,Clinical Nurse Specialist
+VAL-ROL-330,role,NT,Nurse Consultant,126870330,Nurse Consultant,Nurse Consultant
+VAL-ROL-331,role,NU,Hospital Nurse,126870331,Hospital Nurse,Hospital Nurse
+VAL-ROL-332,role,NW,Network Manager,126870332,Network Manager,Network Manager
+VAL-ROL-333,role,NX,Network Director,126870333,Network Director,Network Director
+VAL-ROL-334,role,OA,Operating Department Practitioner,126870334,Operating Department Practitioner,Operating Department Practitioner
+VAL-ROL-335,role,OC,Optician,126870335,Optician,Optician
+VAL-ROL-336,role,OD,Anaesthetics Practitioner,126870336,Anaesthetics Practitioner,Anaesthetics Practitioner
+VAL-ROL-337,role,OO,Co-ordinator,126870337,Co-ordinator,Co-ordinator
+VAL-ROL-338,role,OP,Oncology Pharmacist,126870338,Oncology Pharmacist,Oncology Pharmacist
+VAL-ROL-339,role,OR,Orthodontist,126870339,Orthodontist,Orthodontist
+VAL-ROL-340,role,OT,Occupational Therapist,126870340,Occupational Therapist,Occupational Therapist
+VAL-ROL-341,role,P1,Policy Management,126870341,Policy Management,Policy Management
+VAL-ROL-342,role,P2,Psychotherapist,126870342,Psychotherapist,Psychotherapist
+VAL-ROL-343,role,PA,Pharmaceutical Adviser,126870343,Pharmaceutical Adviser,Pharmaceutical Adviser
+VAL-ROL-344,role,PB,Pharmacist Buying,126870344,Pharmacist Buying,Pharmacist Buying
+VAL-ROL-345,role,PC,Pharmacist Chief,126870345,Pharmacist Chief,Pharmacist Chief
+VAL-ROL-346,role,PD,Retail Pharmacist,126870346,Retail Pharmacist,Retail Pharmacist
+VAL-ROL-347,role,PE,Paediatric Pharmacist,126870347,Paediatric Pharmacist,Paediatric Pharmacist
+VAL-ROL-348,role,PF,Primary Care Pharmacist,126870348,Primary Care Pharmacist,Primary Care Pharmacist
+VAL-ROL-349,role,PG,Paediatric Haematologist,126870349,Paediatric Haematologist,Paediatric Haematologist
+VAL-ROL-350,role,PH,Pharmacist,126870350,Pharmacist,Pharmacist
+VAL-ROL-351,role,PI,Medicines Information Pharmacist,126870351,Medicines Information Pharmacist,Medicines Information Pharmacist
+VAL-ROL-352,role,PJ,Project Manager,126870352,Project Manager,Project Manager
+VAL-ROL-353,role,PK,Phototherapist,126870353,Phototherapist,Phototherapist
+VAL-ROL-354,role,PL,Director of Planning,126870354,Director of Planning,Director of Planning
+VAL-ROL-355,role,PM,Practice Manager,126870355,Practice Manager,Practice Manager
+VAL-ROL-356,role,PN,Practice Nurse,126870356,Practice Nurse,Practice Nurse
+VAL-ROL-357,role,PO,Paediatric Oncologist,126870357,Paediatric Oncologist,Paediatric Oncologist
+VAL-ROL-358,role,PP,Principal Pharmacist,126870358,Principal Pharmacist,Principal Pharmacist
+VAL-ROL-359,role,PQ,Phlebotomist,126870359,Phlebotomist,Phlebotomist
+VAL-ROL-360,role,PR,Professor,126870360,Professor,Professor
+VAL-ROL-361,role,PS,Director of Pharmaceutical Services,126870361,Director of Pharmaceutical Services,Director of Pharmaceutical Services
+VAL-ROL-362,role,PT,Physiotherapist,126870362,Physiotherapist,Physiotherapist
+VAL-ROL-363,role,PU,Trainee / Student Pharmacist,126870363,Trainee / Student Pharmacist,Trainee / Student Pharmacist
+VAL-ROL-364,role,PV,Primary Care Development Manager,126870364,Primary Care Development Manager,Primary Care Development Manager
+VAL-ROL-365,role,PW,Psychologist,126870365,Psychologist,Psychologist
+VAL-ROL-366,role,PX,Procurement Officer,126870366,Procurement Officer,Procurement Officer
+VAL-ROL-367,role,PY,Podiatrist,126870367,Podiatrist,Podiatrist
+VAL-ROL-368,role,PZ,Palliative Care Nurse,126870368,Palliative Care Nurse,Palliative Care Nurse
+VAL-ROL-369,role,QM,Qualifying Member,126870369,Qualifying Member,Qualifying Member
+VAL-ROL-370,role,R1,NICE Implementation Lead,126870370,NICE Implementation Lead,NICE Implementation Lead
+VAL-ROL-371,role,RA,Radiographer,126870371,Radiographer,Radiographer
+VAL-ROL-372,role,RB,Psychiatric Nurse,126870372,Psychiatric Nurse,Psychiatric Nurse
+VAL-ROL-373,role,RC,Counsellor,126870373,Counsellor,Counsellor
+VAL-ROL-374,role,RD,Research and Development Director,126870374,Research and Development Director,Research and Development Director
+VAL-ROL-375,role,RE,Regional Director,126870375,Regional Director,Regional Director
+VAL-ROL-376,role,RF,Research Fellow,126870376,Research Fellow,Research Fellow
+VAL-ROL-377,role,RG,Registrar,126870377,Registrar,Registrar
+VAL-ROL-378,role,RH,Risk Manager,126870378,Risk Manager,Risk Manager
+VAL-ROL-379,role,RI,Retinal Screener,126870379,Retinal Screener,Retinal Screener
+VAL-ROL-380,role,RL,Assistant Research Manager,126870380,Assistant Research Manager,Assistant Research Manager
+VAL-ROL-381,role,RM,Research Manager,126870381,Research Manager,Research Manager
+VAL-ROL-382,role,RN,Research Nurse,126870382,Research Nurse,Research Nurse
+VAL-ROL-383,role,RO,Resuscitation Officer,126870383,Resuscitation Officer,Resuscitation Officer
+VAL-ROL-384,role,RR,Research Registrar,126870384,Research Registrar,Research Registrar
+VAL-ROL-385,role,RS,Clin Research Ld,126870385,Clin Research Ld,Clin Research Ld
+VAL-ROL-386,role,RT,Retainer Doctors,126870386,Retainer Doctors,Retainer Doctors
+VAL-ROL-387,role,RX,Prescribing Adviser,126870387,Prescribing Adviser,Prescribing Adviser
+VAL-ROL-388,role,SA,Secretary,126870388,Secretary,Secretary
+VAL-ROL-389,role,SB,Stenographer,126870389,Stenographer,Stenographer
+VAL-ROL-390,role,SC,Senior Clini.Medi.Offic,126870390,Senior Clini.Medi.Offic,Senior Clini.Medi.Offic
+VAL-ROL-391,role,SD,Senior Dietitian,126870391,Senior Dietitian,Senior Dietitian
+VAL-ROL-392,role,SE,Senior Partner,126870392,Senior Partner,Senior Partner
+VAL-ROL-393,role,SF,Staff Nurse,126870393,Staff Nurse,Staff Nurse
+VAL-ROL-394,role,SG,Staff Grade,126870394,Staff Grade,Staff Grade
+VAL-ROL-395,role,SH,Senior House Officer,126870395,Senior House Officer,Senior House Officer
+VAL-ROL-396,role,SI,Superintendent,126870396,Superintendent,Superintendent
+VAL-ROL-397,role,SJ,Senior Nurse,126870397,Senior Nurse,Senior Nurse
+VAL-ROL-398,role,SK,School Nurse,126870398,School Nurse,School Nurse
+VAL-ROL-399,role,SL,Senior Lecturer,126870399,Senior Lecturer,Senior Lecturer
+VAL-ROL-400,role,SM,Senior Research Manager,126870400,Senior Research Manager,Senior Research Manager
+VAL-ROL-401,role,SN,Specialist Nurse,126870401,Specialist Nurse,Specialist Nurse
+VAL-ROL-402,role,SO,Supplies Officer,126870402,Supplies Officer,Supplies Officer
+VAL-ROL-403,role,SP,Staff Pharmacist,126870403,Staff Pharmacist,Staff Pharmacist
+VAL-ROL-404,role,SQ,SHA Lead,126870404,SHA Lead,SHA Lead
+VAL-ROL-405,role,SR,Senior Registrar,126870405,Senior Registrar,Senior Registrar
+VAL-ROL-406,role,SS,Social Services Representative,126870406,Social Services Representative,Social Services Representative
+VAL-ROL-407,role,ST,Stoma Nurse,126870407,Stoma Nurse,Stoma Nurse
+VAL-ROL-408,role,STP,Sustainability & Transformation Plans Lead,126870408,Sustainability & Transformation Plans Lead,Sustainability & Transformation Plans Lead
+VAL-ROL-409,role,SU,Support Officer,126870409,Support Officer,Support Officer
+VAL-ROL-410,role,SV,Chief Social Services Inspector,126870410,Chief Social Services Inspector,Chief Social Services Inspector
+VAL-ROL-411,role,SW,Social Security Representative,126870411,Social Security Representative,Social Security Representative
+VAL-ROL-412,role,SX,Scientist,126870412,Scientist,Scientist
+VAL-ROL-413,role,SY,Permanent Secretary,126870413,Permanent Secretary,Permanent Secretary
+VAL-ROL-414,role,SZ,Secretary of State,126870414,Secretary of State,Secretary of State
+VAL-ROL-415,role,TA,Triage Nurse,126870415,Triage Nurse,Triage Nurse
+VAL-ROL-416,role,TB,Drug Team Leader,126870416,Drug Team Leader,Drug Team Leader
+VAL-ROL-417,role,TC,Dietitian,126870417,Dietitian,Dietitian
+VAL-ROL-418,role,TD,Trust Doctor,126870418,Trust Doctor,Trust Doctor
+VAL-ROL-419,role,TE,Treasurer,126870419,Treasurer,Treasurer
+VAL-ROL-420,role,TF,PCO prescriping task force,126870420,PCO prescriping task force,PCO prescriping task force
+VAL-ROL-421,role,TG,Training Manager,126870421,Training Manager,Training Manager
+VAL-ROL-422,role,TH,Theatre Nurse,126870422,Theatre Nurse,Theatre Nurse
+VAL-ROL-423,role,TI,Tenovus Nurse,126870423,Tenovus Nurse,Tenovus Nurse
+VAL-ROL-424,role,TL,Team Leader,126870424,Team Leader,Team Leader
+VAL-ROL-425,role,TM,Contracts Manager,126870425,Contracts Manager,Contracts Manager
+VAL-ROL-426,role,TN,Trauma Nurse,126870426,Trauma Nurse,Trauma Nurse
+VAL-ROL-427,role,TO,Prison Doctor,126870427,Prison Doctor,Prison Doctor
+VAL-ROL-428,role,TP,Paediatric Dietitian,126870428,Paediatric Dietitian,Paediatric Dietitian
+VAL-ROL-429,role,TR,Clinical Trials Nurse,126870429,Clinical Trials Nurse,Clinical Trials Nurse
+VAL-ROL-430,role,TS,Clinical Trials Manager,126870430,Clinical Trials Manager,Clinical Trials Manager
+VAL-ROL-431,role,TT,Dental Therapist,126870431,Dental Therapist,Dental Therapist
+VAL-ROL-432,role,TU,Tutor,126870432,Tutor,Tutor
+VAL-ROL-433,role,TV,Tissue Viability Nurse,126870433,Tissue Viability Nurse,Tissue Viability Nurse
+VAL-ROL-434,role,TX,Technician,126870434,Technician,Technician
+VAL-ROL-435,role,TZ,Student/Trainee Nurse,126870435,Student/Trainee Nurse,Student/Trainee Nurse
+VAL-ROL-436,role,UB,Public Health Nurse,126870436,Public Health Nurse,Public Health Nurse
+VAL-ROL-437,role,VS,Vascular Nurse Specialist,126870437,Vascular Nurse Specialist,Vascular Nurse Specialist
+VAL-ROL-438,role,WH,Women's Health Lead,126870438,Women's Health Lead,Women's Health Lead
+VAL-ROL-439,role,WK,Social Worker,126870439,Social Worker,Social Worker
+VAL-ROL-440,role,WM,Ward Manager,126870440,Ward Manager,Ward Manager
+VAL-ROL-441,role,WN,Wound Care Nurse,126870441,Wound Care Nurse,Wound Care Nurse
+VAL-ROL-442,role,WO,Support Worker,126870442,Support Worker,Support Worker
+VAL-ROL-443,role,WS,Sister,126870443,Sister,Sister
+VAL-ROL-444,role,XA,Physiologist,126870444,Physiologist,Physiologist
+VAL-ROL-445,role,XB,NSF Clinical Lead,126870445,NSF Clinical Lead,NSF Clinical Lead
+VAL-ROL-446,role,XC,Cancer Lead,126870446,Cancer Lead,Cancer Lead
+VAL-ROL-447,role,XD,GMS/PMS Contract Lead,126870447,GMS/PMS Contract Lead,GMS/PMS Contract Lead
+VAL-ROL-448,role,XE,GP Appraiser,126870448,GP Appraiser,GP Appraiser
+VAL-ROL-449,role,XF,Community Paediatrician,126870449,Community Paediatrician,Community Paediatrician
+VAL-ROL-450,role,XG,Clinical Governance Chair,126870450,Clinical Governance Chair,Clinical Governance Chair
+VAL-ROL-451,role,XH,Principal Dentist,126870451,Principal Dentist,Principal Dentist
+VAL-ROL-452,role,XL,Chief Medical Laboratory Scientific Officer,126870452,Chief Medical Laboratory Scientific Officer,Chief Medical Laboratory Scientific Officer
+VAL-ROL-453,role,XP,Pharmacy Technician,126870453,Pharmacy Technician,Pharmacy Technician
+VAL-ROL-454,role,YT,Psychosexual Therapist,126870454,Psychosexual Therapist,Psychosexual Therapist
+VAL-ROL-455,role,Z1,Advanced Clinical Practitioner,126870455,Advanced Clinical Practitioner,Advanced Clinical Practitioner
+VAL-ROL-456,role,ZZ,Client Specific Role,126870456,Client Specific Role,Client Specific Role
+# Affiliation Working Status Mapping,,,,,,
+VAL-WST-001,workingstatus,C,Full Time,1,Full Time,
+VAL-WST-002,workingstatus,D,Home,2,Home,
+VAL-WST-003,workingstatus,P,Part Time,3,Part Time,
+VAL-WST-004,workingstatus,W,Regular Substitute,4,Regular Substitute,
+VAL-WST-005,workingstatus,T,Market Access,5,Market Access,
+VAL-WST-006,workingstatus,N,Unknown Activity,6,Unknown Activity,
+# HCP Professional Type Code (individual.typeCode -> typecode decode),,,,,,
+VAL-TYP-001,hcptype,A,Administrator,126870001,Administrator,Administrator
+VAL-TYP-002,hcptype,C,Researcher/Scientist,126870002,Researcher/Scientist,Researcher/Scientist
+VAL-TYP-003,hcptype,CO,Counselor/Social worker,126870003,Counselor/Social worker,Counselor/Social worker
+VAL-TYP-004,hcptype,D,Dentist,126870004,Dentist,Dentist
+VAL-TYP-005,hcptype,DX,Dental Assistant,126870005,Dental Assistant,Dental Assistant
+VAL-TYP-006,hcptype,I,Nurse,126870006,Nurse,Nurse
+VAL-TYP-007,hcptype,K,Physical Therapist,126870007,Physical Therapist,Physical Therapist
+VAL-TYP-008,hcptype,LT,Laboratory technician,126870008,Laboratory technician,Laboratory technician
+VAL-TYP-009,hcptype,M,Physician,126870009,Physician,Physician
+VAL-TYP-010,hcptype,MA,Operating / Surgical Assistants,126870010,Operating / Surgical Assistants,Operating / Surgical Assistants
+VAL-TYP-011,hcptype,MX,Medical Assistant,126870011,Medical Assistant,Medical Assistant
+VAL-TYP-012,hcptype,O,Optician,126870012,Optician,Optician
+VAL-TYP-013,hcptype,OP,Optometrist,126870013,Optometrist,Optometrist
+VAL-TYP-014,hcptype,P,Pharmacist,126870014,Pharmacist,Pharmacist
+VAL-TYP-015,hcptype,PA,Physician Assistant,126870015,Physician Assistant,Physician Assistant
+VAL-TYP-016,hcptype,PR,Dental Prosthetist,126870016,Dental Prosthetist,Dental Prosthetist
+VAL-TYP-017,hcptype,PX,Pharmacist Assistant / Technician,126870017,Pharmacist Assistant / Technician,Pharmacist Assistant / Technician
+VAL-TYP-018,hcptype,R,Allied Health Professionals,126870018,Allied Health Professionals,Allied Health Professionals
+VAL-TYP-019,hcptype,S,Midwife,126870019,Midwife,Midwife
+VAL-TYP-020,hcptype,TC,Technician/Technologist,126870020,Technician/Technologist,Technician/Technologist
+VAL-TYP-021,hcptype,V,Veterinarian,126870021,Veterinarian,Veterinarian
+VAL-TYP-022,hcptype,VX,Veterinary Assistant,126870022,Veterinary Assistant,Veterinary Assistant
+VAL-TYP-023,hcptype,W,Wholesaler,126870023,Wholesaler,Wholesaler
+VAL-TYP-024,hcptype,Z,Other,126870024,Other,Other
