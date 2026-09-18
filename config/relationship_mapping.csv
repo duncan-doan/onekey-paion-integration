@@ -1,10 +1,11 @@
 relationship_id,relationship_name,source_entity,source_field,target_entity,target_field,relationship_type,lookup_key_field,is_required,load_order,notes,description
-# ============================================================================================================
-# Relationship Mapping: OneKey -> Dataverse
-# Defines entity relationships and proper load order for maintaining referential integrity
-# ============================================================================================================
-REL-001,HCO Parent Hierarchy,account,accountnumber,account,parentaccountid,self_referential,accountnumber,false,1,Load depth-0 (roots) first then depth-1+,Health Board/Trust -> Hospital -> Department hierarchy via managerWorkplaceEid
-REL-002,HCP to Workplace,contact,externaluseridentifier,account,parentcustomerid,many_to_one,accountnumber,true,2,HCP must have workplace Account,HCP linked to their workplace via activity.workplaceEid -> account.accountnumber
-REL-003,HCP to Managing Partner,contact,externaluseridentifier,account,msa_managingpartnerid,many_to_one,accountnumber,false,2,Optional parent hospital link,Parent hospital via workplace.managerWorkplaceEid (alternative to Account hierarchy)
-REL-004,HCO to HCO Relations,account,accountnumber,account,N/A,many_to_many,accountnumber,false,3,Requires Connection entity,workplace.relations[] with linkCode AUT/AFF for affiliations
-REL-005,HCP Multi-Activity,contact,externaluseridentifier,account,N/A,many_to_many,accountnumber,false,4,Requires custom fc_hcpaffiliation entity,One Individual with multiple Activities at different workplaces
+# ============================================================================================================,,,,,,,,,,,
+# Relationship Mapping: OneKey -> Dataverse,,,,,,,,,,,
+# Defines entity relationships and proper load order for maintaining referential integrity,,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,,
+REL-001,HCO Parent Hierarchy,account,accountnumber,account,parentaccountid,self_referential,accountnumber,FALSE,1,Load depth-0 (roots) first then depth-1+,Health Board/Trust -> Hospital -> Department hierarchy via managerWorkplaceEid
+REL-002,HCP to Workplace,contact,externaluseridentifier,account,parentcustomerid,many_to_one,accountnumber,TRUE,2,HCP must have workplace Account,HCP linked to their workplace via activity.workplaceEid -> account.accountnumber
+REL-003,HCP to Managing Partner,contact,externaluseridentifier,account,msa_managingpartnerid,many_to_one,accountnumber,FALSE,2,Optional parent hospital link,Parent hospital via workplace.managerWorkplaceEid (alternative to Account hierarchy)
+REL-004,HCO to HCO Relations,account,accountnumber,account,N/A,many_to_many,accountnumber,FALSE,3,Requires Connection entity,workplace.relations[] with linkCode AUT/AFF for affiliations
+REL-005,HCP Multi-Activity,contact,externaluseridentifier,account,N/A,many_to_many,accountnumber,FALSE,4,Requires custom fc_hcpaffiliation entity,One Individual with multiple Activities at different workplaces
+REL-006,HCO to Address,address,externalid,account,parentid,many_to_one,externalid,TRUE,5,,

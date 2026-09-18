@@ -1,29 +1,29 @@
 mapping_id,mapping_type,source_code,source_value,target_value,target_label,notes
-# ============================================================================================================
-# Value Mapping: OneKey Codes -> Dataverse Picklist Values
-# Used by transform rules: map: and decode:
-# ============================================================================================================
-# Gender Code Mapping (individual.genderCode -> contact.gendercode)
+# ============================================================================================================,,,,,,
+# Value Mapping: OneKey Codes -> Dataverse Picklist Values,,,,,,
+# Used by transform rules: map: and decode:,,,,,,
+# ============================================================================================================,,,,,,
+# Gender Code Mapping (individual.genderCode -> contact.gendercode),,,,,,
 VAL-GEN-001,gendercode,M,Male,1,Male,OneKey M -> Dataverse Male (1)
 VAL-GEN-002,gendercode,F,Female,2,Female,OneKey F -> Dataverse Female (2)
-# Status Code Mapping (statusCode -> statecode)
+# Status Code Mapping (statusCode -> statecode),,,,,,
 VAL-STA-001,statecode,3,Valid,0,Active,OneKey Valid -> Dataverse Active
 VAL-STA-002,statecode,9,Invalid,1,Inactive,OneKey Invalid -> Dataverse Inactive
 VAL-STA-003,statecode,1,Created,1,Inactive,OneKey Created (pending) -> Dataverse Inactive
 VAL-STA-004,statecode,6,Deceased,1,Inactive,OneKey Deceased -> Dataverse Inactive
-# Status Reason Mapping (statusCode -> statuscode)
+# Status Reason Mapping (statusCode -> statuscode),,,,,,
 VAL-STR-001,statuscode,3,Valid,1,Active,Active status reason
 VAL-STR-002,statuscode,9,Invalid,2,Inactive,Inactive status reason
 VAL-STR-003,statuscode,1,Created,2,Inactive,Pending validation
 VAL-STR-004,statuscode,6,Deceased,2,Inactive,Deceased
-# Industry Code Mapping (activityLocationCode -> industrycode)
+# Industry Code Mapping (activityLocationCode -> industrycode),,,,,,
 VAL-IND-001,industrycode,H,Hospital,11,Hospital,Hospital facility
 VAL-IND-002,industrycode,S,Surgery,12,Surgery/Practice,Surgery or GP Practice
 VAL-IND-003,industrycode,N,NHS Establishment,13,NHS Establishment,NHS Est / Clinic
 VAL-IND-004,industrycode,O,Office,14,Office,Office / Other
 VAL-IND-005,industrycode,P,Pharmacy,15,Pharmacy,Pharmacy
 VAL-IND-006,industrycode,L,Laboratory,16,Laboratory,Lab facility
-# HCP Professional Type Code (individual.typeCode -> typecode decode)
+# HCP Professional Type Code (individual.typeCode -> typecode decode),,,,,,
 VAL-TYP-001,typecode,M,Physician,Doctor,Doctor,Medical Practitioner / Physician
 VAL-TYP-002,typecode,P,Pharmacist,Pharmacist,Pharmacist,Pharmacist
 VAL-TYP-003,typecode,D,Dentist,Dentist,Dentist,Dentist
@@ -31,39 +31,15 @@ VAL-TYP-004,typecode,N,Nurse,Nurse,Nurse,Nurse
 VAL-TYP-005,typecode,A,Administrator,Administrator,Healthcare Administrator,Healthcare Administrator
 VAL-TYP-006,typecode,Z,Other,Other,Other Healthcare Professional,Other HCP type
 VAL-TYP-007,typecode,V,Veterinarian,Veterinarian,Veterinarian,Veterinarian (some markets)
-# Title Code Mapping (individual.titleCode -> salutation decode)
-VAL-TIT-001,title,01,Mr,Mr,Mr,Title Mr
-VAL-TIT-002,title,02,Mrs,Mrs,Mrs,Title Mrs
-VAL-TIT-003,title,03,Dr,Dr,Dr,Title Doctor
-VAL-TIT-004,title,04,Prof,Prof,Professor,Title Professor
-VAL-TIT-005,title,05,Ms,Ms,Ms,Title Ms
-VAL-TIT-006,title,06,Miss,Miss,Miss,Title Miss
-VAL-TIT-007,title,07,Sir,Sir,Sir,Title Sir
-VAL-TIT-008,title,08,Lord,Lord,Lord,Title Lord
-VAL-TIT-009,title,09,Lady,Lady,Lady,Title Lady
-VAL-TIT-010,title,10,Dame,Dame,Dame,Title Dame
-VAL-TIT-011,title,11,Rev,Rev,Reverend,Title Reverend
-# HCO Type Code (workplace.typeCode -> description)
-VAL-HCO-001,hcotype,HAU,Health Board / Agency,HAU,Health Authority / Board,Health Board (UK) / Agency
-VAL-HCO-002,hcotype,ACT,Acute Trust,ACT,Acute Trust,NHS Acute Trust
-VAL-HCO-003,hcotype,MHT,Mental Health Trust,MHT,Mental Health Trust,NHS Mental Health Trust
-VAL-HCO-004,hcotype,AMB,Ambulance Trust,AMB,Ambulance Trust,Ambulance Service Trust
-VAL-HCO-005,hcotype,PCT,Primary Care Trust,PCT,Primary Care Trust,Primary Care Trust (legacy)
-VAL-HCO-006,hcotype,CCG,Clinical Commissioning Group,CCG,CCG,Clinical Commissioning Group
-VAL-HCO-007,hcotype,ICB,Integrated Care Board,ICB,Integrated Care Board,Integrated Care Board (NHS reform)
-VAL-HCO-008,hcotype,PRA,Practice,PRA,GP Practice,General Practice
-VAL-HCO-009,hcotype,PHR,Pharmacy,PHR,Pharmacy,Pharmacy
-VAL-HCO-010,hcotype,LAB,Laboratory,LAB,Laboratory,Laboratory
-VAL-HCO-011,hcotype,ABT,Department,ABT,Department,Department within hospital
-# Address Type Code (workplaceAddresses.typeCode -> address1_addresstypecode)
+# Address Type Code (workplaceAddresses.typeCode -> address1_addresstypecode),,,,,,
 VAL-ADR-001,addresstypecode,P,Primary,3,Primary,Primary/Principal address
 VAL-ADR-002,addresstypecode,S,Secondary,4,Other,Secondary address
 VAL-ADR-003,addresstypecode,M,Mailing,5,Mail,Mailing address
-# Process Code Mapping (CDC processCode)
+# Process Code Mapping (CDC processCode),,,,,,
 VAL-PRC-001,processcode,I,Insert,insert,Insert,New record created in OneKey
 VAL-PRC-002,processcode,U,Update,update,Update,Existing record modified
 VAL-PRC-003,processcode,R,Replace,replace,Replace,Record replaced/merged
-# Country Code / Codebase Mapping
+# Country Code / Codebase Mapping,,,,,,
 VAL-COD-001,codebase,WUK,United Kingdom,GB,United Kingdom,UK codebase
 VAL-COD-002,codebase,WDE,Germany,DE,Germany,Germany codebase
 VAL-COD-003,codebase,WNL,Netherlands,NL,Netherlands,Netherlands codebase
@@ -71,7 +47,7 @@ VAL-COD-004,codebase,WSE,Sweden,SE,Sweden,Sweden codebase
 VAL-COD-005,codebase,WDK,Denmark,DK,Denmark,Denmark codebase
 VAL-COD-006,codebase,WNO,Norway,NO,Norway,Norway codebase
 VAL-COD-007,codebase,WFI,Finland,FI,Finland,Finland codebase
-# Language Code Mapping (for portal LCID if needed)
+# Language Code Mapping (for portal LCID if needed),,,,,,
 VAL-LNG-001,language,en_GB,English (UK),1033,English,English UK
 VAL-LNG-002,language,de,German,1031,German,German
 VAL-LNG-003,language,nl,Dutch,1043,Dutch,Dutch
@@ -79,3 +55,383 @@ VAL-LNG-004,language,sv,Swedish,1053,Swedish,Swedish
 VAL-LNG-005,language,da,Danish,1030,Danish,Danish
 VAL-LNG-006,language,no,Norwegian,1044,Norwegian,Norwegian
 VAL-LNG-007,language,fi,Finnish,1035,Finnish,Finnish
+# Specialty mapping,,,,,,
+VAL-SPE-001,specialty,01,General Medicine,1,General Medicine,
+VAL-SPE-002,specialty,02,Asthma,2,Asthma,
+VAL-SPE-003,specialty,03,Anatomical Pathology,3,Anatomical Pathology,
+VAL-SPE-004,specialty,04,Anaesthesiology,4,Anaesthesiology,
+VAL-SPE-005,specialty,05,Homeopathy,5,Homeopathy,
+VAL-SPE-006,specialty,06,Gastroenterology,6,Gastroenterology,
+VAL-SPE-007,specialty,07,Biochemistry,7,Biochemistry,
+VAL-SPE-008,specialty,08,Cardiology,8,Cardiology,
+VAL-SPE-009,specialty,09,Sports Medicine,9,Sports Medicine,
+VAL-SPE-010,specialty,0B,HIV Medicine,10,HIV Medicine,
+VAL-SPE-011,specialty,0X,Aesthetic Medicine,11,Aesthetic Medicine,
+VAL-SPE-012,specialty,10,Cardiovascular/Vascular Surgery,12,Cardiovascular/Vascular Surgery,
+VAL-SPE-013,specialty,11,General Surgery,13,General Surgery,
+VAL-SPE-014,specialty,12,Oral Surgery,14,Oral Surgery,
+VAL-SPE-015,specialty,13,Child Surgery,15,Child Surgery,
+VAL-SPE-016,specialty,14,Cardiothoracic Surgery,16,Cardiothoracic Surgery,
+VAL-SPE-017,specialty,15,Plastic Surgery & Burns,17,Plastic Surgery & Burns,
+VAL-SPE-018,specialty,16,Dermatology,18,Dermatology,
+VAL-SPE-019,specialty,17,Hospital Laboratory,19,Hospital Laboratory,
+VAL-SPE-020,specialty,18,Endocrinology,20,Endocrinology,
+VAL-SPE-021,specialty,19,Chronic Obstructive Pulmonaru Disease,21,Chronic Obstructive Pulmonaru Disease,
+VAL-SPE-022,specialty,1B,Psychology,22,Psychology,
+VAL-SPE-023,specialty,1D,Hospital Laboratory,23,Hospital Laboratory,
+VAL-SPE-024,specialty,1N,Physiology,24,Physiology,
+VAL-SPE-025,specialty,1W,Motor Neurone Disease,25,Motor Neurone Disease,
+VAL-SPE-026,specialty,1Z,Epileptology,26,Epileptology,
+VAL-SPE-027,specialty,20,Pharmacy,27,Pharmacy,
+VAL-SPE-028,specialty,21,Geriatrics,28,Geriatrics,
+VAL-SPE-029,specialty,22,Haematology,29,Haematology,
+VAL-SPE-030,specialty,23,Minor Surgery,30,Minor Surgery,
+VAL-SPE-031,specialty,24,Allergology,31,Allergology,
+VAL-SPE-032,specialty,25,Substance Abuse,32,Substance Abuse,
+VAL-SPE-033,specialty,26,Sports Medicine,33,Sports Medicine,
+VAL-SPE-034,specialty,27,HIV,34,HIV,
+VAL-SPE-035,specialty,28,Venereology,35,Venereology,
+VAL-SPE-036,specialty,29,Endoscopy,36,Endoscopy,
+VAL-SPE-037,specialty,2A,Pain Management,37,Pain Management,
+VAL-SPE-038,specialty,2X,Head & Neck,38,Head & Neck,
+VAL-SPE-039,specialty,2Z,Colorectal Surgery,39,Colorectal Surgery,
+VAL-SPE-040,specialty,30,Forensic Sciences,40,Forensic Sciences,
+VAL-SPE-041,specialty,31,Nuclear Medicine,41,Nuclear Medicine,
+VAL-SPE-042,specialty,33,Occupational Health,42,Occupational Health,
+VAL-SPE-043,specialty,34,Microbiology,43,Microbiology,
+VAL-SPE-044,specialty,35,Nephrology,44,Nephrology,
+VAL-SPE-045,specialty,36,Pneumology,45,Pneumology,
+VAL-SPE-046,specialty,37,Neurosurgery,46,Neurosurgery,
+VAL-SPE-047,specialty,38,Neuro Psychiatry,47,Neuro Psychiatry,
+VAL-SPE-048,specialty,39,Neurology,48,Neurology,
+VAL-SPE-049,specialty,3A,Neurophysiology,49,Neurophysiology,
+VAL-SPE-050,specialty,3B,Hepatology,50,Hepatology,
+VAL-SPE-051,specialty,3E,Wholesaler,51,Wholesaler,
+VAL-SPE-052,specialty,3K,Podiatry,52,Podiatry,
+VAL-SPE-053,specialty,3L,Midwife,53,Midwife,
+VAL-SPE-054,specialty,3P,Lipidology,54,Lipidology,
+VAL-SPE-055,specialty,3Y,Medical and Rehabilitation Devices,55,Medical and Rehabilitation Devices,
+VAL-SPE-056,specialty,40,Obstetrics and Gynaecology,56,Obstetrics and Gynaecology,
+VAL-SPE-057,specialty,41,Ophthalmology,57,Ophthalmology,
+VAL-SPE-058,specialty,42,Oncology,58,Oncology,
+VAL-SPE-059,specialty,43,Otorhinolaryngology,59,Otorhinolaryngology,
+VAL-SPE-060,specialty,44,Paediatrics,60,Paediatrics,
+VAL-SPE-061,specialty,45,Psychiatry,61,Psychiatry,
+VAL-SPE-062,specialty,46,Radiology,62,Radiology,
+VAL-SPE-063,specialty,47,Radiotherapy,63,Radiotherapy,
+VAL-SPE-064,specialty,48,Rehabilitation,64,Rehabilitation,
+VAL-SPE-065,specialty,49,Rheumatology,65,Rheumatology,
+VAL-SPE-066,specialty,4M,General Medicine,66,General Medicine,
+VAL-SPE-067,specialty,4P,Purchase,67,Purchase,
+VAL-SPE-068,specialty,50,Women's Health,68,Women's Health,
+VAL-SPE-069,specialty,51,Urology,69,Urology,
+VAL-SPE-070,specialty,52,Embryology,70,Embryology,
+VAL-SPE-071,specialty,53,Orthopaedics,71,Orthopaedics,
+VAL-SPE-072,specialty,54,Tropical Medicine,72,Tropical Medicine,
+VAL-SPE-073,specialty,55,Emergency Medicine,73,Emergency Medicine,
+VAL-SPE-074,specialty,58,Physiotherapy,74,Physiotherapy,
+VAL-SPE-075,specialty,5B,Cardiothoracic Surgery,75,Cardiothoracic Surgery,
+VAL-SPE-076,specialty,5C,Community Nursing,76,Community Nursing,
+VAL-SPE-077,specialty,5F,Dentistry,77,Dentistry,
+VAL-SPE-078,specialty,61,Maternity,78,Maternity,
+VAL-SPE-079,specialty,62,Neonatology,79,Neonatology,
+VAL-SPE-080,specialty,69,Child and Adolescent Psychiatry,80,Child and Adolescent Psychiatry,
+VAL-SPE-081,specialty,6B,Cytology,81,Cytology,
+VAL-SPE-082,specialty,6C,Metabolic Medicine,82,Metabolic Medicine,
+VAL-SPE-083,specialty,6D,Transplant Surgery,83,Transplant Surgery,
+VAL-SPE-084,specialty,6E,Bacteriology,84,Bacteriology,
+VAL-SPE-085,specialty,6F,Clinical Pharmacology,85,Clinical Pharmacology,
+VAL-SPE-086,specialty,6Q,Medicine,86,Medicine,
+VAL-SPE-087,specialty,6T,Hospital Medicine,87,Hospital Medicine,
+VAL-SPE-088,specialty,6U,Tertiary Care Nurse,88,Tertiary Care Nurse,
+VAL-SPE-089,specialty,6X,Hospice and Palliative Medicine,89,Hospice and Palliative Medicine,
+VAL-SPE-090,specialty,6Y,Dystonia Care,90,Dystonia Care,
+VAL-SPE-091,specialty,71,Public Health,91,Public Health,
+VAL-SPE-092,specialty,73,Paediatric Cardiology,92,Paediatric Cardiology,
+VAL-SPE-093,specialty,74,Infectious Diseases,93,Infectious Diseases,
+VAL-SPE-094,specialty,75,Dentistry,94,Dentistry,
+VAL-SPE-095,specialty,76,Dispensing institution,95,Dispensing institution,
+VAL-SPE-096,specialty,77,Intensive Care Medicine,96,Intensive Care Medicine,
+VAL-SPE-097,specialty,78,Burns,97,Burns,
+VAL-SPE-098,specialty,7A,Renal,98,Renal,
+VAL-SPE-099,specialty,7B,Pathology,99,Pathology,
+VAL-SPE-100,specialty,7C,Maternity,100,Maternity,
+VAL-SPE-101,specialty,7D,Virology,101,Virology,
+VAL-SPE-102,specialty,7E,Histopathology,102,Histopathology,
+VAL-SPE-103,specialty,7F,Cytohistopathology,103,Cytohistopathology,
+VAL-SPE-104,specialty,7G,Audiology,104,Audiology,
+VAL-SPE-105,specialty,7H,GU Medicine,105,GU Medicine,
+VAL-SPE-106,specialty,7I,Professorial Unit,106,Professorial Unit,
+VAL-SPE-107,specialty,7J,Child Health,107,Child Health,
+VAL-SPE-108,specialty,7K,Paediatrics Radiology,108,Paediatrics Radiology,
+VAL-SPE-109,specialty,7L,Neuropathology,109,Neuropathology,
+VAL-SPE-110,specialty,7M,Paediatrics Surgery,110,Paediatrics Surgery,
+VAL-SPE-111,specialty,7N,Otolaryngology,111,Otolaryngology,
+VAL-SPE-112,specialty,7O,Pharmacology,112,Pharmacology,
+VAL-SPE-113,specialty,7P,Spinal Injuries,113,Spinal Injuries,
+VAL-SPE-114,specialty,7Q,Cytopathology,114,Cytopathology,
+VAL-SPE-115,specialty,7R,Learning Disability,115,Learning Disability,
+VAL-SPE-116,specialty,7S,Neuroradiology,116,Neuroradiology,
+VAL-SPE-117,specialty,7T,Neuropsychology,117,Neuropsychology,
+VAL-SPE-118,specialty,7U,Geriatric Psychiatry,118,Geriatric Psychiatry,
+VAL-SPE-119,specialty,7V,Histology,119,Histology,
+VAL-SPE-120,specialty,7W,Respiratory Medicine,120,Respiratory Medicine,
+VAL-SPE-121,specialty,7X,Oral and Maxillofacial Surgery,121,Oral and Maxillofacial Surgery,
+VAL-SPE-122,specialty,7Y,Epidemiology,122,Epidemiology,
+VAL-SPE-123,specialty,7Z,Psychotherapy,123,Psychotherapy,
+VAL-SPE-124,specialty,81,Genetics,124,Genetics,
+VAL-SPE-125,specialty,82,Tropical Medicine,125,Tropical Medicine,
+VAL-SPE-126,specialty,83,Aviation Medicine,126,Aviation Medicine,
+VAL-SPE-127,specialty,85,Other/Non Medical,127,Other/Non Medical,
+VAL-SPE-128,specialty,86,Endoscopy,128,Endoscopy,
+VAL-SPE-129,specialty,87,Chemical Pathology,129,Chemical Pathology,
+VAL-SPE-130,specialty,88,Retail Chemist,130,Retail Chemist,
+VAL-SPE-131,specialty,8O,Dental Nurse,131,Dental Nurse,
+VAL-SPE-132,specialty,8P,Dental Therapist,132,Dental Therapist,
+VAL-SPE-133,specialty,8Q,Dental Hygienist,133,Dental Hygienist,
+VAL-SPE-134,specialty,8T,Oral Medicine,134,Oral Medicine,
+VAL-SPE-135,specialty,8U,Chemical Pathology,135,Chemical Pathology,
+VAL-SPE-136,specialty,8W,Coronary Care,136,Coronary Care,
+VAL-SPE-137,specialty,91,Physician's Assistant,137,Physician's Assistant,
+VAL-SPE-138,specialty,95,Orthodontics,138,Orthodontics,
+VAL-SPE-139,specialty,96,Dietetics,139,Dietetics,
+VAL-SPE-140,specialty,97,Diabetology,140,Diabetology,
+VAL-SPE-141,specialty,99,General Practice,141,General Practice,
+VAL-SPE-142,specialty,9K,Child Health,142,Child Health,
+VAL-SPE-143,specialty,9X,Healthcare Administration,143,Healthcare Administration,
+VAL-SPE-144,specialty,A2,IT Manager,144,IT Manager,
+VAL-SPE-145,specialty,A3,Clinical Oncology,145,Clinical Oncology,
+VAL-SPE-146,specialty,A5,Liaison Psychiatry,146,Liaison Psychiatry,
+VAL-SPE-147,specialty,A6,Allergies,147,Allergies,
+VAL-SPE-148,specialty,A7,Immunology,148,Immunology,
+VAL-SPE-149,specialty,A8,Medical Oncology,149,Medical Oncology,
+VAL-SPE-150,specialty,A9,Parkinsons Disease,150,Parkinsons Disease,
+VAL-SPE-151,specialty,AY,Other Administration,151,Other Administration,
+VAL-SPE-152,specialty,B1,New Clinical Serology,152,New Clinical Serology,
+VAL-SPE-153,specialty,B3,Hepatology,153,Hepatology,
+VAL-SPE-154,specialty,B7,Community Psychiatric Nurses,154,Community Psychiatric Nurses,
+VAL-SPE-155,specialty,BE,Biomedical Engineering,155,Biomedical Engineering,
+VAL-SPE-156,specialty,C3,Asthma,156,Asthma,
+VAL-SPE-157,specialty,C6,Bariatric Surgery,157,Bariatric Surgery,
+VAL-SPE-158,specialty,C7,Family Planning,158,Family Planning,
+VAL-SPE-159,specialty,D1,Dental Nurse,159,Dental Nurse,
+VAL-SPE-160,specialty,D2,Occupational Therapy,160,Occupational Therapy,
+VAL-SPE-161,specialty,D3,Biology,161,Biology,
+VAL-SPE-162,specialty,D6,Speech-Language Pathology,162,Speech-Language Pathology,
+VAL-SPE-163,specialty,D7,Fertility and Reproductive Health,163,Fertility and Reproductive Health,
+VAL-SPE-164,specialty,DI,Dental Hygienist,164,Dental Hygienist,
+VAL-SPE-165,specialty,DX,Dental Therapist,165,Dental Therapist,
+VAL-SPE-166,specialty,DY,Dental Nurse,166,Dental Nurse,
+VAL-SPE-167,specialty,E7,Surgery,167,Surgery,
+VAL-SPE-168,specialty,E8,Medicine,168,Medicine,
+VAL-SPE-169,specialty,G6,Addiction Medicine,169,Addiction Medicine,
+VAL-SPE-170,specialty,H7,Cystic Fibrosis,170,Cystic Fibrosis,
+VAL-SPE-171,specialty,I7,Neurological disorders,171,Neurological disorders,
+VAL-SPE-172,specialty,J4,Research,172,Research,
+VAL-SPE-173,specialty,J7,Elderly care,173,Elderly care,
+VAL-SPE-174,specialty,K7,Medicine,174,Medicine,
+VAL-SPE-175,specialty,L1,Forensic Psychiatry,175,Forensic Psychiatry,
+VAL-SPE-176,specialty,M5,Community Health,176,Community Health,
+VAL-SPE-177,specialty,M6,Community Psychiatric Nurses,177,Community Psychiatric Nurses,
+VAL-SPE-178,specialty,M8,Women's & Children's Health,178,Women's & Children's Health,
+VAL-SPE-179,specialty,N7,Trauma/ITU,179,Trauma/ITU,
+VAL-SPE-180,specialty,N8,Multiple Sclerosis,180,Multiple Sclerosis,
+VAL-SPE-181,specialty,R9,Paediatric Haematology,181,Paediatric Haematology,
+VAL-SPE-182,specialty,S2,Paediatric Cardiology,182,Paediatric Cardiology,
+VAL-SPE-183,specialty,S4,Paediatrics Radiology,183,Paediatrics Radiology,
+VAL-SPE-184,specialty,S5,Paed.Oncology,184,Paed.Oncology,
+VAL-SPE-185,specialty,S7,Embriology,185,Embriology,
+VAL-SPE-186,specialty,SG,Breast Care,186,Breast Care,
+VAL-SPE-187,specialty,T9,Cardiac Rehabi,187,Cardiac Rehabi,
+VAL-SPE-188,specialty,TH,Theatre,188,Theatre,
+VAL-SPE-189,specialty,U0,Alternative Medicine,189,Alternative Medicine,
+VAL-SPE-190,specialty,U1,Chief Dietician,190,Chief Dietician,
+VAL-SPE-191,specialty,U2,District Nursing,191,District Nursing,
+VAL-SPE-192,specialty,U3,Manager/Advisor,192,Manager/Advisor,
+VAL-SPE-193,specialty,U4,Superintendant,193,Superintendant,
+VAL-SPE-194,specialty,U5,Senior Dietician,194,Senior Dietician,
+VAL-SPE-195,specialty,U6,Occupational Therapy,195,Occupational Therapy,
+VAL-SPE-196,specialty,V6,Urinary Continence,196,Urinary Continence,
+VAL-SPE-197,specialty,W2,Sleep Medicine,197,Sleep Medicine,
+VAL-SPE-198,specialty,Z5,Clinical Pathology,198,Clinical Pathology,
+VAL-SPE-199,specialty,Z9,Client Specific Specialty,199,Client Specific Specialty,
+VAL-SPE-200,specialty,ZZ,Client Specific Specialty,200,Client Specific Specialty,
+# State Code Mapping (stateCode -> statecode),,,,,,
+VAL-STA-001,statecode,ACT,Active,0,Active,
+VAL-STA-002,statecode,CLO,Closed,1,Inactive,
+VAL-STA-003,statecode,DED,Deceased,1,Inactive,
+VAL-STA-004,statecode,DER,Deregistered,1,Inactive,
+VAL-STA-005,statecode,INA,Inactive,1,Inactive,
+VAL-STA-006,statecode,MAT,Maternity/Paternity Leave,1,Inactive,
+VAL-STA-007,statecode,OPE,Open,0,Active,
+VAL-STA-008,statecode,OPG,Is opening,1,Inactive,
+VAL-STA-009,statecode,RED,Reduced Activity,1,Inactive,
+VAL-STA-010,statecode,RET,Retired,1,Inactive,
+VAL-STA-011,statecode,TCL,Temporarily Closed,1,Inactive,
+VAL-STA-012,statecode,TIN,Temporarily Inactive,1,Inactive,
+# Structure Code Mapping (structureTypeCode -> cree7_structuretype),,,,,,
+VAL-STR-001,structuretype,POR,Primary Organisation,1,Primary Organisation,
+VAL-STR-002,structuretype,ORG,Organisation,2,Organisation,
+VAL-STR-003,structuretype,DPT,Department,3,Department,
+# Title Code Mapping (individual.titleCode -> title decode),,,,,,
+VAL-TIT-001,title,02,Mx,1,Mx,Mx
+VAL-TIT-002,title,03,Doctor,2,Doctor,Doctor
+VAL-TIT-003,title,11,Professor,3,Professor,Professor
+VAL-TIT-004,title,12,Mr,4,Mr,Mr
+VAL-TIT-005,title,13,Mrs,5,Mrs,Mrs
+VAL-TIT-006,title,14,Miss,6,Miss,Miss
+VAL-TIT-007,title,20,Unknown,7,Unknown,Unknown
+VAL-TIT-008,title,21,Sir,8,Sir,Sir
+VAL-TIT-009,title,22,Ms,9,Ms,Ms
+VAL-TIT-010,title,31,Sister,10,Sister,Sister
+VAL-TIT-011,title,32,Nurse,11,Nurse,Nurse
+VAL-TIT-012,title,33,Baroness,12,Baroness,Baroness
+VAL-TIT-013,title,34,Canon,13,Canon,Canon
+VAL-TIT-014,title,35,Colonel,14,Colonel,Colonel
+VAL-TIT-015,title,36,Dame,15,Dame,Dame
+VAL-TIT-016,title,37,Lady,16,Lady,Lady
+VAL-TIT-017,title,38,Lord,17,Lord,Lord
+VAL-TIT-018,title,39,Lt Colonel,18,Lt Colonel,Lt Colonel
+VAL-TIT-019,title,40,Major,19,Major,Major
+VAL-TIT-020,title,41,Mother,20,Mother,Mother
+VAL-TIT-021,title,42,Reverend,21,Reverend,Reverend
+VAL-TIT-022,title,43,The,22,The,The
+VAL-TIT-023,title,44,Archbishop,23,Archbishop,Archbishop
+VAL-TIT-024,title,45,Bishop,24,Bishop,Bishop
+VAL-TIT-025,title,46,Duke,25,Duke,Duke
+VAL-TIT-026,title,47,Earl,26,Earl,Earl
+VAL-TIT-027,title,48,Marquess,27,Marquess,Marquess
+VAL-TIT-028,title,49,Viscount,28,Viscount,Viscount
+# Salutation Mapping (individual.prefixNameCode -> salutation),,,,,,
+# Address Type Mapping,,,,,,
+VAL-ADD-001,addresstype,F,Billing address,1,Bill To,
+VAL-ADD-002,addresstype,L,Delivery address,2,Ship to,
+VAL-ADD-003,addresstype,M,Mailing address,5,Mail To,
+VAL-ADD-004,addresstype,P,Primary address,3,Primary,
+VAL-ADD-005,addresstype,S,Secondary address,4,Other,
+# HCO Type Code (workplace.typeCode -> cree7_type),,,,,,
+VAL-HCO-001,hcotype,ACA,Academic Institution,1,Academic Institution,Academic Institution
+VAL-HCO-002,hcotype,ACT,Acute Trust,2,Acute Trust,Acute Trust
+VAL-HCO-003,hcotype,ADD,Addiction Services Organisation,3,Addiction Services Organisation,Addiction Services Organisation
+VAL-HCO-004,hcotype,AMT,Ambulance Trust,4,Ambulance Trust,Ambulance Trust
+VAL-HCO-005,hcotype,ASS,Association,5,Association,Association
+VAL-HCO-006,hcotype,BLO,Blood Transfusion Organisation,6,Blood Transfusion Organisation,Blood Transfusion Organisation
+VAL-HCO-007,hcotype,CAC,Cash & Carry,7,Cash & Carry,Cash & Carry
+VAL-HCO-008,hcotype,CAR,Cardiac Network,8,Cardiac Network,Cardiac Network
+VAL-HCO-009,hcotype,CHP,Community Health Partnerships,9,Community Health Partnerships,Community Health Partnerships
+VAL-HCO-010,hcotype,CHR,Charity,10,Charity,Charity
+VAL-HCO-011,hcotype,CLD,Clinical Directorate,11,Clinical Directorate,Clinical Directorate
+VAL-HCO-012,hcotype,CLH,Clinic Hospital,12,Clinic Hospital,Clinic Hospital
+VAL-HCO-013,hcotype,CLI,Clinic,13,Clinic,Clinic
+VAL-HCO-014,hcotype,CMH,Community Mental Health Team,14,Community Mental Health Team,Community Mental Health Team
+VAL-HCO-015,hcotype,CNC,Network,15,Network,Network
+VAL-HCO-016,hcotype,CNL,Local Council,16,Local Council,Local Council
+VAL-HCO-017,hcotype,CNT,Community Nurse Base Team,17,Community Nurse Base Team,Community Nurse Base Team
+VAL-HCO-018,hcotype,CRE,Research Organisation,18,Research Organisation,Research Organisation
+VAL-HCO-019,hcotype,CSN,Clinical Senate,19,Clinical Senate,Clinical Senate
+VAL-HCO-020,hcotype,CSU,Commissioning Service Support Unit,20,Commissioning Service Support Unit,Commissioning Service Support Unit
+VAL-HCO-021,hcotype,CTE,Committee,21,Committee,Committee
+VAL-HCO-022,hcotype,CTO,Care Trust,22,Care Trust,Care Trust
+VAL-HCO-023,hcotype,DAC,Dispensing Appliance Contractor,23,Dispensing Appliance Contractor,Dispensing Appliance Contractor
+VAL-HCO-024,hcotype,DAT,Drug Action Team Centre,24,Drug Action Team Centre,Drug Action Team Centre
+VAL-HCO-025,hcotype,DEN,Dentist,25,Dentist,Dentist
+VAL-HCO-026,hcotype,DEP,Dentist Private,26,Dentist Private,Dentist Private
+VAL-HCO-027,hcotype,DHS,Directorate of Health & Social Care,27,Directorate of Health & Social Care,Directorate of Health & Social Care
+VAL-HCO-028,hcotype,DPR,Dental Practice,28,Dental Practice,Dental Practice
+VAL-HCO-029,hcotype,DRC,DO NOT USE  NEW CODE Drug & Therapeutic Committee,29,DO NOT USE  NEW CODE Drug & Therapeutic Committee,DO NOT USE  NEW CODE Drug & Therapeutic Committee
+VAL-HCO-030,hcotype,DSG,Dispensing Surgery,30,Dispensing Surgery,Dispensing Surgery
+VAL-HCO-031,hcotype,DSP,Dispensing Practice,31,Dispensing Practice,Dispensing Practice
+VAL-HCO-032,hcotype,DST,Drugstore,32,Drugstore,Drugstore
+VAL-HCO-033,hcotype,DTC,Diagnostic and Treatment Centre (NHS),33,Diagnostic and Treatment Centre (NHS),Diagnostic and Treatment Centre (NHS)
+VAL-HCO-034,hcotype,E,optician,34,optician,optician
+VAL-HCO-035,hcotype,FDT,Foundation Trust,35,Foundation Trust,Foundation Trust
+VAL-HCO-036,hcotype,FER,Fertility Clinic,36,Fertility Clinic,Fertility Clinic
+VAL-HCO-037,hcotype,FIC,Fictious Health Care Centre,37,Fictious Health Care Centre,Fictious Health Care Centre
+VAL-HCO-038,hcotype,FPC,Family Planning Clinic,38,Family Planning Clinic,Family Planning Clinic
+VAL-HCO-039,hcotype,GOV,Government,39,Government,Government
+VAL-HCO-040,hcotype,GPC,Clinical Commissioning Group,40,Clinical Commissioning Group,Clinical Commissioning Group
+VAL-HCO-041,hcotype,GPF,GP Federation,41,GP Federation,GP Federation
+VAL-HCO-042,hcotype,GPP,GP Practice,42,GP Practice,GP Practice
+VAL-HCO-043,hcotype,GST,Grocery Store,43,Grocery Store,Grocery Store
+VAL-HCO-044,hcotype,HAC,Health Authority Cluster,44,Health Authority Cluster,Health Authority Cluster
+VAL-HCO-045,hcotype,HAU,Health Board / Agency,45,Health Board / Agency,Health Board / Agency
+VAL-HCO-046,hcotype,HBS,Health Board,46,Health Board,Health Board
+VAL-HCO-047,hcotype,HCR,Homecare Provider,47,Homecare Provider,Homecare Provider
+VAL-HCO-048,hcotype,HOM,Home,48,Home,Home
+VAL-HCO-049,hcotype,HOS,Hospital,49,Hospital,Hospital
+VAL-HCO-050,hcotype,HPU,Health Prom Unit,50,Health Prom Unit,Health Prom Unit
+VAL-HCO-051,hcotype,HSP,Hospital,51,Hospital,Hospital
+VAL-HCO-052,hcotype,HSS,Health & Social Services Board,52,Health & Social Services Board,Health & Social Services Board
+VAL-HCO-053,hcotype,HWB,Health and Wellbeing Board,53,Health and Wellbeing Board,Health and Wellbeing Board
+VAL-HCO-054,hcotype,ICS,Integrated Care System,54,Integrated Care System,Integrated Care System
+VAL-HCO-055,hcotype,IND,Independent Providers,55,Independent Providers,Independent Providers
+VAL-HCO-056,hcotype,INP,Inpractice,56,Inpractice,Inpractice
+VAL-HCO-057,hcotype,ISF,Infosante Sales False Inst.,57,Infosante Sales False Inst.,Infosante Sales False Inst.
+VAL-HCO-058,hcotype,IST,infoSanté Sales,58,infoSanté Sales,infoSanté Sales
+VAL-HCO-059,hcotype,ITP,Internet Pharmacy,59,Internet Pharmacy,Internet Pharmacy
+VAL-HCO-060,hcotype,LAT,Local Area Team,60,Local Area Team,Local Area Team
+VAL-HCO-061,hcotype,LCG,Local Health and Social Care Group,61,Local Health and Social Care Group,Local Health and Social Care Group
+VAL-HCO-062,hcotype,LHA,Health Authority,62,Health Authority,Health Authority
+VAL-HCO-063,hcotype,LHB,Local Health Board,63,Local Health Board,Local Health Board
+VAL-HCO-064,hcotype,LMC,Local Medical Committee,64,Local Medical Committee,Local Medical Committee
+VAL-HCO-065,hcotype,LPC,Local Pharmaceutical Committee,65,Local Pharmaceutical Committee,Local Pharmaceutical Committee
+VAL-HCO-066,hcotype,LSP,Local Service Providers',66,Local Service Providers',Local Service Providers'
+VAL-HCO-067,hcotype,MAN,Manufacturer,67,Manufacturer,Manufacturer
+VAL-HCO-068,hcotype,MCN,Managed Clinical Network,68,Managed Clinical Network,Managed Clinical Network
+VAL-HCO-069,hcotype,MHT,Mental Health Trust,69,Mental Health Trust,Mental Health Trust
+VAL-HCO-070,hcotype,MIL,Military Organisation,70,Military Organisation,Military Organisation
+VAL-HCO-071,hcotype,MIS,Miscellaneous Health Care Centre,71,Miscellaneous Health Care Centre,Miscellaneous Health Care Centre
+VAL-HCO-072,hcotype,NDC,Non-Dispensing Chemist,72,Non-Dispensing Chemist,Non-Dispensing Chemist
+VAL-HCO-073,hcotype,NHC,Convalescent Home,73,Convalescent Home,Convalescent Home
+VAL-HCO-074,hcotype,NHH,Hospice,74,Hospice,Hospice
+VAL-HCO-075,hcotype,NHO,Nursing Home,75,Nursing Home,Nursing Home
+VAL-HCO-076,hcotype,NHP,Respite Care,76,Respite Care,Respite Care
+VAL-HCO-077,hcotype,NHR,Residential Home,77,Residential Home,Residential Home
+VAL-HCO-078,hcotype,NHS,Sheltered Housing,78,Sheltered Housing,Sheltered Housing
+VAL-HCO-079,hcotype,NPC,New Primary Care Trust,79,New Primary Care Trust,New Primary Care Trust
+VAL-HCO-080,hcotype,OCC,Occupational Health Organisation,80,Occupational Health Organisation,Occupational Health Organisation
+VAL-HCO-081,hcotype,ODT,Outpatient/Day Treatment Organisation,81,Outpatient/Day Treatment Organisation,Outpatient/Day Treatment Organisation
+VAL-HCO-082,hcotype,OHP,Outsourced Hospital Pharmacy,82,Outsourced Hospital Pharmacy,Outsourced Hospital Pharmacy
+VAL-HCO-083,hcotype,OPT,Opticians,83,Opticians,Opticians
+VAL-HCO-084,hcotype,PAS,Purchasing and Supply Agency,84,Purchasing and Supply Agency,Purchasing and Supply Agency
+VAL-HCO-085,hcotype,PAT,Patients Association,85,Patients Association,Patients Association
+VAL-HCO-086,hcotype,PBC,Practice Based Commissioning,86,Practice Based Commissioning,Practice Based Commissioning
+VAL-HCO-087,hcotype,PBP,Place Based Partnership,87,Place Based Partnership,Place Based Partnership
+VAL-HCO-088,hcotype,PCC,Primary Care Trust Cluster,88,Primary Care Trust Cluster,Primary Care Trust Cluster
+VAL-HCO-089,hcotype,PCG,Primary Care Group,89,Primary Care Group,Primary Care Group
+VAL-HCO-090,hcotype,PCL,Primary Care Organisation Locality,90,Primary Care Organisation Locality,Primary Care Organisation Locality
+VAL-HCO-091,hcotype,PCN,Primary Care Network,91,Primary Care Network,Primary Care Network
+VAL-HCO-092,hcotype,PCO,Primary Care Organisation,92,Primary Care Organisation,Primary Care Organisation
+VAL-HCO-093,hcotype,PCT,Primary Care Trust,93,Primary Care Trust,Primary Care Trust
+VAL-HCO-094,hcotype,PHO,Private Hospital Organisation,94,Private Hospital Organisation,Private Hospital Organisation
+VAL-HCO-095,hcotype,PHU,Pharmacy Hub,95,Pharmacy Hub,Pharmacy Hub
+VAL-HCO-096,hcotype,PPR,Private Practice,96,Private Practice,Private Practice
+VAL-HCO-097,hcotype,PRI,Prison Organisation,97,Prison Organisation,Prison Organisation
+VAL-HCO-098,hcotype,PTC,Private Diagnostic and Treatment Centre (Private),98,Private Diagnostic and Treatment Centre (Private),Private Diagnostic and Treatment Centre (Private)
+VAL-HCO-099,hcotype,PVP,Private Pharmacy,99,Private Pharmacy,Private Pharmacy
+VAL-HCO-100,hcotype,QIB,QuintilesIMS Brick,100,QuintilesIMS Brick,QuintilesIMS Brick
+VAL-HCO-101,hcotype,RCB,Regional Commissioning Board,101,Regional Commissioning Board,Regional Commissioning Board
+VAL-HCO-102,hcotype,RCC,Retail Chemist Chain,102,Retail Chemist Chain,Retail Chemist Chain
+VAL-HCO-103,hcotype,RCH,Retail Chemist,103,Retail Chemist,Retail Chemist
+VAL-HCO-104,hcotype,RCO,Retail Chemist Chain Office/Warehouse,104,Retail Chemist Chain Office/Warehouse,Retail Chemist Chain Office/Warehouse
+VAL-HCO-105,hcotype,RES,Resource Centre,105,Resource Centre,Resource Centre
+VAL-HCO-106,hcotype,RHO,Regional Executive,106,Regional Executive,Regional Executive
+VAL-HCO-107,hcotype,RTL,Retail Shop,107,Retail Shop,Retail Shop
+VAL-HCO-108,hcotype,SAA,Substance and Alcohol Abuse Location,108,Substance and Alcohol Abuse Location,Substance and Alcohol Abuse Location
+VAL-HCO-109,hcotype,SAL,Sales,109,Sales,Sales
+VAL-HCO-110,hcotype,SCH,Special Needs School,110,Special Needs School,Special Needs School
+VAL-HCO-111,hcotype,SCO,Secondary Care Other,111,Secondary Care Other,Secondary Care Other
+VAL-HCO-112,hcotype,SHA,Strategic Health Board,112,Strategic Health Board,Strategic Health Board
+VAL-HCO-113,hcotype,SIP,Self Incorporated Practice,113,Self Incorporated Practice,Self Incorporated Practice
+VAL-HCO-114,hcotype,SOC,Society/Advocacy Group,114,Society/Advocacy Group,Society/Advocacy Group
+VAL-HCO-115,hcotype,SPH,Special Health Authority/Board,115,Special Health Authority/Board,Special Health Authority/Board
+VAL-HCO-116,hcotype,STP,Sustainability & Transformation Plan,116,Sustainability & Transformation Plan,Sustainability & Transformation Plan
+VAL-HCO-117,hcotype,SUP,Supplies Authority,117,Supplies Authority,Supplies Authority
+VAL-HCO-118,hcotype,SUR,Surgery,118,Surgery,Surgery
+VAL-HCO-119,hcotype,SYN,syndicat interhospitalier,119,syndicat interhospitalier,syndicat interhospitalier
+VAL-HCO-120,hcotype,TCO,Tertiary Care Organisation,120,Tertiary Care Organisation,Tertiary Care Organisation
+VAL-HCO-121,hcotype,THO,NHS Trust,121,NHS Trust,NHS Trust
+VAL-HCO-122,hcotype,VAN,Vanguard,122,Vanguard,Vanguard
+VAL-HCO-123,hcotype,WCH,Wholesaler,123,Wholesaler,Wholesaler
+VAL-HCO-124,hcotype,WIC,Walk in Centre,124,Walk in Centre,Walk in Centre
+VAL-HCO-125,hcotype,ZZZ,Client Specific Institution,125,Client Specific Institution,Client Specific Institution
