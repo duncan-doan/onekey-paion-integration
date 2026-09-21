@@ -339,8 +339,7 @@ class DynamicSyncEngine:
                 continue
 
             payload = self.transformer.transform_hco(hco)
-            key_field = self.config.get_key_field("account")
-            key_name = key_field.target_field if key_field else "cr4ec_externalid"
+            key_name = self.config.require_key_field("account")
             key_value = payload.get(key_name)
             if not key_value:
                 result["failed"] += 1
@@ -448,7 +447,7 @@ class DynamicSyncEngine:
             )
             if not payload:
                 continue
-            key = payload.get("cr4ec_externalid")
+            key = payload.get(self.config.require_key_field("customeraddress"))
             if not key:
                 result["failed"] += 1
                 continue
@@ -461,10 +460,11 @@ class DynamicSyncEngine:
         if not prepared:
             return result
 
+        address_key = self.config.require_key_field("customeraddress")
         try:
             bulk_results = self.dataverse.bulk_upsert_by_field(
                 "customeraddresses",
-                "cr4ec_externalid",
+                address_key,
                 [p for _, p, _ in prepared],
                 batch_size=self.bulk_batch_size,
             )
@@ -522,13 +522,14 @@ class DynamicSyncEngine:
             )
             return result
 
-        accounts = resolve_accounts(self.dataverse, eids)
+        account_key = self.config.require_key_field("account")
+        accounts = resolve_accounts(self.dataverse, eids, account_key)
         for eid, row in accounts.items():
             if row.get("accountid"):
                 self._account_cache[eid] = row["accountid"]
 
         updates, stats = build_updates(
-            edges, accounts, skip_unchanged=skip_unchanged
+            edges, accounts, account_key, skip_unchanged=skip_unchanged
         )
         result["already_linked"] = stats.get("already_linked", 0)
         result["missing_child"] = stats.get("missing_child", 0)
@@ -547,7 +548,7 @@ class DynamicSyncEngine:
             return result
 
         linked, failed = apply_updates(
-            self.dataverse, updates, self.bulk_batch_size
+            self.dataverse, updates, self.bulk_batch_size, match_field=account_key
         )
         result["linked"] = linked
         result["failed"] = failed
@@ -694,8 +695,7 @@ class DynamicSyncEngine:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
 
             payload = self.transformer.transform_hcp(hcp, account_id=account_id)
-            key_field = self.config.get_key_field("contact")
-            key_name = key_field.target_field if key_field else "externaluseridentifier"
+            key_name = self.config.require_key_field("contact")
             key_value = payload.get(key_name)
             if not key_value:
                 result["failed"] += 1
@@ -879,9 +879,8 @@ class DynamicSyncEngine:
     
     def _lookup_accounts_bulk(self, workplace_eids) -> dict[str, str]:
         """Resolve many workplace EIDs to account GUIDs; update the cache."""
-        key_field = self.config.get_key_field("account")
-        field_name = key_field.target_field if key_field else "cr4ec_externalid"
-        
+        field_name = self.config.require_key_field("account")
+
         needed = [
             str(eid) for eid in workplace_eids
             if eid and str(eid) not in self._account_cache

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Step 2 - read and write HCO/HCP records in Dynamics 365 Dataverse.
 
-    HCO -> account    keyed on cr4ec_externalid
-    HCP -> contact    keyed on externaluseridentifier
+    HCO -> account    keyed on account upsert field from mapping config
+    HCP -> contact    keyed on contact upsert field from mapping config
 
 Commands:
     list      show accounts and contacts already in the environment

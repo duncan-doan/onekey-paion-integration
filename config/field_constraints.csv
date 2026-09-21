@@ -4,7 +4,7 @@ constraint_id,platform,entity,field,constraint_type,constraint_value,error_actio
 # Used by validation module to check data before writing to Dataverse
 # ============================================================================================================
 # Account (HCO) Constraints
-CON-ACC-001,Dataverse,account,cr4ec_externalid,max_length,100,truncate,Primary key field (cr4ec_onekeyid); must fit OneKey workplaceEid
+CON-ACC-001,Dataverse,account,ts_externalid,max_length,100,truncate,Primary key field (ts_onekeyid); must fit OneKey workplaceEid
 CON-ACC-001b,Dataverse,account,accountnumber,max_length,20,truncate,Legacy display field; no longer the upsert key
 CON-ACC-002,Dataverse,account,name,max_length,160,truncate,Official name; required field
 CON-ACC-003,Dataverse,account,name,required,true,error,Name is mandatory for Account
@@ -23,7 +23,7 @@ CON-ACC-015,Dataverse,account,emailaddress1,max_length,100,truncate,Email addres
 CON-ACC-016,Dataverse,account,websiteurl,max_length,200,truncate,Website URL
 CON-ACC-017,Dataverse,account,yominame,max_length,160,truncate,Phonetic name (Yomi)
 # Contact (HCP) Constraints
-CON-CON-001,Dataverse,contact,externaluseridentifier,max_length,50,truncate,Primary key field; must fit OneKey individualEid
+CON-CON-001,Dataverse,contact,ts_externalid,max_length,50,truncate,Primary key field; must fit OneKey individualEid
 CON-CON-002,Dataverse,contact,firstname,max_length,50,truncate,First name
 CON-CON-003,Dataverse,contact,lastname,max_length,50,truncate,Last name
 CON-CON-004,Dataverse,contact,lastname,required,true,error,Lastname is mandatory for Contact; fallback to individualEid
@@ -48,7 +48,7 @@ CON-CON-022,Dataverse,contact,websiteurl,max_length,200,truncate,Website URL
 CON-CON-023,Dataverse,contact,yomifirstname,max_length,150,truncate,Phonetic first name
 CON-CON-024,Dataverse,contact,yomilastname,max_length,150,truncate,Phonetic last name
 # CustomerAddress Constraints
-CON-ADR-001,Dataverse,customeraddress,cr4ec_externalid,max_length,100,truncate,Composite key workplaceEid - addressEid; must fit both OneKey ids + separator
+CON-ADR-001,Dataverse,customeraddress,ts_externalid,max_length,100,truncate,Composite key workplaceEid - addressEid; must fit both OneKey ids + separator
 CON-ADR-002,Dataverse,customeraddress,name,max_length,250,truncate,Address name / building label
 CON-ADR-003,Dataverse,customeraddress,line1,max_length,250,truncate,Street address
 CON-ADR-004,Dataverse,customeraddress,city,max_length,80,truncate,City

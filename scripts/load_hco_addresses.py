@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Load customeraddress rows for HCOs (sample or full population).
 
-Uses the agreed composite upsert key::
-
-    cr4ec_externalid = ``{workplaceEid} - {addressEid}``
-
+Uses the composite upsert key from ``entity_mapping.csv``
+(``{workplaceEid} - {addressEid}`` on the customeraddress key field)
 and binds each address to its Account (Dataverse 1-n). Shared OneKey addresses
 become duplicate rows when multiple HCOs share the same addressEid.
 
@@ -41,8 +39,9 @@ from onekey.parse import flatten_hco
 logger = logging.getLogger(__name__)
 
 ADDRESS_ENTITY = "customeraddresses"
-ADDRESS_KEY = "cr4ec_externalid"
-ACCOUNT_KEY = "cr4ec_externalid"
+# Set in main() from MappingConfig.require_key_field(...)
+ADDRESS_KEY = ""
+ACCOUNT_KEY = ""
 
 
 def parse_args():
@@ -130,12 +129,16 @@ def workplaces_from_population(
 
 
 def main() -> int:
+    global ADDRESS_KEY, ACCOUNT_KEY
     args = parse_args()
     load_env()
     setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
-    transformer = create_transform_engine(load_mapping_config())
+    config = load_mapping_config()
+    ADDRESS_KEY = config.require_key_field("customeraddress")
+    ACCOUNT_KEY = config.require_key_field("account")
+    transformer = create_transform_engine(config)
     onekey_cfg = OneKeyConfig.from_env()
     dv_cfg = DataverseConfig.from_env()
 

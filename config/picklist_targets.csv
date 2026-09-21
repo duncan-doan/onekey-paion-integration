@@ -1,0 +1,11 @@
+mapping_type,kind,option_set,entity,attribute,notes
+# ============================================================================================================,,,,,
+# Picklist / choice targets for pre-sync option upsert (load_picklist_values / Phase 0),,,,,,
+# mapping_type must match value_mapping.csv and decode:TYPE / map rules in entity_mapping.csv,,,,,
+# kind=global → OptionSetName; kind=local → EntityLogicalName + AttributeLogicalName,,,,,
+# ============================================================================================================,,,,,
+hcotype,global,ts_hcotype,,,Account HCO type (account.ts_type)
+specialty,global,ts_specialty,,,Specialty global choice (account/contact ts_specialty*)
+structuretype,global,ts_hcostructuretype,,,HCO structure type (account.ts_structuretype)
+title,local,,contact,ts_title,Contact title local choice
+hcptype,local,,contact,ts7_type,HCP professional type (entity_mapping uses ts7_type)

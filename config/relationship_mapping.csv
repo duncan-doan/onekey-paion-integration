@@ -3,9 +3,9 @@ relationship_id,relationship_name,source_entity,source_field,target_entity,targe
 # Relationship Mapping: OneKey -> Dataverse,,,,,,,,,,,
 # Defines entity relationships and proper load order for maintaining referential integrity,,,,,,,,,,,
 # ============================================================================================================,,,,,,,,,,,
-REL-001,HCO Parent Hierarchy,account,accountnumber,account,parentaccountid,self_referential,accountnumber,FALSE,1,Load depth-0 (roots) first then depth-1+,Health Board/Trust -> Hospital -> Department hierarchy via managerWorkplaceEid
-REL-002,HCP to Workplace,contact,externaluseridentifier,account,parentcustomerid,many_to_one,accountnumber,TRUE,2,HCP must have workplace Account,HCP linked to their workplace via activity.workplaceEid -> account.accountnumber
-REL-003,HCP to Managing Partner,contact,externaluseridentifier,account,msa_managingpartnerid,many_to_one,accountnumber,FALSE,2,Optional parent hospital link,Parent hospital via workplace.managerWorkplaceEid (alternative to Account hierarchy)
-REL-004,HCO to HCO Relations,account,accountnumber,account,N/A,many_to_many,accountnumber,FALSE,3,Requires Connection entity,workplace.relations[] with linkCode AUT/AFF for affiliations
-REL-005,HCP Multi-Activity,contact,externaluseridentifier,account,N/A,many_to_many,accountnumber,FALSE,4,Requires custom fc_hcpaffiliation entity,One Individual with multiple Activities at different workplaces
-REL-006,HCO to Address,address,cr4ec_externalid,account,parentid,many_to_one,cr4ec_externalid,TRUE,5,Duplicate shared OneKey addresses per HCO; key=workplaceEid - addressEid,OneKey Address↔HCO is N-N; Dataverse keeps Account→CustomerAddress 1-n so same addressEid under two HCOs becomes two rows
+REL-001,HCO Parent Hierarchy,account,ts_externalid,account,parentaccountid,self_referential,ts_externalid,FALSE,1,Load depth-0 (roots) first then depth-1+,Health Board/Trust -> Hospital -> Department hierarchy via managerWorkplaceEid
+REL-002,HCP to Workplace,contact,ts_externalid,account,parentcustomerid,many_to_one,ts_externalid,TRUE,2,HCP must have workplace Account,HCP linked to their workplace via activity.workplaceEid -> account.ts_externalid
+REL-003,HCP to Managing Partner,contact,ts_externalid,account,msa_managingpartnerid,many_to_one,ts_externalid,FALSE,2,Optional parent hospital link,Parent hospital via workplace.managerWorkplaceEid (alternative to Account hierarchy)
+REL-004,HCO to HCO Relations,account,ts_externalid,account,N/A,many_to_many,ts_externalid,FALSE,3,Requires Connection entity,workplace.relations[] with linkCode AUT/AFF for affiliations
+REL-005,HCP Multi-Activity,contact,ts_externalid,account,N/A,many_to_many,ts_externalid,FALSE,4,Requires custom fc_hcpaffiliation entity,One Individual with multiple Activities at different workplaces
+REL-006,HCO to Address,address,ts_externalid,account,parentid,many_to_one,ts_externalid,TRUE,5,Duplicate shared OneKey addresses per HCO; key=workplaceEid - addressEid,OneKey Address↔HCO is N-N; Dataverse keeps Account→CustomerAddress 1-n so same addressEid under two HCOs becomes two rows

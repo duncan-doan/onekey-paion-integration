@@ -29,13 +29,16 @@ def edges_from_hcos(hcos: list[dict]) -> list[tuple[str, str]]:
 
 
 def resolve_accounts(
-    dataverse: "DataverseClient", eids: list[str]
+    dataverse: "DataverseClient",
+    eids: list[str],
+    match_field: str,
 ) -> dict[str, dict]:
+    """Map upsert-key value → account row (includes current parent)."""
     return dataverse.find_many_by_field(
         "accounts",
-        "cr4ec_externalid",
+        match_field,
         eids,
-        select=["cr4ec_externalid", "accountid", "_parentaccountid_value"],
+        select=[match_field, "accountid", "_parentaccountid_value"],
         chunk_size=50,
     )
 
@@ -43,6 +46,7 @@ def resolve_accounts(
 def build_updates(
     edges: list[tuple[str, str]],
     accounts: dict[str, dict],
+    match_field: str,
     skip_unchanged: bool = True,
 ) -> tuple[list[dict], dict]:
     stats = {
@@ -85,7 +89,7 @@ def build_updates(
         updates.append(
             {
                 "accountid": child_id,
-                "cr4ec_externalid": child_eid,
+                match_field: child_eid,
                 "parentaccountid@odata.bind": f"/accounts({parent_id})",
             }
         )
@@ -99,6 +103,7 @@ def apply_updates(
     dataverse: "DataverseClient",
     updates: list[dict],
     batch_size: int,
+    match_field: str | None = None,
 ) -> tuple[int, int]:
     updated = failed = 0
     total = len(updates)
@@ -140,9 +145,10 @@ def apply_updates(
                     updated += 1
                 except DataverseHTTPError as single_exc:
                     failed += 1
-                    logger.error(
-                        "Failed to link %s: %s",
-                        row.get("cr4ec_externalid"),
-                        single_exc,
+                    label = (
+                        row.get(match_field)
+                        if match_field
+                        else row.get("accountid")
                     )
+                    logger.error("Failed to link %s: %s", label, single_exc)
     return updated, failed

@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
 """Bulk upsert Dataverse choice options from config/value_mapping.csv.
 
-Thin CLI around :mod:`integration.picklist_sync`. Dataverse has no
-CreateMultiple for option sets, so this script InsertOptionValue /
-UpdateOptionValue (optionally via ``$batch``).
-
-Default targets (already present in Paion test):
-
-=======  ========================  =================================
-CSV type Dataverse choice          Kind
-=======  ========================  =================================
-hcotype  cr4ec_hcotype             global
-specialty cr4ec_specialty          global
-structuretype cr4ec_hcostructuretype global
-=======  ========================  =================================
+Thin CLI around :mod:`integration.picklist_sync`. Targets come from
+``config/picklist_targets.csv`` (global OptionSetName or local entity/attribute).
 
 Usage:
     python scripts/load_picklist_values.py
@@ -33,20 +22,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dataverse import DataverseClient, DataverseConfig
 from integration import load_mapping_config, setup_logging
 from integration.env import load_env
-from integration.picklist_sync import DEFAULT_TARGETS, sync_picklists_from_config
+from integration.picklist_sync import sync_picklists_from_config
 
 logger = logging.getLogger(__name__)
 
 
-def parse_args():
+def parse_args(known_types: list[str]):
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--types",
-        default=",".join(DEFAULT_TARGETS),
-        help=f"Comma-separated mapping_type values (default: {','.join(DEFAULT_TARGETS)})",
+        default=",".join(known_types) if known_types else "",
+        help=(
+            "Comma-separated mapping_type values "
+            f"(default: {','.join(known_types) or 'all from picklist_targets.csv'})"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -68,16 +60,26 @@ def parse_args():
 
 
 def main() -> int:
-    args = parse_args()
     load_env()
     setup_logging()
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
     config = load_mapping_config()
+    target_map = config.picklist_target_map()
+    if not target_map:
+        print("No picklist targets in config/picklist_targets.csv")
+        return 2
+
+    args = parse_args(list(target_map.keys()))
     types = [t.strip() for t in args.types.split(",") if t.strip()]
+    if not types:
+        types = list(target_map.keys())
     for t in types:
-        if t not in DEFAULT_TARGETS:
-            print(f"Unknown mapping type {t!r}. Known: {', '.join(DEFAULT_TARGETS)}")
+        if t not in target_map:
+            print(
+                f"Unknown mapping type {t!r}. "
+                f"Known: {', '.join(target_map)}"
+            )
             return 2
 
     print("Picklist bulk upsert from value_mapping.csv")

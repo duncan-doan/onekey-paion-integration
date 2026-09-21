@@ -8,6 +8,8 @@ CSV Files:
     config/relationship_mapping.csv - Entity relationship definitions
     config/entity_definition.csv   - Entity metadata for validation
     config/value_mapping.csv       - Picklist/code value transformations
+    config/picklist_targets.csv    - Dataverse choice option-set targets
+    config/field_constraints.csv   - Field validation constraints
 """
 
 from __future__ import annotations
@@ -107,6 +109,26 @@ class FieldConstraint:
 
 
 @dataclass
+class PicklistTarget:
+    """Where to upsert choice options for a value_mapping mapping_type."""
+    mapping_type: str
+    kind: str  # "global" | "local"
+    option_set: str | None = None
+    entity: str | None = None
+    attribute: str | None = None
+    notes: str = ""
+
+    def as_target_dict(self) -> dict:
+        if self.kind == "global":
+            return {"kind": "global", "option_set": self.option_set}
+        return {
+            "kind": "local",
+            "entity": self.entity,
+            "attribute": self.attribute,
+        }
+
+
+@dataclass
 class MappingConfig:
     """Complete mapping configuration loaded from CSVs."""
     field_mappings: list[FieldMapping] = field(default_factory=list)
@@ -114,72 +136,127 @@ class MappingConfig:
     entity_definitions: list[EntityDefinition] = field(default_factory=list)
     value_mappings: list[ValueMapping] = field(default_factory=list)
     field_constraints: list[FieldConstraint] = field(default_factory=list)
-    
+    picklist_targets: list[PicklistTarget] = field(default_factory=list)
+
     # Indexes for fast lookup
     _field_by_target: dict[str, list[FieldMapping]] = field(default_factory=dict)
     _value_map: dict[str, dict[str, str]] = field(default_factory=dict)
     _entity_by_name: dict[str, EntityDefinition] = field(default_factory=dict)
     _constraints_by_field: dict[str, list[FieldConstraint]] = field(default_factory=dict)
-    
+    _picklist_by_type: dict[str, PicklistTarget] = field(default_factory=dict)
+
     def build_indexes(self):
         """Build lookup indexes after loading."""
-        # Field mappings by target entity
         self._field_by_target = {}
         for fm in self.field_mappings:
             key = fm.target_entity.lower()
             self._field_by_target.setdefault(key, []).append(fm)
-        
-        # Value mappings by type - normalize type key for decode: lookups
+
         self._value_map = {}
         for vm in self.value_mappings:
             type_key = (vm.mapping_type or "").lower().replace(" ", "")
             self._value_map.setdefault(type_key, {})[vm.source_code] = vm.target_value
-        
-        # Entity definitions by name
+
         self._entity_by_name = {
             f"{ed.platform}:{ed.entity_name}".lower(): ed
             for ed in self.entity_definitions
         }
-        
-        # Field constraints by entity.field
+
         self._constraints_by_field = {}
         for fc in self.field_constraints:
             key = f"{fc.entity}.{fc.field}".lower()
             self._constraints_by_field.setdefault(key, []).append(fc)
-        
+
+        self._picklist_by_type = {
+            (pt.mapping_type or "").lower().replace(" ", ""): pt
+            for pt in self.picklist_targets
+        }
+
         logger.info(
-            "Mapping indexes built: %d field mappings, %d value maps, %d entities, %d constraints",
-            len(self.field_mappings), len(self._value_map), len(self._entity_by_name),
-            len(self.field_constraints)
+            "Mapping indexes built: %d field mappings, %d value maps, %d entities, "
+            "%d constraints, %d picklist targets",
+            len(self.field_mappings),
+            len(self._value_map),
+            len(self._entity_by_name),
+            len(self.field_constraints),
+            len(self._picklist_by_type),
         )
-    
+
     def get_field_mappings(self, target_entity: str) -> list[FieldMapping]:
         """Get all field mappings for a target entity."""
         return self._field_by_target.get(target_entity.lower(), [])
-    
+
     def get_value(self, mapping_type: str, source_value: str, default: str = None) -> str | None:
         """Lookup a value transformation."""
         type_key = (mapping_type or "").lower().replace(" ", "")
         return self._value_map.get(type_key, {}).get(str(source_value), default)
-    
+
     def get_entity(self, platform: str, entity_name: str) -> EntityDefinition | None:
         """Get entity definition by platform and name."""
         return self._entity_by_name.get(f"{platform}:{entity_name}".lower())
-    
+
     def get_required_fields(self, target_entity: str) -> list[FieldMapping]:
         """Get required field mappings for a target entity."""
         return [fm for fm in self.get_field_mappings(target_entity) if fm.is_required]
-    
+
     def get_key_field(self, target_entity: str) -> FieldMapping | None:
-        """Get the key field mapping for a target entity."""
+        """Get the key field mapping for a target entity (is_key=true)."""
         for fm in self.get_field_mappings(target_entity):
             if fm.is_key:
                 return fm
+        # Fallback: entity_definition alternate_key_field
+        ed = self.get_entity("Dataverse", target_entity)
+        if ed and ed.alternate_key_field:
+            return FieldMapping(
+                mapping_id="entity_definition",
+                source_platform="",
+                source_entity="",
+                source_field="",
+                source_field_path="",
+                target_platform="Dataverse",
+                target_entity=target_entity,
+                target_field=ed.alternate_key_field,
+                target_field_type="string",
+                max_length=None,
+                is_required=True,
+                is_key=True,
+                is_lookup=False,
+                lookup_entity=None,
+                lookup_key_field=None,
+                transform_rule="direct",
+                default_value=None,
+                notes="from entity_definition.csv",
+            )
         return None
-    
+
+    def require_key_field(self, target_entity: str) -> str:
+        """Return the Dataverse upsert key column name, or raise."""
+        km = self.get_key_field(target_entity)
+        if not km or not km.target_field:
+            raise ValueError(
+                f"No upsert key configured for entity {target_entity!r}. "
+                "Set is_key=TRUE in entity_mapping.csv or alternate_key_field "
+                "in entity_definition.csv."
+            )
+        return km.target_field
+
     def get_lookup_mappings(self, target_entity: str) -> list[FieldMapping]:
         """Get lookup field mappings for a target entity."""
         return [fm for fm in self.get_field_mappings(target_entity) if fm.is_lookup]
+
+    def get_picklist_target(self, mapping_type: str) -> PicklistTarget | None:
+        """Return picklist upsert target for a value_mapping mapping_type."""
+        key = (mapping_type or "").lower().replace(" ", "")
+        return self._picklist_by_type.get(key)
+
+    def picklist_target_map(self) -> dict[str, dict]:
+        """mapping_type → target dict for picklist_sync."""
+        return {
+            pt.mapping_type: pt.as_target_dict()
+            for pt in self.picklist_targets
+            if pt.mapping_type
+        }
+
     
     def get_max_length(self, entity: str, field: str) -> int | None:
         """Get max length constraint for a field."""
@@ -363,6 +440,35 @@ def load_field_constraints(csv_path: Path) -> list[FieldConstraint]:
     return constraints
 
 
+def load_picklist_targets(csv_path: Path) -> list[PicklistTarget]:
+    """Load Dataverse choice targets for each value_mapping mapping_type."""
+    targets = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("mapping_type", "").startswith("#"):
+                continue
+            mapping_type = (row.get("mapping_type") or "").strip()
+            if not mapping_type:
+                continue
+            kind = (row.get("kind") or "").strip().lower()
+            if kind not in ("global", "local"):
+                logger.warning("Skip picklist target %s: invalid kind %r", mapping_type, kind)
+                continue
+            targets.append(
+                PicklistTarget(
+                    mapping_type=mapping_type,
+                    kind=kind,
+                    option_set=(row.get("option_set") or "").strip() or None,
+                    entity=(row.get("entity") or "").strip() or None,
+                    attribute=(row.get("attribute") or "").strip() or None,
+                    notes=row.get("notes", "") or "",
+                )
+            )
+    logger.info("Loaded %d picklist targets from %s", len(targets), csv_path)
+    return targets
+
+
 def load_mapping_config(config_dir: Path = None) -> MappingConfig:
     """Load complete mapping configuration from CSV files.
     
@@ -410,6 +516,12 @@ def load_mapping_config(config_dir: Path = None) -> MappingConfig:
         config.field_constraints = load_field_constraints(constraint_path)
     else:
         logger.warning("field_constraints.csv not found at %s", constraint_path)
+
+    picklist_path = config_dir / "picklist_targets.csv"
+    if picklist_path.exists():
+        config.picklist_targets = load_picklist_targets(picklist_path)
+    else:
+        logger.warning("picklist_targets.csv not found at %s", picklist_path)
     
     # Build lookup indexes
     config.build_indexes()

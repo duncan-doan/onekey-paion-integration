@@ -112,8 +112,7 @@ def main():
     engine = create_sync_engine(
         onekey, dataverse, bulk_batch_size=args.bulk_batch_size
     )
-    key_field = engine.config.get_key_field("account")
-    key_name = key_field.target_field if key_field else "cr4ec_externalid"
+    key_name = engine.config.require_key_field("account")
 
     prepared = []
     logger.info("Extracting nameless HCOs from OneKey %s...", args.codbase)

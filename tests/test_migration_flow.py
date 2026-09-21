@@ -20,7 +20,7 @@ def test_decode_unmapped_omits_field_and_records_gap(tmp_path: Path):
     source["typeCode"] = "@@@NOT_A_REAL_HCOTYPE@@@"
 
     payload = engine.transform_hco(source)
-    assert "cr4ec_type" not in payload
+    assert "ts_type" not in payload
     assert any(
         g.mapping_type == "hcotype" and g.source_value == "@@@NOT_A_REAL_HCOTYPE@@@"
         for g in engine.picklist_gaps.gaps
@@ -43,9 +43,9 @@ def test_decode_mapped_hcotype_sets_picklist():
             "typeCode": "HOS",
         }
     )
-    assert payload.get("cr4ec_type") in ("49", 49, "49") or str(
-        payload.get("cr4ec_type")
-    ) == "49"
+    expected = engine.config.get_value("hcotype", "HOS")
+    assert expected is not None
+    assert str(payload.get("ts_type")) == str(expected)
     assert not engine.picklist_gaps.gaps
 
 

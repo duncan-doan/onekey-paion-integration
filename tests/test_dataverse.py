@@ -373,12 +373,12 @@ HCP = {
 }
 
 
-def test_hco_maps_the_onekey_id_into_cr4ec_externalid():
+def test_hco_maps_the_onekey_id_into_account_key():
     assert hco_to_account(HCO)[ACCOUNT_KEY_FIELD] == "WDEH02963729"
-    assert ACCOUNT_KEY_FIELD == "cr4ec_externalid"
+    assert ACCOUNT_KEY_FIELD  # from entity_mapping.csv
 
 
-def test_hcp_maps_the_onekey_id_into_externaluseridentifier():
+def test_hcp_maps_the_onekey_id_into_contact_key():
     assert hcp_to_contact(HCP)[CONTACT_KEY_FIELD] == "WDER00117070"
 
 

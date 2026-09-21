@@ -3,7 +3,7 @@
 
 Phase order:
   0. Validate + upsert picklists from value_mapping.csv
-  1. HCO accounts (workplaceEid → cr4ec_externalid)
+  1. HCO accounts (workplaceEid → account key from entity_mapping.csv)
   2. customeraddress rows ({workplaceEid} - {addressEid})
   3. HCO parentaccountid hierarchy (managerWorkplaceEid)
   4. HCP contacts + parentcustomerid

@@ -178,9 +178,9 @@ class TransformEngine:
         OneKey Address↔Workplace is N-N (a physical address can attach to many
         HCOs). Dataverse keeps Account→CustomerAddress as 1-n, so a shared
         OneKey address is **duplicated** once per HCO. Upsert identity is the
-        composite key::
+        composite key on the configured customeraddress key field::
 
-            cr4ec_externalid = ``{workplaceEid} - {addressEid}``
+            {key_field} = ``{workplaceEid} - {addressEid}``
 
         Args:
             source: Flattened address row (e.g. from :func:`onekey.parse.flatten_hco`)
@@ -192,6 +192,7 @@ class TransformEngine:
             Web API payload, or ``None`` when either OneKey id is missing.
         """
         self.begin_record("customeraddress", source.get("workplaceEid"))
+        key_name = self.config.require_key_field("customeraddress")
         workplace_eid = self._address_workplace_eid(source)
         address_eid = self._address_eid(source)
         if not workplace_eid or not address_eid:
@@ -231,7 +232,7 @@ class TransformEngine:
             if transformed is None:
                 continue
 
-            if fm.target_field == "cr4ec_externalid":
+            if fm.target_field == key_name:
                 kind = "append" if (fm.transform_rule or "").startswith("append:") else "base"
                 # workplaceEid base rows are repeated per address slot without a
                 # slot token in source_field_path — keep only the first base.
@@ -251,15 +252,9 @@ class TransformEngine:
             payload[fm.target_field] = transformed
 
         composed = self._compose_address_external_id_from_parts(key_parts, workplace_eid, address_eid)
-        key_max = next(
-            (
-                fm.max_length
-                for fm in self.config.get_field_mappings("customeraddress")
-                if fm.target_field == "cr4ec_externalid" and fm.max_length
-            ),
-            100,
-        )
-        payload["cr4ec_externalid"] = composed[:key_max]
+        key_mapping = self.config.get_key_field("customeraddress")
+        key_max = key_mapping.max_length if key_mapping and key_mapping.max_length else 100
+        payload[key_name] = composed[:key_max]
 
         if parent_account_id:
             payload["parentid_account@odata.bind"] = f"/accounts({parent_account_id})"
@@ -341,7 +336,23 @@ class TransformEngine:
                 clean_name = clean_name[len(prefix):]
                 break
         
-        return source.get(clean_name) or source.get(field_name)
+        if clean_name in source:
+            return source.get(clean_name)
+        if field_name in source:
+            return source.get(field_name)
+        # Mapped CSV field missing from flattened source — config/code drift
+        if not hasattr(self, "_missing_source_fields"):
+            self._missing_source_fields = set()
+        key = (self._current_entity, clean_name)
+        if key not in self._missing_source_fields:
+            self._missing_source_fields.add(key)
+            logger.warning(
+                "Mapped source field %r not present on flattened %s row — "
+                "add it to flatten_hco/flatten_hcp (or fix entity_mapping.csv)",
+                clean_name,
+                self._current_entity or "record",
+            )
+        return None
     
     def _apply_transform(
         self,

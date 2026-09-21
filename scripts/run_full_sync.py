@@ -4,8 +4,8 @@
 Does in one pass what steps 1 and 2 do separately. Use this for a real run; use
 the separate scripts when you want to inspect or edit the data in between.
 
-    OneKey workplace  (HCO) -> Dataverse account   keyed on cr4ec_externalid
-    OneKey individual (HCP) -> Dataverse contact   keyed on externaluseridentifier
+    OneKey workplace  (HCO) -> Dataverse account   keyed via mapping config
+    OneKey individual (HCP) -> Dataverse contact   keyed via mapping config
 
 Examples:
     python scripts/run_full_sync.py --dry-run

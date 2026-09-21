@@ -4,11 +4,11 @@ entity_id,platform,entity_name,entity_set,primary_key,alternate_key,alternate_ke
 # Defines which entities exist and their key fields for upsert operations,,,,,,,,,,
 # ============================================================================================================,,,,,,,,,,
 # Dataverse Target Entities,,,,,,,,,,
-ENT-DV-001,Dataverse,account,accounts,accountid,Yes,cr4ec_externalid,TRUE,1,,Healthcare Organization (HCO); alternate key on accountnumber required for upsert by workplaceEid
-ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,cr4ec_externalid,TRUE,2,account,Healthcare Professional (HCP); alternate key on externaluseridentifier required for upsert by individualEid
-ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,Yes,cr4ec_externalid,FALSE,3,account,Address per HCO (1-n). Upsert key cr4ec_externalid = workplaceEid - addressEid; shared OneKey addresses are duplicated per Account
+ENT-DV-001,Dataverse,account,accounts,accountid,Yes,ts_externalid,TRUE,1,,Healthcare Organization (HCO); alternate key on accountnumber required for upsert by workplaceEid
+ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,ts_externalid,TRUE,2,account,Healthcare Professional (HCP); alternate key on ts_externalid required for upsert by individualEid
+ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,Yes,ts_externalid,FALSE,3,account,Address per HCO (1-n). Upsert key ts_externalid = workplaceEid - addressEid; shared OneKey addresses are duplicated per Account
 ENT-DV-004,Dataverse,connection,connections,connectionid,No,,FALSE,4,account,For HCO-to-HCO relationships (affiliations); optional
-ENT-DV-005,Dataverse,cr4ec_affiliation,cr4ec_affiliation,cr4ec_affiliationid,Yes,cr4ec_externalid,FALSE,4,contact,Custom entity for multi-workplace HCPs; optional
+ENT-DV-005,Dataverse,ts_affiliation,ts_affiliation,ts_affiliationid,Yes,ts_externalid,FALSE,4,contact,Custom entity for multi-workplace HCPs; optional
 # OneKey Source Entities (for reference/validation),,,,,,,,,,
 ENT-OK-001,OneKey,Workplace,N/A,workplaceEid,N/A,workplaceEid,TRUE,N/A,,Healthcare Organization source; entityType=WORKPLACE in search/refresh
 ENT-OK-002,OneKey,Individual,N/A,individualEid,N/A,individualEid,TRUE,N/A,,Healthcare Professional source; accessed via Activity

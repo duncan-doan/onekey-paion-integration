@@ -6,37 +6,29 @@
 Identity
 --------
 Re-running a sync must update records rather than duplicate them, so each row
-carries its OneKey id:
-
-    account.cr4ec_externalid       <- workplaceEid   (max 100 chars; KEY)
-    contact.externaluseridentifier <- individualEid  (max 50 chars)
-
-``cr4ec_externalid`` is the org alternate key (``cr4ec_onekeyid``). Account
-number is no longer the upsert key. ``externaluseridentifier`` is borrowed on
-the contact side as the closest stock external-identity field.
+carries its OneKey id. Upsert key column names come from
+``config/entity_mapping.csv`` (``is_key=TRUE``) /
+``config/entity_definition.csv`` (``alternate_key_field``).
 
 Addresses
 ---------
-Addresses are **not** loaded. Only identity, classification and the
-account/contact relationship are written.
-
-This is not just a preference: the target environment cannot accept them. An
-alternate key ``cr4ec_externalkey`` is defined on
-``customeraddress.addressnumber``, which forces that column to be unique across
-the whole org -- but Dynamics numbers every record's addresses 1 and 2, so the
-second address row of any kind violates it. Writing any ``address1_*`` field
-fails with SQL error 2601.
-
-The mapping is retained behind ``include_address=True`` so it can be switched
-on without rework once that key is removed.
+Addresses are **not** loaded by this legacy mapper. Prefer the dynamic path
+(``TransformEngine.transform_address`` / Phase 2) which writes
+``customeraddress`` using the config key field.
 """
+
+from .dynamic_mapping import load_mapping_config
+
+_cfg = load_mapping_config()
+ACCOUNT_KEY_FIELD = _cfg.require_key_field("account")
+CONTACT_KEY_FIELD = _cfg.require_key_field("contact")
 
 # Dataverse string columns are hard-limited; the Web API rejects an oversized
 # value outright rather than truncating, so trim on the way in.
 MAX_LENGTHS = {
     "account": {
         "name": 160,
-        "cr4ec_externalid": 100,
+        ACCOUNT_KEY_FIELD: 100,
         "accountnumber": 20,
         "address1_line1": 250,
         "address1_city": 80,
@@ -49,7 +41,7 @@ MAX_LENGTHS = {
     "contact": {
         "firstname": 50,
         "lastname": 50,
-        "externaluseridentifier": 50,
+        CONTACT_KEY_FIELD: 50,
         "jobtitle": 100,
         "address1_line1": 250,
         "address1_city": 80,
@@ -65,9 +57,6 @@ GENDER_CODES = {"M": 1, "F": 2}
 
 # account.address1_addresstypecode: 3 == Primary.
 ADDRESS_TYPE_PRIMARY = 3
-
-ACCOUNT_KEY_FIELD = "cr4ec_externalid"
-CONTACT_KEY_FIELD = "externaluseridentifier"
 
 
 def _trim(value, table, field):
@@ -91,9 +80,7 @@ def hco_to_account(hco, include_address=False):
 
     Args:
         hco: Output of :func:`onekey.parse.flatten_hco`.
-        include_address: Off by default -- the target org rejects address
-            writes (see the module docstring). Set True once the
-            ``customeraddress`` alternate key is removed.
+        include_address: Off by default -- prefer customeraddress via dynamic sync.
 
     Returns:
         dict: a Web API payload for ``POST /accounts``.
@@ -137,9 +124,7 @@ def hcp_to_contact(hcp, account_id=None, include_address=False):
             workplace. When given, the contact is linked to it as the parent
             customer, which is what makes the HCP visible under the HCO in the
             CRM UI.
-        include_address: Off by default -- the target org rejects address
-            writes (see the module docstring). Set True once the
-            ``customeraddress`` alternate key is removed.
+        include_address: Off by default -- prefer customeraddress via dynamic sync.
 
     Returns:
         dict: a Web API payload for ``POST /contacts``.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Compare OneKey HCOs to Dataverse and import any missing accounts.
 
-Identity key is ``cr4ec_externalid`` (OneKey ``workplaceEid``).
+Identity key is the account upsert field from mapping config
+(OneKey ``workplaceEid``).
 
 Usage:
     python scripts/import_missing_hcos.py --codbase WUK
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dataverse import DataverseClient, DataverseConfig
-from integration import ACCOUNT_KEY_FIELD, create_sync_engine, setup_logging
+from integration import create_sync_engine, load_mapping_config, setup_logging
 from integration.env import load_env
 from onekey import OneKeyClient, OneKeyConfig, OneKeySession
 from onekey.parse import flatten_hco
@@ -86,17 +87,17 @@ def save_cache(path: Path, workplaces: list[dict], codebase: str) -> None:
     logger.info("Cached %d workplaces to %s", len(workplaces), path)
 
 
-def load_dataverse_keys(dataverse: DataverseClient) -> set[str]:
-    """All non-null cr4ec_externalid values currently on account."""
+def load_dataverse_keys(dataverse: DataverseClient, account_key: str) -> set[str]:
+    """All non-null upsert-key values currently on account."""
     rows = dataverse.retrieve_multiple(
         "accounts",
-        select=[ACCOUNT_KEY_FIELD],
-        filter=f"{ACCOUNT_KEY_FIELD} ne null",
+        select=[account_key],
+        filter=f"{account_key} ne null",
     )
     return {
-        str(row[ACCOUNT_KEY_FIELD]).strip()
+        str(row[account_key]).strip()
         for row in rows
-        if row.get(ACCOUNT_KEY_FIELD)
+        if row.get(account_key)
     }
 
 
@@ -104,6 +105,7 @@ def main():
     args = parse_args()
     setup_logging(level=logging.INFO)
     load_env()
+    account_key = load_mapping_config().require_key_field("account")
 
     if args.from_cache:
         if not args.cache.exists():
@@ -121,9 +123,9 @@ def main():
 
     dataverse = DataverseClient(DataverseConfig.from_env())
     logger.info("Dataverse user: %s", dataverse.whoami().get("UserId"))
-    existing = load_dataverse_keys(dataverse)
+    existing = load_dataverse_keys(dataverse, account_key)
     logger.info(
-        "Dataverse accounts with %s: %d", ACCOUNT_KEY_FIELD, len(existing)
+        "Dataverse accounts with %s: %d", account_key, len(existing)
     )
 
     by_eid = {}
@@ -155,7 +157,7 @@ def main():
         dataverse,
         bulk_batch_size=args.bulk_batch_size,
     )
-    key_name = ACCOUNT_KEY_FIELD
+    key_name = account_key
     prepared = []
     for eid in missing:
         hco = by_eid[eid]

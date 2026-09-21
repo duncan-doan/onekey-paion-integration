@@ -30,9 +30,10 @@ def test_shared_address_produces_duplicate_rows_with_distinct_keys():
     payload_b = engine.transform_address(hco_b, parent_account_id="guid-b")
 
     assert payload_a is not None and payload_b is not None
-    assert payload_a["cr4ec_externalid"] == "WUKHCO000A - WUKADDR0001"
-    assert payload_b["cr4ec_externalid"] == "WUKHCO000B - WUKADDR0001"
-    assert payload_a["cr4ec_externalid"] != payload_b["cr4ec_externalid"]
+    key = engine.config.require_key_field("customeraddress")
+    assert payload_a[key] == "WUKHCO000A - WUKADDR0001"
+    assert payload_b[key] == "WUKHCO000B - WUKADDR0001"
+    assert payload_a[key] != payload_b[key]
 
     # Same physical address content
     assert payload_a["line1"] == payload_b["line1"] == "10 Shared Street"

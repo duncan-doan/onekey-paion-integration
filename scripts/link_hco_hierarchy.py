@@ -2,8 +2,8 @@
 """Link HCO parent/child hierarchy in Dataverse via bulk UpdateMultiple.
 
 Reads workplace -> managerWorkplaceEid edges from OneKey, resolves both sides
-to Dataverse account GUIDs (by cr4ec_externalid), then sets
-parentaccountid@odata.bind in batches.
+to Dataverse account GUIDs (by account upsert key from mapping config), then
+sets parentaccountid@odata.bind in batches.
 
 Usage:
     python scripts/link_hco_hierarchy.py --codbase WUK
@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dataverse import DataverseClient, DataverseConfig
-from integration import setup_logging
+from integration import load_mapping_config, setup_logging
 from integration.env import load_env
 from integration.hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from onekey import OneKeyClient, OneKeyConfig, OneKeySession
@@ -142,18 +142,21 @@ def main():
         logger.info("No parent edges found; nothing to link")
         return 0
 
+    account_key = load_mapping_config().require_key_field("account")
     eids = sorted({eid for pair in edges for eid in pair})
-    logger.info("Resolving %d cr4ec_externalid values in Dataverse...", len(eids))
+    logger.info("Resolving %d %s values in Dataverse...", len(eids), account_key)
 
     if args.dry_run:
         # Still need live lookups to report readiness unless mocked.
         dataverse = DataverseClient(DataverseConfig.from_env())
         logger.info("Dataverse user: %s", dataverse.whoami().get("UserId"))
 
-    accounts = resolve_accounts(dataverse, eids)
+    accounts = resolve_accounts(dataverse, eids, account_key)
     logger.info("Resolved %d/%d accounts", len(accounts), len(eids))
 
-    updates, stats = build_updates(edges, accounts, skip_unchanged=skip_unchanged)
+    updates, stats = build_updates(
+        edges, accounts, account_key, skip_unchanged=skip_unchanged
+    )
     logger.info(
         "Link plan: ready=%d already_linked=%d missing_child=%d "
         "missing_parent=%d (unique parents missing=%d) self_ref=%d",
@@ -169,7 +172,7 @@ def main():
         for row in updates[:10]:
             logger.info(
                 "DRY RUN would set %s -> %s",
-                row["cr4ec_externalid"],
+                row[account_key],
                 row["parentaccountid@odata.bind"],
             )
         if len(updates) > 10:
@@ -186,7 +189,9 @@ def main():
         "Applying %d parent links via UpdateMultiple (batch size %d)...",
         len(updates), batch_size,
     )
-    updated, failed = apply_updates(dataverse, updates, batch_size)
+    updated, failed = apply_updates(
+        dataverse, updates, batch_size, match_field=account_key
+    )
     logger.info("Done: %d linked, %d failed", updated, failed)
     dataverse.close()
     return 1 if failed else 0

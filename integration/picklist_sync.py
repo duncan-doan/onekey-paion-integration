@@ -20,12 +20,6 @@ logger = logging.getLogger(__name__)
 
 LANG = 1033
 
-DEFAULT_TARGETS = {
-    "hcotype": {"kind": "global", "option_set": "cr4ec_hcotype"},
-    "specialty": {"kind": "global", "option_set": "cr4ec_specialty"},
-    "structuretype": {"kind": "global", "option_set": "cr4ec_hcostructuretype"},
-}
-
 
 def label_payload(text: str) -> dict:
     return {
@@ -256,8 +250,17 @@ def sync_picklists_from_config(
     batch_size: int = 50,
     targets: dict | None = None,
 ) -> list[dict]:
-    """Upsert choice options for configured mapping types. Returns summaries."""
-    target_map = targets or DEFAULT_TARGETS
+    """Upsert choice options for configured mapping types. Returns summaries.
+
+    Targets come from ``config/picklist_targets.csv`` (via MappingConfig)
+    unless ``targets`` is passed explicitly.
+    """
+    target_map = targets if targets is not None else config.picklist_target_map()
+    if not target_map:
+        logger.warning(
+            "No picklist targets configured (picklist_targets.csv) — skipping"
+        )
+        return []
     selected = types or list(target_map.keys())
     summaries = []
     for mapping_type in selected:

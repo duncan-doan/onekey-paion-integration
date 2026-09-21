@@ -60,13 +60,27 @@ class OneKeySession:
     def __init__(self, config, session=None):
         self.config = config
         self._session = session or requests.Session()
+        self._apply_default_headers()
+
+    def _apply_default_headers(self) -> None:
         self._session.headers.update(
             {
-                "Authorization": basic_auth_header(config.username, config.password),
+                "Authorization": basic_auth_header(
+                    self.config.username, self.config.password
+                ),
                 "Accept": "application/json",
                 "User-Agent": "onekey-paion-integration/0.1",
             }
         )
+
+    def _reset_connection_pool(self) -> None:
+        """Drop pooled sockets after ConnectionReset / aborted TLS sessions."""
+        try:
+            self._session.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._session = requests.Session()
+        self._apply_default_headers()
 
     # -- plumbing ---------------------------------------------------------
 
@@ -115,6 +129,22 @@ class OneKeySession:
                 last_error = OneKeyHTTPError(
                     f"Could not reach OneKey at {url}: {exc}", url=url
                 )
+                # Stale keep-alive sockets often surface as ConnectionResetError;
+                # rebuild the pool before the next attempt.
+                self._reset_connection_pool()
+                if attempt < self.config.max_retries:
+                    delay = min(30 * attempt, 180) + random.uniform(0, 2)
+                    logger.warning(
+                        "OneKey %s %s failed (attempt %d/%d); "
+                        "reset connection pool, retrying in %.1fs",
+                        method,
+                        url,
+                        attempt,
+                        self.config.max_retries,
+                        delay,
+                    )
+                    time.sleep(delay)
+                continue
             else:
                 if response.status_code not in _RETRY_STATUSES:
                     self._raise_for_status(response, url)

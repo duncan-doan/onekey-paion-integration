@@ -44,6 +44,71 @@ def specialties(entity):
     return [e for e in _coded_values(container) if e["listCode"] == "SP"]
 
 
+def specialty_slots(entity, slots: int = 5) -> dict:
+    """Flatten up to ``slots`` SP codes/labels as specialtyCode1..N / specialtyLabel1..N.
+
+    Also sets ``specialtyCode`` / ``specialtyLabel`` aliases for slot 1.
+    """
+    specs = specialties(entity) or []
+    out = {}
+    for i in range(1, slots + 1):
+        sp = specs[i - 1] if i - 1 < len(specs) else {}
+        out[f"specialtyCode{i}"] = sp.get("code")
+        out[f"specialtyLabel{i}"] = sp.get("corporateLabel") or sp.get("label")
+    out["specialtyCode"] = out.get("specialtyCode1")
+    out["specialtyLabel"] = out.get("specialtyLabel1")
+    return out
+
+
+def _telephone_slots(entity, slots: int = 2) -> dict:
+    """Flatten workplace/individual telephones as telephone1..N.
+
+    OneKey keys are typically ``1,1`` / ``1,2`` (type,rank). Also accepts
+    underscore forms used in mapping paths (``1_1``).
+    """
+    phones = (entity or {}).get("telephones") or {}
+    out = {f"telephone{i}": None for i in range(1, slots + 1)}
+    if not isinstance(phones, dict) or not phones:
+        return out
+
+    def sort_key(item):
+        key, value = item
+        rank = (value or {}).get("rank")
+        if rank is None and "," in str(key):
+            try:
+                rank = int(str(key).split(",", 1)[1])
+            except ValueError:
+                rank = 0
+        return rank if rank is not None else 0
+
+    ordered = sorted(phones.items(), key=sort_key)
+    for i, (_, entry) in enumerate(ordered[:slots], start=1):
+        if not isinstance(entry, dict):
+            continue
+        out[f"telephone{i}"] = (
+            entry.get("callNumberForSearch")
+            or entry.get("callNumber")
+            or entry.get("number")
+        )
+    # Alias first phone as ``telephone`` for older mappings
+    out["telephone"] = out.get("telephone1")
+    return out
+
+
+def _denied_accesses(entity) -> dict:
+    """Flatten deniedAccesses flags used by entity_mapping (noPhone, …)."""
+    denied = (entity or {}).get("deniedAccesses") or {}
+    if not isinstance(denied, dict):
+        denied = {}
+    return {
+        "noPhone": denied.get("noPhone"),
+        "noEmail": denied.get("noEmail"),
+        "noMail": denied.get("noMail"),
+        "noFax": denied.get("noFax"),
+        "noVisit": denied.get("noVisit"),
+    }
+
+
 _ADDRESS_FIELDS = (
     "addressEid",
     "buildingLabel",
@@ -180,7 +245,7 @@ def flatten_hcp(result):
     individual = result.get("individual") or {}
     activity = result.get("activity") or {}
     workplace = result.get("workplace") or {}
-    specialty = (specialties(individual) or [{}])[0]
+    status = individual.get("statusCode") or activity.get("statusCode")
 
     return {
         "onekeyEid": result.get("onekeyEid"),
@@ -194,10 +259,13 @@ def flatten_hcp(result):
         "title": individual.get("titleCode"),
         "typeCode": individual.get("typeCode"),
         "typeLabel": individual.get("typeCorporateLabel") or individual.get("typeLabel"),
-        "specialtyCode": specialty.get("code"),
-        "specialtyLabel": specialty.get("corporateLabel") or specialty.get("label"),
-        "statusCode": individual.get("statusCode") or activity.get("statusCode"),
-        "isValid": (individual.get("statusCode") or activity.get("statusCode")) == "3",
+        **specialty_slots(individual),
+        "statusCode": status,
+        # entity_mapping.csv uses stateCode; OneKey sends statusCode
+        "stateCode": individual.get("stateCode") or status,
+        "preferredLanguageEID": individual.get("preferredLanguageEID"),
+        "isValid": status == "3",
+        "usualName": workplace.get("usualName"),
         "workplaceName": workplace.get("officialName") or workplace.get("usualName"),
         "country": result.get("country"),
         "codBase": result.get("codBase"),
@@ -210,7 +278,7 @@ def flatten_hcp(result):
 def flatten_hco(result):
     """Flatten one WORKPLACE result into a healthcare-organisation row."""
     workplace = result.get("workplace") or result
-    specialty = (specialties(workplace) or [{}])[0]
+    status = workplace.get("statusCode")
 
     return {
         "onekeyEid": result.get("onekeyEid") or workplace.get("workplaceEid"),
@@ -220,14 +288,22 @@ def flatten_hco(result):
         "typeCode": workplace.get("typeCode"),
         "typeLabel": workplace.get("typeCorporateLabel") or workplace.get("typeLabel"),
         "activityLocationCode": workplace.get("activityLocationCode"),
-        "specialtyCode": specialty.get("code"),
-        "specialtyLabel": specialty.get("corporateLabel") or specialty.get("label"),
-        "statusCode": workplace.get("statusCode"),
-        "isValid": workplace.get("statusCode") == "3",
+        "structureTypeCode": workplace.get("structureTypeCode"),
+        **specialty_slots(workplace),
+        "statusCode": status,
+        # entity_mapping.csv uses stateCode; OneKey workplace uses statusCode
+        "stateCode": workplace.get("stateCode") or status,
+        "isValid": status == "3",
         "parentWorkplaceEid": workplace.get("managerWorkplaceEid"),
         "parentWorkplaceName": workplace.get("managerWorkplaceOfficialName"),
         "country": result.get("country"),
         "codBase": result.get("codBase"),
-        "isPrivacyLaw": workplace.get("isPrivacyLaw"),
+        "isPrivacyLaw": (
+            workplace.get("isPrivacyLaw")
+            if workplace.get("isPrivacyLaw") is not None
+            else result.get("isPrivacyLaw")
+        ),
+        **_telephone_slots(workplace),
+        **_denied_accesses(workplace),
         **{f"address_{k}": v for k, v in primary_address(workplace).items()},
     }

@@ -242,6 +242,11 @@ VAL-SPE-198,specialty,Z5,Clinical Pathology,126870198,Clinical Pathology,
 VAL-SPE-199,specialty,Z9,Client Specific Specialty,126870199,Client Specific Specialty,
 VAL-SPE-200,specialty,ZZ,Client Specific Specialty,126870200,Client Specific Specialty,
 # State Code Mapping (stateCode -> statecode),,,,,,
+# State Code Mapping (OneKey statusCode numeric + alpha codes -> account/contact statecode)
+VAL-STA-N01,statecode,3,Valid,0,Active,OneKey statusCode 3=Valid -> Active
+VAL-STA-N02,statecode,9,Invalid,1,Inactive,OneKey statusCode 9=Invalid -> Inactive
+VAL-STA-N03,statecode,1,Created,1,Inactive,OneKey statusCode 1=Created -> Inactive
+VAL-STA-N04,statecode,6,Deceased,1,Inactive,OneKey statusCode 6=Deceased -> Inactive
 VAL-STA-001,statecode,ACT,Active,0,Active,
 VAL-STA-002,statecode,CLO,Closed,1,Inactive,
 VAL-STA-003,statecode,DED,Deceased,1,Inactive,
@@ -254,7 +259,7 @@ VAL-STA-009,statecode,RED,Reduced Activity,1,Inactive,
 VAL-STA-010,statecode,RET,Retired,1,Inactive,
 VAL-STA-011,statecode,TCL,Temporarily Closed,1,Inactive,
 VAL-STA-012,statecode,TIN,Temporarily Inactive,1,Inactive,
-# Structure Code Mapping (structureTypeCode -> cree7_structuretype),,,,,,
+# Structure Code Mapping (structureTypeCode -> ts_structuretype),,,,,,
 VAL-STR-001,structuretype,POR,Primary Organisation,126870001,Primary Organisation,
 VAL-STR-002,structuretype,ORG,Organisation,126870002,Organisation,
 VAL-STR-003,structuretype,DPT,Department,126870003,Department,
@@ -294,7 +299,7 @@ VAL-ADD-002,addresstype,L,Delivery address,2,Ship to,
 VAL-ADD-003,addresstype,M,Mailing address,5,Mail To,
 VAL-ADD-004,addresstype,P,Primary address,3,Primary,
 VAL-ADD-005,addresstype,S,Secondary address,4,Other,
-# HCO Type Code (workplace.typeCode -> cree7_type),,,,,,
+# HCO Type Code (workplace.typeCode -> ts_type),,,,,,
 VAL-HCO-001,hcotype,ACA,Academic Institution,126870001,Academic Institution,Academic Institution
 VAL-HCO-002,hcotype,ACT,Acute Trust,126870002,Acute Trust,Acute Trust
 VAL-HCO-003,hcotype,ADD,Addiction Services Organisation,126870003,Addiction Services Organisation,Addiction Services Organisation
