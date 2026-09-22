@@ -31,7 +31,7 @@ VAL-COD-005,codebase,WDK,Denmark,DK,Denmark,Denmark codebase
 VAL-COD-006,codebase,WNO,Norway,NO,Norway,Norway codebase
 VAL-COD-007,codebase,WFI,Finland,FI,Finland,Finland codebase
 # Preferred language mapping for HCP,,,,,,
-VAL-PLN-001,language,en,English,126870001,English,English UK
+VAL-PLN-001,preflanguage,en,English,126870001,English,English UK
 # Language Code Mapping (for portal LCID if needed),,,,,,
 VAL-LNG-001,language,en_GB,English (UK),1033,English,English UK
 VAL-LNG-002,language,de,German,1031,German,German
