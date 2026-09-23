@@ -19,6 +19,7 @@ from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, setup_logging
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from .picklist_sync import sync_picklists_from_config
+from .w2w_relations import collect_w2w_relations
 from onekey.parse import compose_hcp_result, flatten_hcp, flatten_hco
 from dataverse.client import chunked
 
@@ -115,11 +116,13 @@ class DynamicSyncEngine:
         hcp_only: bool = False,
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
+        sync_hco_relations: bool = True,
         sync_picklists: bool = True,
     ) -> dict:
-        """Run full migration: picklists → HCO → address → hierarchy → HCP.
+        """Run full migration: picklists → HCO → address → hierarchy → W2W → HCP.
 
         Accounts are upserted without parent binds; hierarchy is Phase 3.
+        HCO–HCO ``workplace.relations[]`` load into ``ts_affiliation`` (deduped).
         Addresses use ``customeraddress`` only (never account/contact address1_*).
         """
         if hco_only and hcp_only:
@@ -141,6 +144,7 @@ class DynamicSyncEngine:
             "accounts": _empty_entity_stats(),
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
+            "affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "picklist_gaps": 0,
             "picklist_gap_report": None,
@@ -162,7 +166,7 @@ class DynamicSyncEngine:
                 flattened_hcos: list[dict] = []
 
                 if not hcp_only:
-                    hco_result, flattened_hcos = self._sync_hcos(
+                    hco_result, flattened_hcos, raw_workplaces = self._sync_hcos(
                         codebase,
                         max_records=max_records,
                         dry_run=dry_run,
@@ -180,6 +184,12 @@ class DynamicSyncEngine:
                             flattened_hcos, dry_run=dry_run
                         )
                         self._merge_hierarchy(results["hierarchy"], hier_result)
+
+                    if sync_hco_relations:
+                        aff_result = self._sync_hco_relations(
+                            raw_workplaces, dry_run=dry_run
+                        )
+                        self._merge_entity(results["affiliations"], aff_result)
 
                 if not hco_only:
                     hcp_result = self._sync_hcps(
@@ -207,6 +217,7 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
+        sync_hco_relations: bool = True,
         sync_picklists: bool = True,
     ) -> dict:
         """Run CDC delta with the same phase order as full sync."""
@@ -228,6 +239,7 @@ class DynamicSyncEngine:
             "accounts": _empty_entity_stats(),
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
+            "affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
             "picklist_gaps": 0,
@@ -255,10 +267,14 @@ class DynamicSyncEngine:
                     dry_run=dry_run,
                     sync_addresses=sync_addresses,
                     sync_hierarchy=sync_hierarchy,
+                    sync_hco_relations=sync_hco_relations,
                 )
                 self._merge_entity(results["accounts"], delta_result["accounts"])
                 self._merge_entity(results["addresses"], delta_result["addresses"])
                 self._merge_hierarchy(results["hierarchy"], delta_result["hierarchy"])
+                self._merge_entity(
+                    results["affiliations"], delta_result["affiliations"]
+                )
                 self._merge_entity(results["contacts"], delta_result["contacts"])
                 for code in ["I", "U", "R"]:
                     results["by_process_code"][code] += delta_result.get(
@@ -292,14 +308,18 @@ class DynamicSyncEngine:
         max_records: int = None,
         dry_run: bool = False,
         flattened: list[dict] | None = None,
-    ) -> tuple[dict, list[dict]]:
+    ) -> tuple[dict, list[dict], list[dict]]:
         """Sync HCOs for a single codebase using bulk upserts.
 
         Parent ``parentaccountid`` is always deferred to ``_sync_hierarchy``.
+
+        Returns:
+            stats, flattened HCO rows, raw OneKey WORKPLACE records (for W2W).
         """
         self.sync_logger.log_phase(f"HCO SYNC: {codebase}")
 
         result = _empty_entity_stats()
+        raw_workplaces: list[dict] = []
 
         if flattened is None:
             hcos = []
@@ -309,11 +329,12 @@ class DynamicSyncEngine:
             ):
                 if (record.get("entityType") or "").upper() == "WORKPLACE":
                     hcos.append(record)
+            raw_workplaces = hcos
             logger.info("Extracted %d HCOs from %s", len(hcos), codebase)
             flattened = [flatten_hco(r) for r in hcos]
 
         if not flattened:
-            return result, flattened
+            return result, flattened, raw_workplaces
 
         logger.info(
             "Upserting %d accounts (batch size %d); parent links deferred",
@@ -361,10 +382,10 @@ class DynamicSyncEngine:
                 )
                 result["processed"] += 1
             self.sync_logger.log_progress("accounts", len(prepared), total)
-            return result, flattened
+            return result, flattened, raw_workplaces
 
         if not prepared:
-            return result, flattened
+            return result, flattened, raw_workplaces
 
         key_name = prepared[0][1]
         payloads = [item[3] for item in prepared]
@@ -404,7 +425,7 @@ class DynamicSyncEngine:
             if done % 100 == 0 or done == len(prepared):
                 self.sync_logger.log_progress("accounts", done, len(prepared))
 
-        return result, flattened
+        return result, flattened, raw_workplaces
 
     def _sync_addresses(
         self,
@@ -552,6 +573,142 @@ class DynamicSyncEngine:
         )
         result["linked"] = linked
         result["failed"] = failed
+        return result
+
+    def _affiliation_entity_set(self) -> str:
+        ed = self.config.get_entity("Dataverse", "ts_affiliation")
+        return (ed.entity_set if ed and ed.entity_set else "ts_affiliations")
+
+    def _sync_hco_relations(
+        self,
+        raw_workplaces: list[dict],
+        dry_run: bool = False,
+    ) -> dict:
+        """Phase 3b: upsert deduped HCO–HCO links into ``ts_affiliation``."""
+        self.sync_logger.log_phase("HCO-HCO RELATION SYNC (ts_affiliation)")
+        result = _empty_entity_stats()
+
+        edges = collect_w2w_relations(raw_workplaces)
+        if not edges:
+            logger.info("No HCO-HCO relations to sync")
+            return result
+
+        logger.info(
+            "Upserting %d HCO-HCO affiliation(s) from %d workplace(s)",
+            len(edges),
+            len(raw_workplaces),
+        )
+
+        affiliation_key = self.config.require_key_field("ts_affiliation")
+        entity_set = self._affiliation_entity_set()
+
+        eids = sorted(
+            {
+                eid
+                for edge in edges
+                for eid in (
+                    edge.get("childWorkplaceEid"),
+                    edge.get("parentWorkplaceEid"),
+                )
+                if eid
+            }
+        )
+        if not dry_run and eids:
+            self._lookup_accounts_bulk(eids)
+
+        prepared: list[tuple[str, str, dict, dict]] = []
+
+        for edge in edges:
+            external_id = edge.get("ts_externalid")
+            child_eid = edge.get("childWorkplaceEid")
+            parent_eid = edge.get("parentWorkplaceEid")
+
+            child_id = self._account_cache.get(child_eid)
+            parent_id = self._account_cache.get(parent_eid)
+
+            if not child_id:
+                result["failed"] += 1
+                self.sync_logger.log_relationship_failed(
+                    "ts_affiliation",
+                    external_id,
+                    "account",
+                    child_eid,
+                    f"Child account not found for {child_eid}",
+                )
+                continue
+            if not parent_id:
+                result["failed"] += 1
+                self.sync_logger.log_relationship_failed(
+                    "ts_affiliation",
+                    external_id,
+                    "account",
+                    parent_eid,
+                    f"Parent account not found for {parent_eid}",
+                )
+                continue
+
+            payload = self.transformer.transform_w2w_affiliation(
+                edge,
+                child_account_id=child_id,
+                parent_account_id=parent_id,
+            )
+            if not payload.get(affiliation_key):
+                result["failed"] += 1
+                self.sync_logger.log_record_error(
+                    "ts_affiliation",
+                    external_id,
+                    "transform",
+                    f"Missing key field {affiliation_key}",
+                )
+                continue
+
+            prepared.append((external_id, affiliation_key, payload, edge))
+
+        if dry_run:
+            result["processed"] = len(prepared)
+            logger.info("DRY RUN: would upsert %d HCO-HCO affiliations", len(prepared))
+            return result
+
+        if not prepared:
+            return result
+
+        done = 0
+        for batch in chunked(prepared, self.bulk_batch_size):
+            payloads = [item[2] for item in batch]
+            try:
+                bulk_results = self.dataverse.bulk_upsert_by_field(
+                    entity_set,
+                    affiliation_key,
+                    payloads,
+                    batch_size=self.bulk_batch_size,
+                )
+            except Exception as e:
+                result["failed"] += len(batch)
+                for external_id, *_ in batch:
+                    self.sync_logger.log_record_error(
+                        "ts_affiliation", external_id, "bulk_upsert", str(e)
+                    )
+                raise
+
+            for (external_id, _, edge), (_, record_id, created) in zip(
+                batch, bulk_results
+            ):
+                if created:
+                    result["created"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                done += 1
+                self.sync_logger.log_record_success(
+                    "ts_affiliation",
+                    external_id,
+                    record_id,
+                    "create" if created else "update",
+                    f"{edge.get('childWorkplaceEid')} → {edge.get('parentWorkplaceEid')}",
+                )
+
+            self.sync_logger.log_progress("affiliations", done, len(prepared))
+
         return result
 
     def _collect_population_hcps(
@@ -770,12 +927,14 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
+        sync_hco_relations: bool = True,
     ) -> dict:
         """Sync delta changes for a single codebase using bulk upserts."""
         result = {
             "accounts": _empty_entity_stats(),
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
+            "affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
         }
@@ -837,7 +996,7 @@ class DynamicSyncEngine:
         flattened_hcos: list[dict] = []
         if workplaces:
             flattened_hcos = [flatten_hco(r) for r in workplaces]
-            hco_result, flattened_hcos = self._sync_hcos(
+            hco_result, flattened_hcos, _ = self._sync_hcos(
                 codebase,
                 dry_run=dry_run,
                 flattened=flattened_hcos,
@@ -851,6 +1010,10 @@ class DynamicSyncEngine:
             if sync_hierarchy:
                 result["hierarchy"] = self._sync_hierarchy(
                     flattened_hcos, dry_run=dry_run
+                )
+            if sync_hco_relations:
+                result["affiliations"] = self._sync_hco_relations(
+                    workplaces, dry_run=dry_run
                 )
 
         if activities_by_individual:

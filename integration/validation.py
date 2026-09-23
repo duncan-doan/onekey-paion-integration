@@ -148,9 +148,114 @@ class MappingValidator:
                     message=f"Multiple mappings for same target field (may be intentional for fallbacks)",
                 ))
             seen.add(key)
-        
+
+        self._validate_decode_and_picklist_targets(result)
+
         logger.info("Mapping config validation: %s", result.summary())
         return result
+
+    def _validate_decode_and_picklist_targets(self, result: ValidationResult) -> None:
+        """Ensure decode: rules line up with value_mapping + picklist_targets.
+
+        Catches the contact.ts_type class of bugs: encoding a Label field with
+        a code table, or picklist_targets pointing at a different attribute.
+        """
+        value_types = set(self.config._value_map.keys())
+        picklist_types = set(self.config._picklist_by_type.keys())
+
+        for fm in self.config.field_mappings:
+            rule = (fm.transform_rule or "").strip()
+            if not rule.startswith("decode:"):
+                continue
+
+            decode_type = rule.split(":", 1)[1].lower().replace(" ", "")
+            if not decode_type:
+                result.add_error(ValidationError(
+                    error_type="invalid_decode_rule",
+                    severity="error",
+                    entity=fm.target_entity,
+                    field=fm.target_field,
+                    message=f"Empty decode type in transform_rule {rule!r}",
+                ))
+                continue
+
+            if decode_type not in value_types:
+                result.add_error(ValidationError(
+                    error_type="missing_value_mapping",
+                    severity="error",
+                    entity=fm.target_entity,
+                    field=fm.target_field,
+                    message=(
+                        f"decode:{decode_type} has no rows in value_mapping.csv "
+                        f"(mapping_id={fm.mapping_id})"
+                    ),
+                ))
+
+            target = self.config.get_picklist_target(decode_type)
+            if target is None and decode_type not in ("statecode", "statuscode"):
+                # state/status often use built-in options; still warn for custom types
+                result.add_error(ValidationError(
+                    error_type="missing_picklist_target",
+                    severity="warning",
+                    entity=fm.target_entity,
+                    field=fm.target_field,
+                    message=(
+                        f"decode:{decode_type} has no picklist_targets.csv row "
+                        f"(needed for Phase 0 option upsert)"
+                    ),
+                ))
+            elif target is not None and (target.kind or "").lower() == "local":
+                if (target.entity or "").lower() != (fm.target_entity or "").lower():
+                    result.add_error(ValidationError(
+                        error_type="picklist_target_entity_mismatch",
+                        severity="error",
+                        entity=fm.target_entity,
+                        field=fm.target_field,
+                        message=(
+                            f"picklist_targets[{decode_type}].entity={target.entity!r} "
+                            f"does not match mapping target_entity={fm.target_entity!r}"
+                        ),
+                    ))
+                if target.attribute and target.attribute != fm.target_field:
+                    result.add_error(ValidationError(
+                        error_type="picklist_target_attribute_mismatch",
+                        severity="error",
+                        entity=fm.target_entity,
+                        field=fm.target_field,
+                        message=(
+                            f"picklist_targets[{decode_type}].attribute={target.attribute!r} "
+                            f"does not match mapping target_field={fm.target_field!r}"
+                        ),
+                    ))
+
+            # Labels cannot be looked up in a code-keyed value_mapping table.
+            src = (fm.source_field or "").lower()
+            if src.endswith("label") or src.endswith("corporatelabel"):
+                result.add_error(ValidationError(
+                    error_type="decode_source_is_label",
+                    severity="error",
+                    entity=fm.target_entity,
+                    field=fm.target_field,
+                    message=(
+                        f"decode:{decode_type} uses source_field={fm.source_field!r}; "
+                        f"use the OneKey *Code* field (value_mapping keys are codes, not labels)"
+                    ),
+                ))
+
+        # Orphan picklist targets (defined but never decoded/mapped)
+        used_decode_types = set()
+        for fm in self.config.field_mappings:
+            rule = (fm.transform_rule or "").strip()
+            if rule.startswith("decode:"):
+                used_decode_types.add(rule.split(":", 1)[1].lower().replace(" ", ""))
+        for ptype in sorted(picklist_types - used_decode_types):
+            result.add_error(ValidationError(
+                error_type="unused_picklist_target",
+                severity="info",
+                entity="picklist_targets",
+                field=ptype,
+                message=f"picklist_targets mapping_type={ptype!r} is not referenced by any decode: rule",
+            ))
     
     def validate_source_record(
         self,

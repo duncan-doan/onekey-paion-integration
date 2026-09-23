@@ -882,6 +882,15 @@ VAL-ROL-453,role,XP,Pharmacy Technician,126870453,Pharmacy Technician,Pharmacy T
 VAL-ROL-454,role,YT,Psychosexual Therapist,126870454,Psychosexual Therapist,Psychosexual Therapist
 VAL-ROL-455,role,Z1,Advanced Clinical Practitioner,126870455,Advanced Clinical Practitioner,Advanced Clinical Practitioner
 VAL-ROL-456,role,ZZ,Client Specific Role,126870456,Client Specific Role,Client Specific Role
+# HCO-HCO Relation Link Code (workplace.relations[*].linkCode -> ts_affiliation.ts_linkcode),,,,,,
+# source_value = child/non-parent label (linkCodeLabel when isParent=false); notes = parent-side label,,,,,,
+VAL-LNK-001,linkcode,AUT,Affiliated auth,126873001,Affiliated auth,Parent label: Has affiliated
+VAL-LNK-002,linkcode,CGR,Is member of group,126873002,Is member of group,Parent label: Is head of
+VAL-LNK-003,linkcode,GRP,Is secondary address of,126873003,Is secondary address of,Parent label: Is main office of
+VAL-LNK-004,linkcode,HIE,Is managed by,126873004,Is managed by,Parent label: Manages
+VAL-LNK-005,linkcode,HSP,Within,126873005,Within,Parent label: Has within
+VAL-LNK-006,linkcode,MAI,Has for main workplace,126873006,Has for main workplace,Parent label: Is main workplace of
+VAL-LNK-007,linkcode,TRU,Has affiliated,126873007,Has affiliated,Parent label: Affiliated trust
 # Affiliation Working Status Mapping,,,,,,
 VAL-WST-001,workingstatus,C,Full Time,1,Full Time,
 VAL-WST-002,workingstatus,D,Home,2,Home,

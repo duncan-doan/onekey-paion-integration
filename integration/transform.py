@@ -167,6 +167,76 @@ class TransformEngine:
 
         return {k: v for k, v in payload.items() if v is not None}
 
+    def transform_w2w_affiliation(
+        self,
+        source: dict,
+        child_account_id: str = None,
+        parent_account_id: str = None,
+    ) -> dict:
+        """Transform a normalized HCO–HCO relation row to ``ts_affiliation``.
+
+        Expects output of :func:`integration.w2w_relations.collect_w2w_relations`
+        with ``childWorkplaceEid``, ``parentWorkplaceEid``, and ``linkCode``.
+        """
+        external_id = source.get("ts_externalid")
+        self.begin_record("ts_affiliation", external_id)
+
+        payload: dict[str, Any] = {}
+        key_parts: list[tuple[str, str]] = []
+
+        mappings = [
+            fm
+            for fm in self.config.get_field_mappings("ts_affiliation")
+            if fm.mapping_id.startswith("W2W-")
+        ]
+
+        for fm in mappings:
+            if not fm.target_field:
+                continue
+            if fm.is_lookup:
+                continue
+
+            value = self._extract_value(source, fm.source_field)
+            transformed = self._apply_transform(value, fm, source)
+            if transformed is None:
+                continue
+
+            if fm.target_field_type == "boolean":
+                transformed = self._normalize_boolean(transformed)
+
+            if fm.is_key:
+                if fm.transform_rule.startswith("append:"):
+                    if transformed:
+                        key_parts.append(("append", str(transformed)))
+                else:
+                    key_parts.append(("base", str(transformed)))
+                continue
+
+            if fm.max_length and isinstance(transformed, str):
+                transformed = transformed[: fm.max_length]
+
+            payload[fm.target_field] = transformed
+
+        if key_parts:
+            base = next((v for kind, v in key_parts if kind == "base"), None)
+            appendages = [v for kind, v in key_parts if kind == "append"]
+            if base and appendages:
+                key = base
+                for part in appendages:
+                    key = f"{key} - {part}"
+                payload[self.config.require_key_field("ts_affiliation")] = key
+            elif source.get("ts_externalid"):
+                payload[self.config.require_key_field("ts_affiliation")] = source[
+                    "ts_externalid"
+                ]
+
+        if child_account_id:
+            payload["ts_fromid_account@odata.bind"] = f"/accounts({child_account_id})"
+        if parent_account_id:
+            payload["ts_toid_account@odata.bind"] = f"/accounts({parent_account_id})"
+
+        return {k: v for k, v in payload.items() if v is not None}
+
     def transform_address(
         self,
         source: dict,
@@ -317,6 +387,15 @@ class TransformEngine:
             return None
         return f"{workplace_eid} - {address_eid}"
     
+    @staticmethod
+    def _normalize_boolean(value: Any) -> bool:
+        """Coerce config/map output to a Dataverse boolean."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes", "y")
+        return bool(value)
+
     def _extract_value(self, source: dict, field_name: str) -> Any:
         """Extract value from source record.
         

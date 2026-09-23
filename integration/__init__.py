@@ -44,6 +44,7 @@ from .sync_logger import SyncLogger, setup_logging
 from .picklist_gaps import PicklistGapCollector
 from .picklist_sync import sync_picklists_from_config
 from .hierarchy import edges_from_hcos
+from .w2w_relations import collect_w2w_relations, normalize_hco_hco_edge
 
 __all__ = [
     # Environment
@@ -90,4 +91,6 @@ __all__ = [
     "PicklistGapCollector",
     "sync_picklists_from_config",
     "edges_from_hcos",
+    "collect_w2w_relations",
+    "normalize_hco_hco_edge",
 ]

@@ -8,4 +8,6 @@ hcotype,global,ts_hcotype,,,Account HCO type (account.ts_type)
 specialty,global,ts_specialty,,,Specialty global choice (account/contact ts_specialty*)
 structuretype,global,ts_hcostructuretype,,,HCO structure type (account.ts_structuretype)
 title,local,,contact,ts_title,Contact title local choice
-hcptype,local,,contact,ts7_type,HCP professional type (entity_mapping uses ts7_type)
+hcptype,global,ts_hcptype,,,Contact HCP type (contact.ts_type → global ts_hcptype)
+language,global,ts_preferredlanguage,,,Contact preferred language (contact.ts_preferredlanguage)
+linkcode,local,,ts_affiliation,ts_linkcode,HCO-HCO workplace relation link type (AUT/CGR/HIE/…); entity_mapping W2W-005 decode:linkcode

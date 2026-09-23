@@ -6,6 +6,7 @@ Phase order:
   1. HCO accounts (workplaceEid → account key from entity_mapping.csv)
   2. customeraddress rows ({workplaceEid} - {addressEid})
   3. HCO parentaccountid hierarchy (managerWorkplaceEid)
+  3b. HCO–HCO ts_affiliation (workplace.relations[], deduped)
   4. HCP contacts + parentcustomerid
 
 Usage:
@@ -90,6 +91,11 @@ def parse_args():
         "--skip-hierarchy",
         action="store_true",
         help="Skip parentaccountid hierarchy link phase",
+    )
+    parser.add_argument(
+        "--skip-relations",
+        action="store_true",
+        help="Skip HCO–HCO ts_affiliation sync (workplace.relations[])",
     )
     parser.add_argument(
         "--skip-picklists",
@@ -219,6 +225,7 @@ def main():
     codebases = [c.strip().upper() for c in args.codbase.split(",") if c.strip()]
     sync_addresses = not args.skip_address
     sync_hierarchy = not args.skip_hierarchy
+    sync_hco_relations = not args.skip_relations
     sync_picklists = not args.skip_picklists
 
     config_dir = Path(args.config_dir) if args.config_dir else None
@@ -290,6 +297,7 @@ def main():
                 dry_run=args.dry_run,
                 sync_addresses=sync_addresses,
                 sync_hierarchy=sync_hierarchy,
+                sync_hco_relations=sync_hco_relations,
                 sync_picklists=sync_picklists,
             )
             if result.get("success") and not args.dry_run:
@@ -305,6 +313,7 @@ def main():
                 hcp_only=args.hcp_only,
                 sync_addresses=sync_addresses,
                 sync_hierarchy=sync_hierarchy,
+                sync_hco_relations=sync_hco_relations,
                 sync_picklists=sync_picklists,
             )
 
@@ -316,7 +325,8 @@ def main():
         print(
             f"Phases: picklists={'on' if sync_picklists else 'off'} "
             f"address={'on' if sync_addresses else 'off'} "
-            f"hierarchy={'on' if sync_hierarchy else 'off'}"
+            f"hierarchy={'on' if sync_hierarchy else 'off'} "
+            f"relations={'on' if sync_hco_relations else 'off'}"
         )
 
         if result.get("picklists"):
@@ -334,6 +344,8 @@ def main():
             print(f"  Missing child:   {hier.get('missing_child', 0)}")
             print(f"  Missing parent:  {hier.get('missing_parent', 0)}")
             print(f"  Failed:          {hier.get('failed', 0)}")
+
+        _print_entity("Affiliations (HCO-HCO)", result.get("affiliations"))
 
         _print_entity("Contacts", result.get("contacts"))
 
