@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Export one top HCO and its full hierarchy for Dataverse verification.
+"""Export one top HCO and its related tree for Dataverse verification/load.
 
-Walks the management tree (HIE + MAI workplace links) from a root Health Board,
-fetches every HCO in that tree, dedupes HCO–HCO relations, searches HCP
-activities per workplace, and writes:
+1. Walks the management tree (default HIE + MAI) from a root Health Board
+2. Optionally fetches every related workplace referenced by any linkCode
+3. Searches HCP activities per workplace (default: not limited to in-contract)
+4. Dedupes HCO–HCO relations and writes activity/affiliation summaries
+5. Optionally upserts accounts, contacts, and ts_affiliation into Dataverse
 
   output/org/<root_eid>/
     hco_summary.csv
     hcp_summary.csv
+    activity_summary.csv
     hco_relations_summary.csv
     manifest.json
     full_response.json
@@ -15,6 +18,7 @@ activities per workplace, and writes:
 Usage:
     python scripts/export_org_hierarchy.py
     python scripts/export_org_hierarchy.py --root WUKE00001260 --codbase WUK
+    python scripts/export_org_hierarchy.py --root WUKE00001260 --fetch-related all --load-dataverse
 """
 
 from __future__ import annotations
@@ -72,6 +76,27 @@ def parse_args():
         type=int,
         default=1000,
         help="Max activities returned per workplace search",
+    )
+    parser.add_argument(
+        "--fetch-related",
+        choices=("hierarchy", "all"),
+        default="hierarchy",
+        help="hierarchy=HIE/MAI tree only (default); all=also fetch workplaces linked by any linkCode (slow; rate-limits)",
+    )
+    parser.add_argument(
+        "--in-contract-only",
+        action="store_true",
+        help="Restrict HCP search to isInContract=true (default: all activities)",
+    )
+    parser.add_argument(
+        "--load-dataverse",
+        action="store_true",
+        help="After export, upsert HCOs, HCPs, and HCO–HCO affiliations to Dataverse",
+    )
+    parser.add_argument(
+        "--dry-run-load",
+        action="store_true",
+        help="With --load-dataverse, transform only (no writes)",
     )
     parser.add_argument("-v", action="store_true")
     return parser.parse_args()
@@ -151,23 +176,67 @@ def walk_hierarchy(
     return workplaces
 
 
+def related_eids_from_workplaces(workplaces: dict[str, dict]) -> set[str]:
+    """Collect every onekeyEid referenced by workplace.relations[]."""
+    found: set[str] = set()
+    for record in workplaces.values():
+        wp = record.get("workplace") or {}
+        for rel in wp.get("relations") or []:
+            eid = rel.get("onekeyEid")
+            if eid:
+                found.add(str(eid))
+    return found
+
+
+def fetch_missing_workplaces(
+    client: OneKeyClient,
+    workplaces: dict[str, dict],
+    missing: set[str],
+    cod_base: str,
+    fetch_delay: float,
+) -> int:
+    """Fetch workplaces not yet in ``workplaces``; return count added."""
+    added = 0
+    for eid in sorted(missing):
+        if eid in workplaces:
+            continue
+        record = fetch_workplace(client, eid, cod_base)
+        if not record:
+            logger.warning("No record for related workplace %s", eid)
+            continue
+        key = workplace_eid(record) or eid
+        workplaces[key] = record
+        added += 1
+        wp = record.get("workplace") or {}
+        logger.info(
+            "Related HCO %3d %s — %s",
+            added,
+            key,
+            wp.get("usualName") or wp.get("officialName"),
+        )
+        if fetch_delay > 0:
+            time.sleep(fetch_delay)
+    return added
+
+
 def search_hcps_at_workplace(
     client: OneKeyClient,
     workplace_eid: str,
     cod_base: str,
     max_results: int,
+    in_contract_only: bool = False,
 ) -> list[dict]:
     fields = [
         search_field("activity.workplaceEid", workplace_eid, EXACT),
         search_field("activity.statusCode", "3", EXACT),
     ]
-    return client.search(
-        ACTIVITY,
-        fields,
-        cod_base=cod_base,
-        result_size=max_results,
-        is_in_contract=True,
-    )
+    kwargs = {
+        "cod_base": cod_base,
+        "result_size": max_results,
+    }
+    if in_contract_only:
+        kwargs["is_in_contract"] = True
+    return client.search(ACTIVITY, fields, **kwargs)
 
 
 def role_label(activity: dict) -> str:
@@ -192,7 +261,7 @@ def build_summaries(
     workplaces: dict[str, dict],
     affiliations: list[dict],
     hcp_records: list[dict],
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     hco_rows = []
     for eid in sorted(workplaces):
         rec = workplaces[eid]
@@ -214,43 +283,47 @@ def build_summaries(
                 "address_city": flat.get("address_city"),
                 "address_postalCode": flat.get("address_postalCode"),
                 "isRoot": eid == root_eid,
+                "relationCount": len(wp.get("relations") or []),
                 "dataverse_account_key": eid,
                 "dataverse_parentaccountid_lookup": flat.get("parentWorkplaceEid") or "",
             }
         )
 
     hcp_rows = []
-    seen_individuals: set[str] = set()
+    activity_rows = []
     for rec in hcp_records:
         flat = flatten_hcp(rec)
         activity = rec.get("activity") or {}
         individual = rec.get("individual") or {}
         ind_eid = flat.get("individualEid") or ""
-        hcp_rows.append(
-            {
-                "individualEid": ind_eid,
-                "activityEid": flat.get("activityEid"),
-                "workplaceEid": flat.get("workplaceEid"),
-                "workplaceName": flat.get("workplaceName"),
-                "firstName": flat.get("firstName"),
-                "lastName": flat.get("lastName"),
-                "title": individual.get("titleCode"),
-                "typeLabel": flat.get("typeLabel"),
-                "specialty1": (individual.get("ada") or {}).get("SP,1", {}).get("codeLabel")
-                if isinstance((individual.get("ada") or {}).get("SP,1"), dict)
-                else "",
-                "roleAtWorkplace": role_label(activity),
-                "isMainActivity": activity.get("isMainActivity"),
-                "workingStatusCode": activity.get("workingStatusCode"),
-                "activityStartDate": activity.get("activityStartDate"),
-                "activityEndDate": activity.get("activityEndDate"),
-                "statusCode": activity.get("statusCode"),
-                "dataverse_contact_key": ind_eid,
-                "dataverse_parentcustomerid_lookup": flat.get("workplaceEid") or "",
-                "dataverse_affiliation_key": flat.get("activityEid"),
-            }
-        )
-        seen_individuals.add(ind_eid)
+        act_eid = flat.get("activityEid") or ""
+        wkp_eid = flat.get("workplaceEid") or ""
+        row = {
+            "individualEid": ind_eid,
+            "activityEid": act_eid,
+            "workplaceEid": wkp_eid,
+            "workplaceName": flat.get("workplaceName"),
+            "firstName": flat.get("firstName"),
+            "lastName": flat.get("lastName"),
+            "title": individual.get("titleCode"),
+            "typeLabel": flat.get("typeLabel"),
+            "specialty1": (individual.get("ada") or {}).get("SP,1", {}).get("codeLabel")
+            if isinstance((individual.get("ada") or {}).get("SP,1"), dict)
+            else "",
+            "roleAtWorkplace": role_label(activity),
+            "isMainActivity": activity.get("isMainActivity"),
+            "workingStatusCode": activity.get("workingStatusCode"),
+            "activityStartDate": activity.get("activityStartDate"),
+            "activityEndDate": activity.get("activityEndDate"),
+            "statusCode": activity.get("statusCode"),
+            "dataverse_contact_key": ind_eid,
+            "dataverse_parentcustomerid_lookup": wkp_eid,
+            "dataverse_affiliation_key": act_eid,
+            "dataverse_ts_fromid_lookup": ind_eid,
+            "dataverse_ts_toid_lookup": wkp_eid,
+        }
+        hcp_rows.append(row)
+        activity_rows.append(row)
 
     aff_rows = []
     for edge in affiliations:
@@ -273,7 +346,80 @@ def build_summaries(
             }
         )
 
-    return hco_rows, hcp_rows, aff_rows
+    return hco_rows, hcp_rows, aff_rows, activity_rows
+
+
+def load_org_into_dataverse(
+    workplaces: dict[str, dict],
+    hcp_records: list[dict],
+    affiliations: list[dict],
+    dry_run: bool = False,
+) -> dict:
+    """Upsert HCO accounts, HCP contacts, and HCO–HCO affiliations for this org."""
+    from dataverse import DataverseClient, DataverseConfig
+    from integration.dynamic_sync import DynamicSyncEngine
+    from integration.sync_logger import SyncLogger
+
+    dv = DataverseClient(DataverseConfig.from_env())
+    # OneKey client unused for this offline load path
+    engine = DynamicSyncEngine(
+        onekey_client=None,  # type: ignore[arg-type]
+        dataverse_client=dv,
+        sync_logger=SyncLogger(),
+    )
+
+    flattened_hcos = [flatten_hco(r) for r in workplaces.values()]
+    hco_stats, _, _ = engine._sync_hcos(
+        codebase="WUK",
+        dry_run=dry_run,
+        flattened=flattened_hcos,
+    )
+
+    # Hierarchy from managerWorkplaceEid
+    hier_stats = engine._sync_hierarchy(flattened_hcos, dry_run=dry_run)
+
+    # Prefer main activity per individual for contact.parentcustomerid
+    by_individual: dict[str, dict] = {}
+    for rec in hcp_records:
+        activity = rec.get("activity") or {}
+        individual = rec.get("individual") or {}
+        ind_eid = individual.get("individualEid") or activity.get("individualEid")
+        if not ind_eid:
+            continue
+        existing = by_individual.get(ind_eid)
+        if existing is None:
+            by_individual[ind_eid] = rec
+            continue
+        existing_act = existing.get("activity") or {}
+        if activity.get("isMainActivity") and not existing_act.get("isMainActivity"):
+            by_individual[ind_eid] = rec
+
+    composed = list(by_individual.values())
+    hcp_stats = engine._sync_hcps(
+        codebase="WUK",
+        dry_run=dry_run,
+        composed=composed,
+    )
+
+    activity_aff_stats = engine._sync_activity_affiliations(
+        hcp_records,
+        dry_run=dry_run,
+    )
+
+    aff_stats = engine._sync_hco_relations(
+        list(workplaces.values()),
+        dry_run=dry_run,
+    )
+
+    return {
+        "accounts": hco_stats,
+        "hierarchy": hier_stats,
+        "contacts": hcp_stats,
+        "activityAffiliations": activity_aff_stats,
+        "affiliations": aff_stats,
+        "affiliationEdgesPrepared": len(affiliations),
+        "activityRecords": len(hcp_records),
+    }
 
 
 def main() -> int:
@@ -315,6 +461,21 @@ def main() -> int:
             logger.error("Root workplace %s could not be fetched", root_eid)
             return 1
 
+        related_added = 0
+        if args.fetch_related == "all":
+            missing = related_eids_from_workplaces(workplaces) - set(workplaces)
+            logger.info(
+                "Fetching %d related workplaces referenced by relations[]…",
+                len(missing),
+            )
+            related_added = fetch_missing_workplaces(
+                client,
+                workplaces,
+                missing,
+                cod_base,
+                args.fetch_delay,
+            )
+
         root_name = workplace_name(workplaces[root_eid])
         affiliations = collect_w2w_relations(list(workplaces.values()))
 
@@ -325,18 +486,23 @@ def main() -> int:
                 eid,
                 cod_base,
                 args.max_hcp_per_workplace,
+                in_contract_only=args.in_contract_only,
             )
             if batch:
-                logger.info("HCP search %3d/%d %s → %d activities", i, len(workplaces), eid, len(batch))
+                logger.info(
+                    "HCP search %3d/%d %s → %d activities",
+                    i,
+                    len(workplaces),
+                    eid,
+                    len(batch),
+                )
             hcp_records.extend(batch)
             if args.hcp_delay > 0:
                 time.sleep(args.hcp_delay)
 
-    hco_rows, hcp_rows, aff_rows = build_summaries(
+    hco_rows, hcp_rows, aff_rows, activity_rows = build_summaries(
         root_eid, workplaces, affiliations, hcp_records
     )
-
-    unique_individuals = len({r["individualEid"] for r in hcp_rows if r.get("individualEid")})
 
     write_csv(
         out_dir / "hco_summary.csv",
@@ -349,19 +515,30 @@ def main() -> int:
         hcp_rows,
     )
     write_csv(
+        out_dir / "activity_summary.csv",
+        list(activity_rows[0].keys()) if activity_rows else ["activityEid"],
+        activity_rows,
+    )
+    write_csv(
         out_dir / "hco_relations_summary.csv",
         list(aff_rows[0].keys()) if aff_rows else ["ts_externalid"],
         aff_rows,
     )
 
+    unique_individuals = len(
+        {r["individualEid"] for r in hcp_rows if r.get("individualEid")}
+    )
     manifest = {
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "rootWorkplaceEid": root_eid,
         "rootName": root_name,
         "codBase": cod_base,
         "hierarchyLinkCodes": sorted(hier_links),
+        "fetchRelated": args.fetch_related,
+        "inContractOnly": args.in_contract_only,
         "counts": {
             "hcos": len(hco_rows),
+            "relatedHcosFetched": related_added,
             "hcpActivities": len(hcp_rows),
             "uniqueHcps": unique_individuals,
             "hcoHcoAffiliations": len(aff_rows),
@@ -370,35 +547,64 @@ def main() -> int:
         "files": {
             "hco_summary": "hco_summary.csv",
             "hcp_summary": "hcp_summary.csv",
+            "activity_summary": "activity_summary.csv",
             "hco_relations_summary": "hco_relations_summary.csv",
             "full_response": "full_response.json",
         },
+        "dataverseLoad": None,
         "dataverseMappingNotes": {
             "account": "ts_externalid / accountnumber = workplaceEid",
-            "contact": "ts_externalid = individualEid (one per person)",
+            "contact": "ts_externalid = individualEid (one per person; prefers isMainActivity)",
             "contact_parent": "parentcustomerid → account via workplaceEid",
             "ts_affiliation_hco_hco": "ts_externalid = {child} - {parent} - {linkCode}",
-            "ts_affiliation_hcp_hco": "ts_externalid = activityEid (future AFF sync)",
+            "ts_affiliation_hcp_hco": "ts_externalid = activityEid (AFF-* mapping; activity_summary.csv)",
         },
     }
-    (out_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
     full_payload = {
         **manifest,
         "workplaces": list(workplaces.values()),
         "affiliationsNormalized": affiliations,
         "hcpActivities": hcp_records,
     }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     (out_dir / "full_response.json").write_text(
         json.dumps(full_payload, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+    logger.info(
+        "Wrote export package: %d HCOs, %d activities (%d people), %d relations → %s",
+        len(hco_rows),
+        len(hcp_rows),
+        unique_individuals,
+        len(aff_rows),
+        out_dir,
+    )
+
+    load_result = None
+    if args.load_dataverse:
+        logger.info("Loading org package into Dataverse (dry_run=%s)…", args.dry_run_load)
+        try:
+            load_result = load_org_into_dataverse(
+                workplaces,
+                hcp_records,
+                affiliations,
+                dry_run=args.dry_run_load,
+            )
+            logger.info("Dataverse load result: %s", json.dumps(load_result, default=str))
+        except Exception:
+            logger.exception("Dataverse load failed; export files were already saved")
+            raise
+        manifest["dataverseLoad"] = load_result
+        (out_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     logger.info(
-        "Done: %d HCOs, %d HCP activities (%d people), %d relations → %s",
+        "Done: %d HCOs (+%d related), %d HCP activities (%d people), %d relations → %s",
         len(hco_rows),
+        related_added,
         len(hcp_rows),
         unique_individuals,
         len(aff_rows),

@@ -20,6 +20,7 @@ from .sync_logger import SyncLogger, setup_logging
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
+from .activity_affiliation import flatten_activity_for_affiliation
 from onekey.parse import compose_hcp_result, flatten_hcp, flatten_hco
 from dataverse.client import chunked
 
@@ -77,6 +78,8 @@ class DynamicSyncEngine:
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
+        # Cache for contact lookups (individualEid -> contactid)
+        self._contact_cache: dict[str, str] = {}
 
     def validate_before_sync(self) -> ValidationResult:
         """Run all validation checks before starting sync."""
@@ -690,7 +693,7 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (external_id, _, edge), (_, record_id, created) in zip(
+            for (external_id, _, _payload, edge), (_, record_id, created) in zip(
                 batch, bulk_results
             ):
                 if created:
@@ -708,6 +711,142 @@ class DynamicSyncEngine:
                 )
 
             self.sync_logger.log_progress("affiliations", done, len(prepared))
+
+        return result
+
+    def _sync_activity_affiliations(
+        self,
+        activity_records: list[dict],
+        dry_run: bool = False,
+    ) -> dict:
+        """Upsert HCP–HCO Activity rows into ``ts_affiliation`` (AFF-*)."""
+        self.sync_logger.log_phase("HCP-HCO ACTIVITY AFFILIATION SYNC (ts_affiliation)")
+        result = _empty_entity_stats()
+
+        if not activity_records:
+            logger.info("No HCP-HCO activities to sync")
+            return result
+
+        logger.info(
+            "Upserting %d HCP-HCO activity affiliation(s)",
+            len(activity_records),
+        )
+
+        affiliation_key = self.config.require_key_field("ts_affiliation")
+        entity_set = self._affiliation_entity_set()
+
+        flat_rows: list[dict] = []
+        for record in activity_records:
+            flat = flatten_activity_for_affiliation(record)
+            if flat.get("activityEid") and flat.get("individualEid") and flat.get(
+                "workplaceEid"
+            ):
+                flat_rows.append(flat)
+
+        individual_eids = sorted(
+            {row["individualEid"] for row in flat_rows if row.get("individualEid")}
+        )
+        workplace_eids = sorted(
+            {row["workplaceEid"] for row in flat_rows if row.get("workplaceEid")}
+        )
+        if not dry_run:
+            if individual_eids:
+                self._lookup_contacts_bulk(individual_eids)
+            if workplace_eids:
+                self._lookup_accounts_bulk(workplace_eids)
+
+        prepared: list[tuple[str, str, dict, dict]] = []
+
+        for flat in flat_rows:
+            external_id = flat["activityEid"]
+            contact_id = self._contact_cache.get(flat["individualEid"])
+            account_id = self._account_cache.get(flat["workplaceEid"])
+
+            if not contact_id:
+                result["failed"] += 1
+                self.sync_logger.log_relationship_failed(
+                    "ts_affiliation",
+                    external_id,
+                    "contact",
+                    flat["individualEid"],
+                    f"Contact not found for {flat['individualEid']}",
+                )
+                continue
+            if not account_id:
+                result["failed"] += 1
+                self.sync_logger.log_relationship_failed(
+                    "ts_affiliation",
+                    external_id,
+                    "account",
+                    flat["workplaceEid"],
+                    f"Account not found for {flat['workplaceEid']}",
+                )
+                continue
+
+            payload = self.transformer.transform_activity_affiliation(
+                flat,
+                contact_id=contact_id,
+                account_id=account_id,
+            )
+            if not payload.get(affiliation_key):
+                result["failed"] += 1
+                self.sync_logger.log_record_error(
+                    "ts_affiliation",
+                    external_id,
+                    "transform",
+                    f"Missing key field {affiliation_key}",
+                )
+                continue
+
+            prepared.append((external_id, affiliation_key, payload, flat))
+
+        if dry_run:
+            result["processed"] = len(prepared)
+            logger.info(
+                "DRY RUN: would upsert %d HCP-HCO activity affiliations",
+                len(prepared),
+            )
+            return result
+
+        if not prepared:
+            return result
+
+        done = 0
+        for batch in chunked(prepared, self.bulk_batch_size):
+            payloads = [item[2] for item in batch]
+            try:
+                bulk_results = self.dataverse.bulk_upsert_by_field(
+                    entity_set,
+                    affiliation_key,
+                    payloads,
+                    batch_size=self.bulk_batch_size,
+                )
+            except Exception as e:
+                result["failed"] += len(batch)
+                for external_id, *_ in batch:
+                    self.sync_logger.log_record_error(
+                        "ts_affiliation", external_id, "bulk_upsert", str(e)
+                    )
+                raise
+
+            for (external_id, _, _payload, flat), (_, record_id, created) in zip(
+                batch, bulk_results
+            ):
+                if created:
+                    result["created"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                done += 1
+                self.sync_logger.log_record_success(
+                    "ts_affiliation",
+                    external_id,
+                    record_id,
+                    "create" if created else "update",
+                    f"{flat.get('individualEid')} → {flat.get('workplaceEid')}",
+                )
+
+            self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
 
         return result
 
@@ -900,6 +1039,8 @@ class DynamicSyncEngine:
             for (individual_eid, _, _, hcp), (_, contact_id, created) in zip(
                 batch, bulk_results
             ):
+                if contact_id:
+                    self._contact_cache[str(individual_eid)] = contact_id
                 if created:
                     result["created"] += 1
                 else:
@@ -1034,6 +1175,53 @@ class DynamicSyncEngine:
             )
 
         return result
+
+    def _lookup_contacts_bulk(self, individual_eids) -> dict[str, str]:
+        """Resolve many individual EIDs to contact GUIDs; update the cache."""
+        field_name = self.config.require_key_field("contact")
+
+        needed = [
+            str(eid)
+            for eid in individual_eids
+            if eid and str(eid) not in self._contact_cache
+        ]
+        if not needed:
+            return {
+                str(eid): self._contact_cache[str(eid)]
+                for eid in individual_eids
+                if eid and str(eid) in self._contact_cache
+            }
+
+        find_many = getattr(self.dataverse, "find_many_by_field", None)
+        try:
+            if find_many:
+                rows = find_many(
+                    "contacts",
+                    field_name,
+                    needed,
+                    select=[field_name, "contactid"],
+                )
+                for match_value, row in rows.items():
+                    contact_id = row.get("contactid")
+                    if contact_id:
+                        self._contact_cache[str(match_value)] = contact_id
+            else:
+                for eid in needed:
+                    record = self.dataverse.find_one(
+                        "contacts",
+                        filter=f"{field_name} eq '{eid}'",
+                        select=[field_name, "contactid"],
+                    )
+                    if record and record.get("contactid"):
+                        self._contact_cache[eid] = record["contactid"]
+        except Exception as e:
+            logger.warning("Failed bulk contact lookup: %s", e)
+
+        return {
+            str(eid): self._contact_cache[str(eid)]
+            for eid in individual_eids
+            if eid and str(eid) in self._contact_cache
+        }
 
     def _lookup_account(self, workplace_eid: str) -> str | None:
         """Lookup account ID from Dataverse by workplace EID."""

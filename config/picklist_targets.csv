@@ -10,4 +10,4 @@ structuretype,global,ts_hcostructuretype,,,HCO structure type (account.ts_struct
 title,local,,contact,ts_title,Contact title local choice
 hcptype,global,ts_hcptype,,,Contact HCP type (contact.ts_type → global ts_hcptype)
 language,global,ts_preferredlanguage,,,Contact preferred language (contact.ts_preferredlanguage)
-linkcode,local,,ts_affiliation,ts_linkcode,HCO-HCO workplace relation link type (AUT/CGR/HIE/…); entity_mapping W2W-005 decode:linkcode
+linkcode,global,ts_affiliationlinktype,,,HCO-HCO link type global choice (ts_affiliation.ts_linktype); W2W-005 decode:linkcode

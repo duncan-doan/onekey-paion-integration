@@ -882,22 +882,23 @@ VAL-ROL-453,role,XP,Pharmacy Technician,126870453,Pharmacy Technician,Pharmacy T
 VAL-ROL-454,role,YT,Psychosexual Therapist,126870454,Psychosexual Therapist,Psychosexual Therapist
 VAL-ROL-455,role,Z1,Advanced Clinical Practitioner,126870455,Advanced Clinical Practitioner,Advanced Clinical Practitioner
 VAL-ROL-456,role,ZZ,Client Specific Role,126870456,Client Specific Role,Client Specific Role
-# HCO-HCO Relation Link Code (workplace.relations[*].linkCode -> ts_affiliation.ts_linkcode),,,,,,
-# source_value = child/non-parent label (linkCodeLabel when isParent=false); notes = parent-side label,,,,,,
-VAL-LNK-001,linkcode,AUT,Affiliated auth,126873001,Affiliated auth,Parent label: Has affiliated
-VAL-LNK-002,linkcode,CGR,Is member of group,126873002,Is member of group,Parent label: Is head of
-VAL-LNK-003,linkcode,GRP,Is secondary address of,126873003,Is secondary address of,Parent label: Is main office of
-VAL-LNK-004,linkcode,HIE,Is managed by,126873004,Is managed by,Parent label: Manages
-VAL-LNK-005,linkcode,HSP,Within,126873005,Within,Parent label: Has within
-VAL-LNK-006,linkcode,MAI,Has for main workplace,126873006,Has for main workplace,Parent label: Is main workplace of
-VAL-LNK-007,linkcode,TRU,Has affiliated,126873007,Has affiliated,Parent label: Affiliated trust
+# HCO-HCO Relation Link Code (workplace.relations[*].linkCode -> ts_affiliation.ts_linktype),,,,,,
+# Values align with existing local option 126870001 (was placeholder "test"); insert 002-007 via picklist sync.,,,,,,
+# source_value = child/non-parent label; notes = parent-side label,,,,,,
+VAL-LNK-001,linkcode,AUT,Affiliated auth,126870001,Affiliated auth,Parent label: Has affiliated; updates existing option 126870001
+VAL-LNK-002,linkcode,CGR,Is member of group,126870002,Is member of group,Parent label: Is head of
+VAL-LNK-003,linkcode,GRP,Is secondary address of,126870003,Is secondary address of,Parent label: Is main office of
+VAL-LNK-004,linkcode,HIE,Is managed by,126870004,Is managed by,Parent label: Manages
+VAL-LNK-005,linkcode,HSP,Within,126870005,Within,Parent label: Has within
+VAL-LNK-006,linkcode,MAI,Has for main workplace,126870006,Has for main workplace,Parent label: Is main workplace of
+VAL-LNK-007,linkcode,TRU,Has affiliated,126870007,Has affiliated,Parent label: Affiliated trust
 # Affiliation Working Status Mapping,,,,,,
-VAL-WST-001,workingstatus,C,Full Time,1,Full Time,
-VAL-WST-002,workingstatus,D,Home,2,Home,
-VAL-WST-003,workingstatus,P,Part Time,3,Part Time,
-VAL-WST-004,workingstatus,W,Regular Substitute,4,Regular Substitute,
-VAL-WST-005,workingstatus,T,Market Access,5,Market Access,
-VAL-WST-006,workingstatus,N,Unknown Activity,6,Unknown Activity,
+VAL-WST-001,workingstatus,C,Full Time,126870001,Full Time,Align with ts_affiliation.ts_workingstatus
+VAL-WST-002,workingstatus,D,Home,126870002,Home,
+VAL-WST-003,workingstatus,P,Part Time,126870003,Part Time,
+VAL-WST-004,workingstatus,W,Regular Substitute,126870004,Regular Substitute,
+VAL-WST-005,workingstatus,T,Market Access,126870005,Market Access,
+VAL-WST-006,workingstatus,N,Unknown Activity,126870006,Unknown Activity,
 # HCP Professional Type Code (individual.typeCode -> typecode decode),,,,,,
 VAL-TYP-001,hcptype,A,Administrator,126870001,Administrator,Administrator
 VAL-TYP-002,hcptype,C,Researcher/Scientist,126870002,Researcher/Scientist,Researcher/Scientist

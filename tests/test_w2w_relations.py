@@ -103,9 +103,9 @@ def test_transform_w2w_sets_child_and_parent_binds():
         parent_account_id="parent-guid",
     )
     assert payload["ts_externalid"] == edge["ts_externalid"]
-    assert payload["ts_fromid_account@odata.bind"] == "/accounts(child-guid)"
-    assert payload["ts_toid_account@odata.bind"] == "/accounts(parent-guid)"
-    assert payload["ts_linkcode"] == engine.config.get_value("linkcode", "AUT")
+    assert payload["ts_FromID_account@odata.bind"] == "/accounts(child-guid)"
+    assert payload["ts_ToID@odata.bind"] == "/accounts(parent-guid)"
+    assert payload["ts_linktype"] == engine.config.get_value("linkcode", "AUT")
     assert payload["ts_isprimary"] is False
 
 

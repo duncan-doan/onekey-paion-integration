@@ -231,9 +231,127 @@ class TransformEngine:
                 ]
 
         if child_account_id:
-            payload["ts_fromid_account@odata.bind"] = f"/accounts({child_account_id})"
+            payload["ts_FromID_account@odata.bind"] = f"/accounts({child_account_id})"
         if parent_account_id:
-            payload["ts_toid_account@odata.bind"] = f"/accounts({parent_account_id})"
+            payload["ts_ToID@odata.bind"] = f"/accounts({parent_account_id})"
+
+        if not payload.get("ts_name"):
+            payload["ts_name"] = (
+                source.get("ts_externalid")
+                or f"{source.get('childWorkplaceEid')} → {source.get('parentWorkplaceEid')}"
+            )
+
+        return {k: v for k, v in payload.items() if v is not None}
+
+    def transform_activity_affiliation(
+        self,
+        source: dict,
+        contact_id: str = None,
+        account_id: str = None,
+    ) -> dict:
+        """Transform one HCP–HCO Activity row to ``ts_affiliation`` (AFF-*).
+
+        ``source`` should be output of
+        :func:`integration.activity_affiliation.flatten_activity_for_affiliation`
+        (or equivalent flat keys).
+        """
+        external_id = source.get("activityEid")
+        self.begin_record("ts_affiliation", external_id)
+
+        payload: dict[str, Any] = {}
+        key_parts: list[tuple[str, str]] = []
+        role_option_values: list[str] = []
+
+        mappings = [
+            fm
+            for fm in self.config.get_field_mappings("ts_affiliation")
+            if fm.mapping_id.startswith("AFF-")
+        ]
+
+        for fm in mappings:
+            if not fm.target_field:
+                continue
+            if fm.is_lookup:
+                continue
+
+            value = self._extract_value(source, fm.source_field)
+            transformed = self._apply_transform(value, fm, source)
+            if transformed is None:
+                continue
+
+            if fm.target_field_type == "boolean":
+                transformed = self._normalize_boolean(transformed)
+
+            if fm.is_key:
+                if (fm.transform_rule or "").startswith("append:"):
+                    if transformed:
+                        key_parts.append(("append", str(transformed)))
+                else:
+                    key_parts.append(("base", str(transformed)))
+                continue
+
+            # Multi-select roles: accumulate option values, join at end
+            if fm.target_field == "ts_role":
+                role_option_values.append(str(transformed))
+                continue
+
+            if fm.target_field == "ts_compoundkey":
+                if (fm.transform_rule or "").startswith("append:"):
+                    existing = payload.get("ts_compoundkey")
+                    if existing and transformed:
+                        payload["ts_compoundkey"] = f"{existing} - {transformed}"
+                    elif transformed:
+                        payload["ts_compoundkey"] = str(transformed)
+                else:
+                    payload["ts_compoundkey"] = str(transformed)
+                continue
+
+            if fm.max_length and isinstance(transformed, str):
+                transformed = transformed[: fm.max_length]
+
+            # Picklist integers
+            if fm.target_field_type in ("picklist", "state") and isinstance(
+                transformed, str
+            ):
+                if transformed.isdigit() or (
+                    transformed.startswith("-") and transformed[1:].isdigit()
+                ):
+                    transformed = int(transformed)
+
+            payload[fm.target_field] = transformed
+
+        if key_parts:
+            base = next((v for kind, v in key_parts if kind == "base"), None)
+            appendages = [v for kind, v in key_parts if kind == "append"]
+            if base and appendages:
+                key = base
+                for part in appendages:
+                    key = f"{key} - {part}"
+                payload[self.config.require_key_field("ts_affiliation")] = key
+            elif base:
+                payload[self.config.require_key_field("ts_affiliation")] = base
+            elif external_id:
+                payload[self.config.require_key_field("ts_affiliation")] = external_id
+        elif external_id:
+            payload[self.config.require_key_field("ts_affiliation")] = external_id
+
+        if role_option_values:
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            ordered: list[str] = []
+            for opt in role_option_values:
+                if opt not in seen:
+                    seen.add(opt)
+                    ordered.append(opt)
+            payload["ts_role"] = ",".join(ordered)
+
+        if contact_id:
+            payload["ts_FromID_contact@odata.bind"] = f"/contacts({contact_id})"
+        if account_id:
+            payload["ts_ToID@odata.bind"] = f"/accounts({account_id})"
+
+        if not payload.get("ts_name"):
+            payload["ts_name"] = source.get("ts_name") or external_id
 
         return {k: v for k, v in payload.items() if v is not None}
 
