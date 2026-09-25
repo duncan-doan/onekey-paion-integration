@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "onekey-paion-integration"
 version = "0.1.0"
 description = "Load IQVIA OneKey HCP/HCO reference data into Dynamics 365 Dataverse"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = ["requests>=2.28"]
 
 [project.optional-dependencies]
