@@ -339,6 +339,58 @@ def test_bulk_upsert_falls_back_to_single_on_create_failure():
     assert results == [("W1", guid, True)]
 
 
+def test_bulk_upsert_customeraddress_updates_one_by_one():
+    """customeraddress does not support UpdateMultiple — skip it entirely."""
+    client = make_client([
+        FakeResponse(200, {
+            "value": [
+                {"customeraddressid": "addr-1", "ts_externalid": "W1 - A1"},
+                {"customeraddressid": "addr-2", "ts_externalid": "W2 - A2"},
+            ]
+        }),
+        FakeResponse(204),  # PATCH addr-1
+        FakeResponse(204),  # PATCH addr-2
+    ])
+    results = client.bulk_upsert_by_field(
+        "customeraddresses",
+        "ts_externalid",
+        [
+            {"ts_externalid": "W1 - A1", "line1": "1 Main"},
+            {"ts_externalid": "W2 - A2", "line1": "2 High"},
+        ],
+        batch_size=100,
+        fallback_on_error=False,
+    )
+    assert results == [
+        ("W1 - A1", "addr-1", False),
+        ("W2 - A2", "addr-2", False),
+    ]
+    urls = [c["url"] for c in client._session.calls]
+    assert not any("UpdateMultiple" in u for u in urls)
+    assert client._session.calls[1]["method"] == "PATCH"
+    assert client._session.calls[2]["method"] == "PATCH"
+
+
+def test_bulk_upsert_ts_affiliation_creates_one_by_one():
+    """ts_affiliation rejects CreateMultiple — create via upsert_by_field."""
+    guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # lookup existing
+        FakeResponse(200, {"value": []}),  # upsert find
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({guid})"}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [{"ts_externalid": "W1 - W2 - AUT", "ts_name": "link"}],
+        batch_size=100,
+        fallback_on_error=False,
+    )
+    assert results == [("W1 - W2 - AUT", guid, True)]
+    urls = [c["url"] for c in client._session.calls]
+    assert not any("CreateMultiple" in u for u in urls)
+
+
 def test_odata_quotes_are_escaped():
     # O'Brien would otherwise terminate the filter literal early.
     assert escape_odata("O'Brien") == "O''Brien"

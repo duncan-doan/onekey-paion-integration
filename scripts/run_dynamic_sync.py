@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Run phased OneKey → Dataverse migration (full or delta).
 
-Phase order:
+Canonical phase order (contracted refreshMyOnekey IDs only):
   0. Validate + upsert picklists from value_mapping.csv
-  1. HCO accounts (workplaceEid → account key from entity_mapping.csv)
-  2. customeraddress rows ({workplaceEid} - {addressEid})
+  1. HCO accounts (workplaceEid → account key)
+  2. customeraddress ({workplaceEid} - {addressEid}, parentid=account GUID)
   3. HCO parentaccountid hierarchy (managerWorkplaceEid)
-  3b. HCO–HCO ts_affiliation (workplace.relations[], deduped)
-  4. HCP contacts + parentcustomerid
+  4. HCO–HCO ts_affiliation (workplace.relations[], both ends contracted)
+  5. HCP contacts + parentcustomerid (INDIVIDUAL + main ACTIVITY)
+  6. HCP–HCO ts_affiliation (all ACTIVITY packets, contracted ends)
 
 Usage:
     python scripts/run_dynamic_sync.py --validate-only
     python scripts/run_dynamic_sync.py --dry-run --codbase WUK --max-records 10
-    python scripts/run_dynamic_sync.py --codbase WUK --max-records 100
+    python scripts/run_dynamic_sync.py --codbase WUK
     python scripts/run_dynamic_sync.py --delta --date-from 2026-09-07 --date-to 2026-09-11
-    python scripts/run_dynamic_sync.py --codbase WUK --skip-address --skip-hierarchy
+    python scripts/run_dynamic_sync.py --affiliations-only --codbase WUK
     python scripts/run_dynamic_sync.py --hco-only --codbase WUK
 """
 
@@ -98,14 +99,31 @@ def parse_args():
         help="Skip HCO–HCO ts_affiliation sync (workplace.relations[])",
     )
     parser.add_argument(
+        "--skip-activity-affiliations",
+        action="store_true",
+        help="Skip HCP–HCO ts_affiliation sync (ACTIVITY packets)",
+    )
+    parser.add_argument(
         "--skip-picklists",
         action="store_true",
         help="Skip Phase 0 picklist upsert from value_mapping.csv",
     )
     parser.add_argument(
+        "--affiliations-only",
+        action="store_true",
+        help=(
+            "Only upsert ts_affiliation from contracted refreshMyOnekey IDs "
+            "(HCO-HCO relations + HCP-HCO activities); no account/contact writes"
+        ),
+    )
+    parser.add_argument(
         "--hco-only",
         action="store_true",
-        help="Sync only HCO/accounts (+ address/hierarchy unless skipped)",
+        help=(
+            "Sync HCO path only (picklists, accounts, customeraddress, "
+            "hierarchy, relations); skip HCP. Address/hierarchy/relations/"
+            "picklists still run unless --skip-* is passed"
+        ),
     )
     parser.add_argument(
         "--hcp-only",
@@ -226,6 +244,7 @@ def main():
     sync_addresses = not args.skip_address
     sync_hierarchy = not args.skip_hierarchy
     sync_hco_relations = not args.skip_relations
+    sync_activity_affiliations = not args.skip_activity_affiliations
     sync_picklists = not args.skip_picklists
 
     config_dir = Path(args.config_dir) if args.config_dir else None
@@ -298,36 +317,53 @@ def main():
                 sync_addresses=sync_addresses,
                 sync_hierarchy=sync_hierarchy,
                 sync_hco_relations=sync_hco_relations,
+                sync_activity_affiliations=sync_activity_affiliations,
                 sync_picklists=sync_picklists,
             )
             if result.get("success") and not args.dry_run:
                 for cb in codebases:
                     save_watermark(args.watermark_dir, cb, date_to)
         else:
-            logger.info("Starting full sync for: %s", ", ".join(codebases))
-            result = engine.sync_full(
-                codebases=codebases,
-                max_records=args.max_records,
-                dry_run=args.dry_run,
-                hco_only=args.hco_only,
-                hcp_only=args.hcp_only,
-                sync_addresses=sync_addresses,
-                sync_hierarchy=sync_hierarchy,
-                sync_hco_relations=sync_hco_relations,
-                sync_picklists=sync_picklists,
-            )
+            if args.affiliations_only:
+                logger.info(
+                    "Starting affiliations-only sync (contracted IDs) for: %s",
+                    ", ".join(codebases),
+                )
+                result = engine.sync_affiliations_only(
+                    codebases=codebases,
+                    max_records=args.max_records,
+                    dry_run=args.dry_run,
+                )
+            else:
+                logger.info("Starting full sync for: %s", ", ".join(codebases))
+                result = engine.sync_full(
+                    codebases=codebases,
+                    max_records=args.max_records,
+                    dry_run=args.dry_run,
+                    hco_only=args.hco_only,
+                    hcp_only=args.hcp_only,
+                    sync_addresses=sync_addresses,
+                    sync_hierarchy=sync_hierarchy,
+                    sync_hco_relations=sync_hco_relations,
+                    sync_activity_affiliations=sync_activity_affiliations,
+                    sync_picklists=sync_picklists,
+                )
 
         print("\n" + "=" * 60)
         print("SYNC SUMMARY")
         print("=" * 60)
         print(f"Success: {result.get('success', False)}")
         print(f"Codebases: {', '.join(codebases)}")
-        print(
-            f"Phases: picklists={'on' if sync_picklists else 'off'} "
-            f"address={'on' if sync_addresses else 'off'} "
-            f"hierarchy={'on' if sync_hierarchy else 'off'} "
-            f"relations={'on' if sync_hco_relations else 'off'}"
-        )
+        if result.get("mode") == "affiliations_only":
+            print("Mode: affiliations-only (contracted IDs)")
+        else:
+            print(
+                f"Phases: picklists={'on' if sync_picklists else 'off'} "
+                f"address={'on' if sync_addresses else 'off'} "
+                f"hierarchy={'on' if sync_hierarchy else 'off'} "
+                f"hco_relations={'on' if sync_hco_relations else 'off'} "
+                f"activity_aff={'on' if sync_activity_affiliations else 'off'}"
+            )
 
         if result.get("picklists"):
             print(f"\nPicklists: {len(result['picklists'])} type(s) processed")
@@ -346,6 +382,10 @@ def main():
             print(f"  Failed:          {hier.get('failed', 0)}")
 
         _print_entity("Affiliations (HCO-HCO)", result.get("affiliations"))
+        _print_entity(
+            "Affiliations (HCP-HCO activity)",
+            result.get("activity_affiliations"),
+        )
 
         _print_entity("Contacts", result.get("contacts"))
 

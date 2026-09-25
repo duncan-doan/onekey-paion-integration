@@ -107,6 +107,36 @@ def dedupe_w2w_relations(edges: list[dict]) -> list[dict]:
     return list(best.values())
 
 
-def collect_w2w_relations(raw_workplaces: list[dict]) -> list[dict]:
-    """Explode and dedupe workplace-to-workplace links."""
-    return dedupe_w2w_relations(explode_w2w_relations(raw_workplaces))
+def filter_w2w_to_contracted(
+    edges: list[dict],
+    allowed_workplace_eids: set[str],
+) -> list[dict]:
+    """Drop edges where either side is outside the contracted population."""
+    kept = []
+    for edge in edges:
+        child = edge.get("childWorkplaceEid")
+        parent = edge.get("parentWorkplaceEid")
+        if (
+            child
+            and parent
+            and child in allowed_workplace_eids
+            and parent in allowed_workplace_eids
+        ):
+            kept.append(edge)
+    return kept
+
+
+def collect_w2w_relations(
+    raw_workplaces: list[dict],
+    allowed_workplace_eids: set[str] | None = None,
+) -> list[dict]:
+    """Explode and dedupe workplace-to-workplace links.
+
+    When ``allowed_workplace_eids`` is set (IDs from ``refreshMyOnekey``),
+    edges that reference a workplace outside the population are dropped —
+    those related IDs must not be fetched via search / ``get_by_id``.
+    """
+    edges = dedupe_w2w_relations(explode_w2w_relations(raw_workplaces))
+    if allowed_workplace_eids is None:
+        return edges
+    return filter_w2w_to_contracted(edges, allowed_workplace_eids)

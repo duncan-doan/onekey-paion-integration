@@ -28,6 +28,10 @@ _ENTITY_META = {
     "customeraddresses": ("customeraddress", "customeraddressid"),
 }
 
+# Tables that reject bulk multi-ops in this org — write row-by-row instead.
+_NO_UPDATE_MULTIPLE = frozenset({"customeraddresses", "ts_affiliations"})
+_NO_CREATE_MULTIPLE = frozenset({"ts_affiliations"})
+
 
 def escape_odata(value):
     """Escape a string for an OData filter literal.
@@ -500,7 +504,22 @@ class DataverseClient:
             else:
                 creates.append((index, match_value, payload))
 
+        def _create_one(index, match_value, payload):
+            record_id, created = self.upsert_by_field(
+                entity_set, match_field, match_value, payload
+            )
+            results[index] = (match_value, record_id, created)
+
         def _create_batch(batch):
+            if entity_set in _NO_CREATE_MULTIPLE:
+                logger.info(
+                    "Creating %d %s one-by-one (CreateMultiple not supported)",
+                    len(batch), entity_set,
+                )
+                for index, match_value, payload in batch:
+                    _create_one(index, match_value, payload)
+                return
+
             payloads = [payload for _, _, payload in batch]
             try:
                 ids = self.create_multiple(entity_set, payloads)
@@ -514,12 +533,26 @@ class DataverseClient:
                     len(batch), entity_set,
                 )
                 for index, match_value, payload in batch:
-                    record_id, created = self.upsert_by_field(
-                        entity_set, match_field, match_value, payload
-                    )
-                    results[index] = (match_value, record_id, created)
+                    _create_one(index, match_value, payload)
+
+        def _update_one(index, match_value, payload):
+            record_id = payload[primary_id]
+            update_data = {
+                k: v for k, v in payload.items() if k != primary_id
+            }
+            self.update(entity_set, record_id, update_data)
+            results[index] = (match_value, record_id, False)
 
         def _update_batch(batch):
+            if entity_set in _NO_UPDATE_MULTIPLE:
+                logger.info(
+                    "Updating %d %s one-by-one (UpdateMultiple not supported)",
+                    len(batch), entity_set,
+                )
+                for index, match_value, payload in batch:
+                    _update_one(index, match_value, payload)
+                return
+
             payloads = [payload for _, _, payload in batch]
             try:
                 self.update_multiple(entity_set, payloads)
@@ -533,12 +566,7 @@ class DataverseClient:
                     len(batch), entity_set,
                 )
                 for index, match_value, payload in batch:
-                    record_id = payload[primary_id]
-                    update_data = {
-                        k: v for k, v in payload.items() if k != primary_id
-                    }
-                    self.update(entity_set, record_id, update_data)
-                    results[index] = (match_value, record_id, False)
+                    _update_one(index, match_value, payload)
 
         for batch in chunked(creates, batch_size):
             _create_batch(batch)

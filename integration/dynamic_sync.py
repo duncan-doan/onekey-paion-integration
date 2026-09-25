@@ -17,6 +17,7 @@ from .dynamic_mapping import load_mapping_config, MappingConfig
 from .transform import TransformEngine
 from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, setup_logging
+from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
@@ -52,9 +53,19 @@ def _empty_hierarchy_stats() -> dict:
 class DynamicSyncEngine:
     """Orchestrates OneKey to Dataverse synchronization.
 
-    Phase order (full and delta):
-      0 picklists → 1 HCO accounts → 2 customeraddresses →
-      3 parentaccountid hierarchy → 4 HCP contacts
+    Canonical phase order (full and delta) — contracted ``refreshMyOnekey``
+    IDs only (no search enrichment):
+
+      0. Picklists (value_mapping → Dataverse choices)
+      1. HCO accounts (WORKPLACE → account)
+      2. customeraddress (workplaceAddresses → parentid=account GUID)
+      3. HCO hierarchy (managerWorkplaceEid → parentaccountid)
+      4. HCO–HCO affiliations (workplace.relations[] → ts_affiliation)
+      5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + parentcustomerid)
+      6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation)
+
+    Bulk write notes: ``customeraddress`` / ``ts_affiliation`` use per-row
+    create/update (no CreateMultiple/UpdateMultiple) in this org.
     """
 
     def __init__(
@@ -78,6 +89,9 @@ class DynamicSyncEngine:
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
+        # Contracted workplace EIDs from the latest refreshMyOnekey extract
+        self._contracted_workplace_eids: set[str] = set()
+        self._contracted_individual_eids: set[str] = set()
         # Cache for contact lookups (individualEid -> contactid)
         self._contact_cache: dict[str, str] = {}
 
@@ -120,13 +134,14 @@ class DynamicSyncEngine:
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
         sync_hco_relations: bool = True,
+        sync_activity_affiliations: bool = True,
         sync_picklists: bool = True,
     ) -> dict:
-        """Run full migration: picklists → HCO → address → hierarchy → W2W → HCP.
+        """Run full migration in canonical phase order (see class docstring).
 
         Accounts are upserted without parent binds; hierarchy is Phase 3.
-        HCO–HCO ``workplace.relations[]`` load into ``ts_affiliation`` (deduped).
         Addresses use ``customeraddress`` only (never account/contact address1_*).
+        Both HCO–HCO and HCP–HCO land in ``ts_affiliation``.
         """
         if hco_only and hcp_only:
             raise ValueError("hco_only and hcp_only cannot both be True")
@@ -143,11 +158,13 @@ class DynamicSyncEngine:
         results = {
             "success": True,
             "codebases": codebases,
+            "mode": "full",
             "picklists": [],
             "accounts": _empty_entity_stats(),
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
             "affiliations": _empty_entity_stats(),
+            "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "picklist_gaps": 0,
             "picklist_gap_report": None,
@@ -176,6 +193,8 @@ class DynamicSyncEngine:
                     )
                     self._merge_entity(results["accounts"], hco_result)
 
+                    contracted = self._contracted_workplace_eids
+
                     if sync_addresses:
                         addr_result = self._sync_addresses(
                             flattened_hcos, dry_run=dry_run
@@ -184,21 +203,39 @@ class DynamicSyncEngine:
 
                     if sync_hierarchy:
                         hier_result = self._sync_hierarchy(
-                            flattened_hcos, dry_run=dry_run
+                            flattened_hcos,
+                            dry_run=dry_run,
+                            allowed_workplace_eids=contracted,
                         )
                         self._merge_hierarchy(results["hierarchy"], hier_result)
 
                     if sync_hco_relations:
                         aff_result = self._sync_hco_relations(
-                            raw_workplaces, dry_run=dry_run
+                            raw_workplaces,
+                            dry_run=dry_run,
+                            allowed_workplace_eids=contracted,
                         )
                         self._merge_entity(results["affiliations"], aff_result)
 
                 if not hco_only:
+                    composed, activity_packets = self._collect_population_hcps(
+                        codebase, max_records=max_records
+                    )
                     hcp_result = self._sync_hcps(
-                        codebase, max_records=max_records, dry_run=dry_run
+                        codebase,
+                        max_records=max_records,
+                        dry_run=dry_run,
+                        composed=composed,
                     )
                     self._merge_entity(results["contacts"], hcp_result)
+
+                    if sync_activity_affiliations:
+                        act_result = self._sync_activity_affiliations(
+                            activity_packets, dry_run=dry_run
+                        )
+                        self._merge_entity(
+                            results["activity_affiliations"], act_result
+                        )
 
             except Exception as e:
                 logger.exception("Error syncing codebase %s", codebase)
@@ -212,6 +249,131 @@ class DynamicSyncEngine:
         self.sync_logger.end_sync(success=results["success"])
         return results
 
+    def sync_affiliations_only(
+        self,
+        codebases: list[str],
+        max_records: int = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Upsert only ``ts_affiliation`` rows from contracted population IDs.
+
+        Walks ``refreshMyOnekey`` once per codebase, builds workplace/individual
+        allowlists, looks up existing Dataverse accounts/contacts (no account or
+        contact upsert), then writes:
+
+        - HCO–HCO from ``workplace.relations[]`` (both ends contracted)
+        - HCP–HCO from ACTIVITY packets (individual + workplace contracted)
+        """
+        self.transformer.picklist_gaps.clear()
+        self.sync_logger.start_sync("affiliations_only", codebases)
+
+        validation = self.validate_before_sync()
+        if not validation.is_valid:
+            logger.error("Pre-sync validation failed. Aborting sync.")
+            self.sync_logger.end_sync(success=False)
+            return {"success": False, "validation": validation.summary()}
+
+        results = {
+            "success": True,
+            "codebases": codebases,
+            "mode": "affiliations_only",
+            "affiliations": _empty_entity_stats(),
+            "activity_affiliations": _empty_entity_stats(),
+            "picklist_gaps": 0,
+            "picklist_gap_report": None,
+            "errors": [],
+        }
+
+        for codebase in codebases:
+            self.sync_logger.log_phase(f"AFFILIATIONS ONLY: {codebase}")
+            try:
+                workplaces, individuals, activities = self._collect_population_packets(
+                    codebase, max_records=max_records
+                )
+                contracted_wp = {
+                    eid
+                    for eid in (workplace_eid_from_record(r) for r in workplaces)
+                    if eid
+                }
+                contracted_ind = {
+                    eid
+                    for eid in (individual_eid_from_record(r) for r in individuals)
+                    if eid
+                }
+                self._contracted_workplace_eids |= contracted_wp
+                self._contracted_individual_eids |= contracted_ind
+
+                logger.info(
+                    "Contracted allowlists for %s: %d workplaces, %d individuals, "
+                    "%d activity packets",
+                    codebase,
+                    len(contracted_wp),
+                    len(contracted_ind),
+                    len(activities),
+                )
+
+                if not dry_run and contracted_wp:
+                    self._lookup_accounts_bulk(sorted(contracted_wp))
+                if not dry_run and contracted_ind:
+                    self._lookup_contacts_bulk(sorted(contracted_ind))
+
+                hco_aff = self._sync_hco_relations(
+                    workplaces,
+                    dry_run=dry_run,
+                    allowed_workplace_eids=contracted_wp,
+                )
+                self._merge_entity(results["affiliations"], hco_aff)
+
+                act_aff = self._sync_activity_affiliations(
+                    activities, dry_run=dry_run
+                )
+                self._merge_entity(results["activity_affiliations"], act_aff)
+            except Exception as e:
+                logger.exception("Error syncing affiliations for %s", codebase)
+                results["errors"].append(f"{codebase}: {e}")
+                results["success"] = False
+
+        gap_path = self.transformer.picklist_gaps.write_report()
+        results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
+        results["picklist_gap_report"] = str(gap_path) if gap_path else None
+
+        self.sync_logger.end_sync(success=results["success"])
+        return results
+
+    def _collect_population_packets(
+        self,
+        codebase: str,
+        max_records: int = None,
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        """Return (workplaces, individuals, activities) from refreshMyOnekey."""
+        workplaces: list[dict] = []
+        individuals: list[dict] = []
+        activities: list[dict] = []
+
+        logger.info(
+            "Walking refreshMyOnekey population for %s (affiliations allowlist)...",
+            codebase,
+        )
+        for record in self.onekey.iter_population(
+            cod_base=codebase, max_records=max_records
+        ):
+            entity_type = (record.get("entityType") or "").upper()
+            if entity_type == "WORKPLACE":
+                workplaces.append(record)
+            elif entity_type == "INDIVIDUAL":
+                individuals.append(record)
+            elif entity_type == "ACTIVITY":
+                activities.append(record)
+
+        logger.info(
+            "Population %s: %d workplaces, %d individuals, %d activities",
+            codebase,
+            len(workplaces),
+            len(individuals),
+            len(activities),
+        )
+        return workplaces, individuals, activities
+
     def sync_delta(
         self,
         codebases: list[str],
@@ -221,9 +383,10 @@ class DynamicSyncEngine:
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
         sync_hco_relations: bool = True,
+        sync_activity_affiliations: bool = True,
         sync_picklists: bool = True,
     ) -> dict:
-        """Run CDC delta with the same phase order as full sync."""
+        """Run CDC delta with the same canonical phase order as full sync."""
         self.transformer.picklist_gaps.clear()
         self.sync_logger.start_sync("delta", codebases, date_from, date_to)
 
@@ -236,6 +399,7 @@ class DynamicSyncEngine:
         results = {
             "success": True,
             "codebases": codebases,
+            "mode": "delta",
             "date_from": date_from,
             "date_to": date_to,
             "picklists": [],
@@ -243,6 +407,7 @@ class DynamicSyncEngine:
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
             "affiliations": _empty_entity_stats(),
+            "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
             "picklist_gaps": 0,
@@ -271,12 +436,17 @@ class DynamicSyncEngine:
                     sync_addresses=sync_addresses,
                     sync_hierarchy=sync_hierarchy,
                     sync_hco_relations=sync_hco_relations,
+                    sync_activity_affiliations=sync_activity_affiliations,
                 )
                 self._merge_entity(results["accounts"], delta_result["accounts"])
                 self._merge_entity(results["addresses"], delta_result["addresses"])
                 self._merge_hierarchy(results["hierarchy"], delta_result["hierarchy"])
                 self._merge_entity(
                     results["affiliations"], delta_result["affiliations"]
+                )
+                self._merge_entity(
+                    results["activity_affiliations"],
+                    delta_result.get("activity_affiliations") or _empty_entity_stats(),
                 )
                 self._merge_entity(results["contacts"], delta_result["contacts"])
                 for code in ["I", "U", "R"]:
@@ -326,15 +496,40 @@ class DynamicSyncEngine:
 
         if flattened is None:
             hcos = []
-            logger.info("Extracting HCOs from OneKey %s...", codebase)
+            logger.info(
+                "Extracting HCOs from OneKey %s (refreshMyOnekey population)...",
+                codebase,
+            )
             for record in self.onekey.iter_population(
                 cod_base=codebase, max_records=max_records
             ):
                 if (record.get("entityType") or "").upper() == "WORKPLACE":
                     hcos.append(record)
             raw_workplaces = hcos
-            logger.info("Extracted %d HCOs from %s", len(hcos), codebase)
+            logger.info("Extracted %d contracted HCOs from %s", len(hcos), codebase)
             flattened = [flatten_hco(r) for r in hcos]
+
+        contracted = {
+            eid
+            for eid in (
+                workplace_eid_from_record(r) for r in (raw_workplaces or [])
+            )
+            if eid
+        }
+        if not contracted and flattened:
+            contracted = {
+                str(h.get("workplaceEid"))
+                for h in flattened
+                if h.get("workplaceEid")
+            }
+        self._contracted_workplace_eids |= contracted
+        if contracted:
+            logger.info(
+                "Contracted workplace allowlist for %s: %d EIDs "
+                "(relations/hierarchy limited to this set)",
+                codebase,
+                len(contracted),
+            )
 
         if not flattened:
             return result, flattened, raw_workplaces
@@ -523,14 +718,27 @@ class DynamicSyncEngine:
         hcos: list[dict],
         dry_run: bool = False,
         skip_unchanged: bool = True,
+        allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
         """Phase 3: set parentaccountid from managerWorkplaceEid edges."""
         self.sync_logger.log_phase("HCO HIERARCHY LINK")
         result = _empty_hierarchy_stats()
-        edges = edges_from_hcos(hcos)
+        allow = (
+            allowed_workplace_eids
+            if allowed_workplace_eids is not None
+            else self._contracted_workplace_eids or None
+        )
+        edges = edges_from_hcos(hcos, allowed_workplace_eids=allow)
         result["edges"] = len(edges)
         if not edges:
-            logger.info("No parent edges to link")
+            logger.info(
+                "No parent edges to link"
+                + (
+                    " (after contracted-ID filter)"
+                    if allow is not None
+                    else ""
+                )
+            )
             return result
 
         eids = sorted({eid for pair in edges for eid in pair})
@@ -586,20 +794,37 @@ class DynamicSyncEngine:
         self,
         raw_workplaces: list[dict],
         dry_run: bool = False,
+        allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
         """Phase 3b: upsert deduped HCO–HCO links into ``ts_affiliation``."""
         self.sync_logger.log_phase("HCO-HCO RELATION SYNC (ts_affiliation)")
         result = _empty_entity_stats()
 
-        edges = collect_w2w_relations(raw_workplaces)
+        allow = (
+            allowed_workplace_eids
+            if allowed_workplace_eids is not None
+            else self._contracted_workplace_eids or None
+        )
+        edges = collect_w2w_relations(
+            raw_workplaces, allowed_workplace_eids=allow
+        )
         if not edges:
-            logger.info("No HCO-HCO relations to sync")
+            logger.info(
+                "No HCO-HCO relations to sync"
+                + (
+                    " (after contracted-ID filter)"
+                    if allow is not None
+                    else ""
+                )
+            )
             return result
 
         logger.info(
-            "Upserting %d HCO-HCO affiliation(s) from %d workplace(s)",
+            "Upserting %d HCO-HCO affiliation(s) from %d workplace(s) "
+            "(contracted allowlist=%s)",
             len(edges),
             len(raw_workplaces),
+            len(allow) if allow is not None else "off",
         )
 
         affiliation_key = self.config.require_key_field("ts_affiliation")
@@ -736,12 +961,31 @@ class DynamicSyncEngine:
         entity_set = self._affiliation_entity_set()
 
         flat_rows: list[dict] = []
+        allow_wp = self._contracted_workplace_eids or None
+        allow_ind = self._contracted_individual_eids or None
+        skipped_out_of_contract = 0
         for record in activity_records:
             flat = flatten_activity_for_affiliation(record)
-            if flat.get("activityEid") and flat.get("individualEid") and flat.get(
-                "workplaceEid"
+            if not (
+                flat.get("activityEid")
+                and flat.get("individualEid")
+                and flat.get("workplaceEid")
             ):
-                flat_rows.append(flat)
+                continue
+            if allow_wp is not None and flat["workplaceEid"] not in allow_wp:
+                skipped_out_of_contract += 1
+                continue
+            if allow_ind is not None and flat["individualEid"] not in allow_ind:
+                skipped_out_of_contract += 1
+                continue
+            flat_rows.append(flat)
+
+        if skipped_out_of_contract:
+            logger.info(
+                "Skipped %d HCP-HCO affiliations outside contracted population "
+                "(workplace and/or individual)",
+                skipped_out_of_contract,
+            )
 
         individual_eids = sorted(
             {row["individualEid"] for row in flat_rows if row.get("individualEid")}
@@ -856,19 +1100,19 @@ class DynamicSyncEngine:
         max_records: int = None,
         date_from: str = None,
         date_to: str = None,
-    ) -> list[dict]:
-        """Collect HCP rows from population by joining INDIVIDUAL + ACTIVITY.
+    ) -> tuple[list[dict], list[dict]]:
+        """Collect HCP contact rows + all ACTIVITY packets from population.
 
-        Population returns entity types as separate packets (WORKPLACE,
-        INDIVIDUAL, ACTIVITY). ACTIVITY rows only carry link EIDs; person and
-        workplace detail must be joined from the other entity types.
+        Returns:
+            ``(composed_hcp_rows, all_activity_packets)``
 
-        One contact per individual: when multiple activities exist, prefer
-        ``isMainActivity``.
+        Contact composition keeps one ACTIVITY per individual (prefer
+        ``isMainActivity``). Affiliation sync uses ``all_activity_packets``.
         """
         individuals: dict[str, dict] = {}
         workplaces: dict[str, dict] = {}
         activities_by_individual: dict[str, dict] = {}
+        all_activities: list[dict] = []
 
         logger.info(
             "Extracting HCPs from OneKey %s (joining INDIVIDUAL + ACTIVITY)...",
@@ -893,6 +1137,7 @@ class DynamicSyncEngine:
                 if individual_eid:
                     individuals[individual_eid] = record
             elif entity_type == "ACTIVITY":
+                all_activities.append(record)
                 activity = record.get("activity") or {}
                 individual_eid = activity.get("individualEid")
                 if not individual_eid:
@@ -908,25 +1153,52 @@ class DynamicSyncEngine:
                         activities_by_individual[individual_eid] = record
 
         composed = []
+        skipped_unjoined = 0
         for individual_eid, activity_record in activities_by_individual.items():
             activity = activity_record.get("activity") or {}
+            workplace_eid = activity.get("workplaceEid")
+            # Only process IDs present in refreshMyOnekey packets — do not
+            # fall back to search/get_by_id for missing workplace/individual.
+            if individual_eid not in individuals:
+                skipped_unjoined += 1
+                continue
+            if workplace_eid and workplace_eid not in workplaces:
+                skipped_unjoined += 1
+                logger.debug(
+                    "Skipping activity for %s: workplace %s not in contracted "
+                    "population",
+                    individual_eid,
+                    workplace_eid,
+                )
+                continue
+            if not workplace_eid:
+                skipped_unjoined += 1
+                continue
             composed.append(
                 compose_hcp_result(
                     individuals.get(individual_eid),
                     activity_record,
-                    workplaces.get(activity.get("workplaceEid")),
+                    workplaces.get(workplace_eid),
                 )
             )
 
+        contracted_wp = set(workplaces)
+        self._contracted_workplace_eids |= contracted_wp
+        self._contracted_individual_eids |= set(individuals)
+
         logger.info(
-            "Joined %d HCPs from %s (%d individuals, %d activities, %d workplaces indexed)",
+            "Joined %d HCPs from %s (%d individuals, %d main activities, "
+            "%d activity packets, %d workplaces indexed; skipped %d outside "
+            "contracted population)",
             len(composed),
             codebase,
             len(individuals),
             len(activities_by_individual),
+            len(all_activities),
             len(workplaces),
+            skipped_unjoined,
         )
-        return composed
+        return composed, all_activities
 
     def _sync_hcps(
         self,
@@ -943,7 +1215,7 @@ class DynamicSyncEngine:
         result = _empty_entity_stats()
 
         if composed is None:
-            composed = self._collect_population_hcps(
+            composed, _activity_packets = self._collect_population_hcps(
                 codebase,
                 max_records=max_records,
                 date_from=date_from,
@@ -1069,6 +1341,7 @@ class DynamicSyncEngine:
         sync_addresses: bool = True,
         sync_hierarchy: bool = True,
         sync_hco_relations: bool = True,
+        sync_activity_affiliations: bool = True,
     ) -> dict:
         """Sync delta changes for a single codebase using bulk upserts."""
         result = {
@@ -1076,6 +1349,7 @@ class DynamicSyncEngine:
             "addresses": _empty_entity_stats(),
             "hierarchy": _empty_hierarchy_stats(),
             "affiliations": _empty_entity_stats(),
+            "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
         }
@@ -1084,6 +1358,7 @@ class DynamicSyncEngine:
         individuals: dict[str, dict] = {}
         workplace_index: dict[str, dict] = {}
         activities_by_individual: dict[str, dict] = {}
+        all_activities: list[dict] = []
 
         for record in self.onekey.iter_population(
             cod_base=codebase,
@@ -1102,12 +1377,15 @@ class DynamicSyncEngine:
                 workplace_eid = workplace.get("workplaceEid")
                 if workplace_eid:
                     workplace_index[workplace_eid] = record
+                    self._contracted_workplace_eids.add(str(workplace_eid))
             elif entity_type == "INDIVIDUAL":
                 individual = record.get("individual") or {}
                 individual_eid = individual.get("individualEid")
                 if individual_eid:
                     individuals[individual_eid] = record
+                    self._contracted_individual_eids.add(str(individual_eid))
             elif entity_type == "ACTIVITY":
+                all_activities.append(record)
                 activity = record.get("activity") or {}
                 individual_eid = activity.get("individualEid")
                 if not individual_eid:
@@ -1123,12 +1401,13 @@ class DynamicSyncEngine:
                         activities_by_individual[individual_eid] = record
 
         logger.info(
-            "Delta for %s: %d workplaces, %d individuals, %d activities "
-            "(I=%d, U=%d, R=%d)",
+            "Delta for %s: %d workplaces, %d individuals, %d main activities, "
+            "%d activity packets (I=%d, U=%d, R=%d)",
             codebase,
             len(workplaces),
             len(individuals),
             len(activities_by_individual),
+            len(all_activities),
             result["by_process_code"].get("I", 0),
             result["by_process_code"].get("U", 0),
             result["by_process_code"].get("R", 0),
@@ -1150,28 +1429,51 @@ class DynamicSyncEngine:
                 )
             if sync_hierarchy:
                 result["hierarchy"] = self._sync_hierarchy(
-                    flattened_hcos, dry_run=dry_run
+                    flattened_hcos,
+                    dry_run=dry_run,
+                    allowed_workplace_eids=self._contracted_workplace_eids or None,
                 )
             if sync_hco_relations:
                 result["affiliations"] = self._sync_hco_relations(
-                    workplaces, dry_run=dry_run
+                    workplaces,
+                    dry_run=dry_run,
+                    allowed_workplace_eids=self._contracted_workplace_eids or None,
                 )
 
         if activities_by_individual:
-            composed = [
-                compose_hcp_result(
-                    individuals.get(individual_eid),
-                    activity_record,
-                    workplace_index.get(
-                        (activity_record.get("activity") or {}).get("workplaceEid")
-                    ),
+            composed = []
+            skipped = 0
+            for individual_eid, activity_record in activities_by_individual.items():
+                activity = activity_record.get("activity") or {}
+                workplace_eid = activity.get("workplaceEid")
+                if individual_eid not in individuals:
+                    skipped += 1
+                    continue
+                if not workplace_eid or workplace_eid not in workplace_index:
+                    skipped += 1
+                    continue
+                composed.append(
+                    compose_hcp_result(
+                        individuals.get(individual_eid),
+                        activity_record,
+                        workplace_index.get(workplace_eid),
+                    )
                 )
-                for individual_eid, activity_record in activities_by_individual.items()
-            ]
+            if skipped:
+                logger.info(
+                    "Delta HCP: skipped %d activities outside contracted "
+                    "population join",
+                    skipped,
+                )
             result["contacts"] = self._sync_hcps(
                 codebase,
                 dry_run=dry_run,
                 composed=composed,
+            )
+
+        if sync_activity_affiliations and all_activities:
+            result["activity_affiliations"] = self._sync_activity_affiliations(
+                all_activities, dry_run=dry_run
             )
 
         return result

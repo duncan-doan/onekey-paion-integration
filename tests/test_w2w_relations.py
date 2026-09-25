@@ -123,6 +123,31 @@ def test_transform_w2w_hie_link_is_primary():
     assert payload["ts_isprimary"] is True
 
 
+def test_collect_w2w_filters_out_of_contract_related():
+    parent_row = {
+        "workplace": {
+            "workplaceEid": "WUKE00001260",
+            "relations": [
+                _relation(False, "WUKE00117965"),
+                _relation(False, "WUKOUTSIDE01"),
+            ],
+        }
+    }
+    child_row = {
+        "workplace": {
+            "workplaceEid": "WUKE00117965",
+            "relations": [_relation(True, "WUKE00001260")],
+        }
+    }
+    allowed = {"WUKE00001260", "WUKE00117965"}
+    edges = collect_w2w_relations(
+        [parent_row, child_row], allowed_workplace_eids=allowed
+    )
+    assert len(edges) == 1
+    assert edges[0]["childWorkplaceEid"] == "WUKE00117965"
+    assert edges[0]["parentWorkplaceEid"] == "WUKE00001260"
+
+
 def test_collect_w2w_relations_on_sample_file():
     if not HCO_SAMPLE.is_file():
         return

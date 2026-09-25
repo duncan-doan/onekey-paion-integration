@@ -75,6 +75,18 @@ def test_edges_from_hcos():
     assert edges == [("A", "P"), ("D", "P")]
 
 
+def test_edges_from_hcos_filters_to_contracted():
+    edges = edges_from_hcos(
+        [
+            {"workplaceEid": "A", "parentWorkplaceEid": "P"},
+            {"workplaceEid": "D", "parentWorkplaceEid": "P"},
+            {"workplaceEid": "E", "parentWorkplaceEid": "OUT"},
+        ],
+        allowed_workplace_eids={"A", "D", "P"},
+    )
+    assert edges == [("A", "P"), ("D", "P")]
+
+
 def test_transform_hco_does_not_include_address1_fields():
     engine = create_transform_engine(load_mapping_config())
     payload = engine.transform_hco(

@@ -98,14 +98,22 @@ def accounts_from_dataverse(dv: DataverseClient, codbase: str, limit: int) -> li
     return rows[: limit * 5]
 
 
-def workplaces_from_onekey(ok: OneKeyClient, codbase: str, limit: int) -> list[dict]:
-    """Search a thin HCO sample, then re-fetch by id for full address detail."""
+def workplaces_from_onekey(
+    ok: OneKeyClient,
+    codbase: str,
+    limit: int,
+    contracted_eids: set[str],
+) -> list[dict]:
+    """Search a thin HCO sample, then re-fetch by id only if contracted."""
     thin = ok.search_hco(cod_base=codbase, name="Hospital", result_size=max(limit * 3, 20))
     out = []
     for raw in thin:
         workplace = raw.get("workplace") or {}
         eid = workplace.get("workplaceEid")
         if not eid:
+            continue
+        if eid not in contracted_eids:
+            logger.info("Skipping search hit %s — not in contracted population", eid)
             continue
         full = ok.get_by_id(eid, WORKPLACE, cod_base=codbase)
         if not full:
@@ -121,11 +129,44 @@ def workplaces_from_population(
 ) -> list[dict]:
     """Collect WORKPLACE rows from population (includes address detail)."""
     out = []
+    logger.info(
+        "Loading contracted workplaces from refreshMyOnekey (%s)…", codbase
+    )
     for record in ok.iter_population(cod_base=codbase, max_records=max_records):
         if (record.get("entityType") or "").upper() != "WORKPLACE":
             continue
         out.append(record)
+        if len(out) % 500 == 0:
+            logger.info("… %d contracted workplaces so far", len(out))
+    logger.info("Loaded %d contracted workplaces from population", len(out))
     return out
+
+
+def contracted_workplace_eids(
+    ok: OneKeyClient, codbase: str, max_records: int | None = None
+) -> set[str]:
+    """EIDs from ``refreshMyOnekey`` — the only IDs allowed for get_by_id."""
+    eids: set[str] = set()
+    for record in ok.iter_population(cod_base=codbase, max_records=max_records):
+        if (record.get("entityType") or "").upper() != "WORKPLACE":
+            continue
+        workplace = record.get("workplace") or {}
+        eid = workplace.get("workplaceEid") or record.get("onekeyEid")
+        if eid:
+            eids.add(str(eid))
+    return eids
+
+
+def fetch_contracted_workplace(
+    ok: OneKeyClient,
+    eid: str,
+    codbase: str,
+    contracted_eids: set[str],
+) -> dict | None:
+    """``get_by_id`` only when ``eid`` is in the contracted population."""
+    if eid not in contracted_eids:
+        return None
+    return ok.get_by_id(eid, WORKPLACE, cod_base=codbase)
 
 
 def main() -> int:
@@ -192,65 +233,87 @@ def main() -> int:
                     skipped.append((eid, "account not in Dataverse"))
                     continue
                 candidates.append((eid, hco, acc))
-        elif target_eids:
-            accounts = dv.find_many_by_field(
-                "accounts",
-                ACCOUNT_KEY,
-                target_eids,
-                select=["accountid", ACCOUNT_KEY, "name"],
-            )
-            candidates = []
-            for eid in target_eids:
-                acc = accounts.get(eid)
-                if not acc:
-                    skipped.append((eid, "account not in Dataverse"))
-                    continue
-                try:
-                    raw = ok.get_by_id(eid, WORKPLACE, cod_base=args.codbase)
-                except Exception as exc:  # noqa: BLE001
-                    skipped.append((eid, f"OneKey fetch failed: {exc}"))
-                    continue
-                if not raw:
-                    skipped.append((eid, "not found in OneKey"))
-                    continue
-                candidates.append((eid, flatten_hco(raw), acc))
-        elif args.from_onekey:
-            raw_workplaces = workplaces_from_onekey(ok, args.codbase, args.limit)
-            eids = []
-            hcos_by_eid = {}
-            for raw in raw_workplaces:
-                hco = flatten_hco(raw)
-                eid = hco.get("workplaceEid")
-                if not eid:
-                    continue
-                eids.append(eid)
-                hcos_by_eid[eid] = hco
-            accounts = dv.find_many_by_field(
-                "accounts", ACCOUNT_KEY, eids, select=["accountid", ACCOUNT_KEY, "name"]
-            )
-            candidates = []
-            for eid, hco in hcos_by_eid.items():
-                acc = accounts.get(eid)
-                if not acc:
-                    skipped.append((eid, "account not in Dataverse"))
-                    continue
-                candidates.append((eid, hco, acc))
         else:
-            account_rows = accounts_from_dataverse(dv, args.codbase, args.limit)
-            candidates = []
-            for acc in account_rows:
-                eid = acc.get(ACCOUNT_KEY)
-                if not eid:
-                    continue
-                try:
-                    raw = ok.get_by_id(eid, WORKPLACE, cod_base=args.codbase)
-                except Exception as exc:  # noqa: BLE001
-                    skipped.append((eid, f"OneKey fetch failed: {exc}"))
-                    continue
-                if not raw:
-                    skipped.append((eid, "not found in OneKey"))
-                    continue
-                candidates.append((eid, flatten_hco(raw), acc))
+            # Non-full modes may call get_by_id — only for contracted EIDs.
+            logger.info(
+                "Loading contracted workplace allowlist from refreshMyOnekey…"
+            )
+            allow = contracted_workplace_eids(ok, args.codbase)
+            logger.info("Contracted workplace EIDs: %d", len(allow))
+
+            if target_eids:
+                accounts = dv.find_many_by_field(
+                    "accounts",
+                    ACCOUNT_KEY,
+                    target_eids,
+                    select=["accountid", ACCOUNT_KEY, "name"],
+                )
+                candidates = []
+                for eid in target_eids:
+                    if eid not in allow:
+                        skipped.append((eid, "not in contracted refreshMyOnekey population"))
+                        continue
+                    acc = accounts.get(eid)
+                    if not acc:
+                        skipped.append((eid, "account not in Dataverse"))
+                        continue
+                    try:
+                        raw = fetch_contracted_workplace(
+                            ok, eid, args.codbase, allow
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        skipped.append((eid, f"OneKey fetch failed: {exc}"))
+                        continue
+                    if not raw:
+                        skipped.append((eid, "not found in OneKey"))
+                        continue
+                    candidates.append((eid, flatten_hco(raw), acc))
+            elif args.from_onekey:
+                raw_workplaces = workplaces_from_onekey(
+                    ok, args.codbase, args.limit, allow
+                )
+                eids = []
+                hcos_by_eid = {}
+                for raw in raw_workplaces:
+                    hco = flatten_hco(raw)
+                    eid = hco.get("workplaceEid")
+                    if not eid:
+                        continue
+                    eids.append(eid)
+                    hcos_by_eid[eid] = hco
+                accounts = dv.find_many_by_field(
+                    "accounts", ACCOUNT_KEY, eids, select=["accountid", ACCOUNT_KEY, "name"]
+                )
+                candidates = []
+                for eid, hco in hcos_by_eid.items():
+                    acc = accounts.get(eid)
+                    if not acc:
+                        skipped.append((eid, "account not in Dataverse"))
+                        continue
+                    candidates.append((eid, hco, acc))
+            else:
+                account_rows = accounts_from_dataverse(dv, args.codbase, args.limit)
+                candidates = []
+                for acc in account_rows:
+                    eid = acc.get(ACCOUNT_KEY)
+                    if not eid:
+                        continue
+                    if eid not in allow:
+                        skipped.append(
+                            (eid, "not in contracted refreshMyOnekey population")
+                        )
+                        continue
+                    try:
+                        raw = fetch_contracted_workplace(
+                            ok, eid, args.codbase, allow
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        skipped.append((eid, f"OneKey fetch failed: {exc}"))
+                        continue
+                    if not raw:
+                        skipped.append((eid, "not found in OneKey"))
+                        continue
+                    candidates.append((eid, flatten_hco(raw), acc))
 
         limit = None if args.full else args.limit
         for eid, hco, acc in candidates:

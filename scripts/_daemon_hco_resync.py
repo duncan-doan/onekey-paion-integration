@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Double-fork daemon for HCO-only re-sync (accounts upsert)."""
+"""Double-fork daemon for HCO-only re-sync.
+
+Runs the full HCO path by default: picklists → accounts → customeraddress →
+hierarchy → HCO–HCO affiliations. Does not skip address/hierarchy/relations/
+picklists; use ``run_dynamic_sync.py --skip-*`` only when intentionally omitting
+a phase. HCP contacts are still excluded (``--hco-only``).
+"""
 
 from __future__ import annotations
 
@@ -42,9 +48,6 @@ def daemonize() -> None:
         "--codbase",
         "WUK",
         "--hco-only",
-        "--skip-address",
-        "--skip-hierarchy",
-        "--skip-picklists",
     )
 
 

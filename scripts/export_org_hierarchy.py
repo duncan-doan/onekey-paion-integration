@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Export one top HCO and its related tree for Dataverse verification/load.
 
-1. Walks the management tree (default HIE + MAI) from a root Health Board
-2. Optionally fetches every related workplace referenced by any linkCode
-3. Searches HCP activities per workplace (default: not limited to in-contract)
-4. Dedupes HCO–HCO relations and writes activity/affiliation summaries
-5. Optionally upserts accounts, contacts, and ts_affiliation into Dataverse
+1. Loads contracted workplace EIDs from ``/pop/refreshMyOnekey``
+2. Walks the management tree (default HIE + MAI) from a root Health Board,
+   fetching only EIDs in that population (never search-only IDs)
+3. Optionally fetches related workplaces referenced by any linkCode that are
+   still in the contracted population
+4. Searches HCP activities per workplace (default: isInContract=true)
+5. Dedupes HCO–HCO relations and writes activity/affiliation summaries
+6. Optionally upserts accounts, contacts, and ts_affiliation into Dataverse
 
   output/org/<root_eid>/
     hco_summary.csv
@@ -85,8 +88,9 @@ def parse_args():
     )
     parser.add_argument(
         "--in-contract-only",
-        action="store_true",
-        help="Restrict HCP search to isInContract=true (default: all activities)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restrict HCP search to isInContract=true (default: true)",
     )
     parser.add_argument(
         "--load-dataverse",
@@ -129,8 +133,39 @@ def child_eids_for_hierarchy(
     return children
 
 
-def fetch_workplace(client: OneKeyClient, eid: str, cod_base: str) -> dict | None:
+def fetch_workplace(
+    client: OneKeyClient,
+    eid: str,
+    cod_base: str,
+    contracted_eids: set[str] | None = None,
+) -> dict | None:
+    """Fetch a workplace by id only when it is in the contracted population.
+
+    IDs outside ``refreshMyOnekey`` must not be pulled via search even when
+    ``get_by_id`` would succeed.
+    """
+    if contracted_eids is not None and eid not in contracted_eids:
+        logger.info(
+            "Skipping workplace %s — not in contracted refreshMyOnekey population",
+            eid,
+        )
+        return None
     return client.get_by_id(eid, WORKPLACE, cod_base=cod_base)
+
+
+def load_contracted_workplace_eids(client: OneKeyClient, cod_base: str) -> set[str]:
+    """All workplace EIDs returned by ``/pop/refreshMyOnekey`` for this codeBase."""
+    eids: set[str] = set()
+    for record in client.iter_population(cod_base=cod_base, page_size=500):
+        if (record.get("entityType") or "").upper() != "WORKPLACE":
+            continue
+        eid = workplace_eid(record)
+        if eid:
+            eids.add(eid)
+    logger.info(
+        "Contracted population for %s: %d workplace EIDs", cod_base, len(eids)
+    )
+    return eids
 
 
 def walk_hierarchy(
@@ -139,10 +174,12 @@ def walk_hierarchy(
     cod_base: str,
     hier_links: set[str],
     fetch_delay: float,
+    contracted_eids: set[str] | None = None,
 ) -> dict[str, dict]:
     queue = [root_eid]
     seen: set[str] = set()
     workplaces: dict[str, dict] = {}
+    skipped_out_of_contract = 0
 
     while queue:
         eid = queue.pop(0)
@@ -150,7 +187,14 @@ def walk_hierarchy(
             continue
         seen.add(eid)
 
-        record = fetch_workplace(client, eid, cod_base)
+        if contracted_eids is not None and eid not in contracted_eids:
+            skipped_out_of_contract += 1
+            logger.info(
+                "Skipping hierarchy node %s — not in contracted population", eid
+            )
+            continue
+
+        record = fetch_workplace(client, eid, cod_base, contracted_eids)
         if not record:
             logger.warning("No record for workplace %s", eid)
             continue
@@ -168,11 +212,19 @@ def walk_hierarchy(
 
         for child in child_eids_for_hierarchy(key, wp.get("relations"), hier_links):
             if child not in seen:
+                if contracted_eids is not None and child not in contracted_eids:
+                    skipped_out_of_contract += 1
+                    continue
                 queue.append(child)
 
         if fetch_delay > 0:
             time.sleep(fetch_delay)
 
+    if skipped_out_of_contract:
+        logger.info(
+            "Skipped %d hierarchy/related EIDs outside contracted population",
+            skipped_out_of_contract,
+        )
     return workplaces
 
 
@@ -194,13 +246,21 @@ def fetch_missing_workplaces(
     missing: set[str],
     cod_base: str,
     fetch_delay: float,
+    contracted_eids: set[str] | None = None,
 ) -> int:
-    """Fetch workplaces not yet in ``workplaces``; return count added."""
+    """Fetch workplaces not yet in ``workplaces``; return count added.
+
+    Never fetches EIDs outside the contracted ``refreshMyOnekey`` population.
+    """
     added = 0
+    skipped = 0
     for eid in sorted(missing):
         if eid in workplaces:
             continue
-        record = fetch_workplace(client, eid, cod_base)
+        if contracted_eids is not None and eid not in contracted_eids:
+            skipped += 1
+            continue
+        record = fetch_workplace(client, eid, cod_base, contracted_eids)
         if not record:
             logger.warning("No record for related workplace %s", eid)
             continue
@@ -216,6 +276,11 @@ def fetch_missing_workplaces(
         )
         if fetch_delay > 0:
             time.sleep(fetch_delay)
+    if skipped:
+        logger.info(
+            "Skipped fetching %d related workplaces outside contracted population",
+            skipped,
+        )
     return added
 
 
@@ -450,12 +515,23 @@ def main() -> int:
     with OneKeyClient(OneKeySession(config)) as client:
         client.session.test_connection()
 
+        contracted_eids = load_contracted_workplace_eids(client, cod_base)
+        if root_eid not in contracted_eids:
+            logger.error(
+                "Root workplace %s is not in the contracted refreshMyOnekey "
+                "population for %s — refusing to fetch via search",
+                root_eid,
+                cod_base,
+            )
+            return 1
+
         workplaces = walk_hierarchy(
             client,
             root_eid,
             cod_base,
             hier_links,
             args.fetch_delay,
+            contracted_eids=contracted_eids,
         )
         if root_eid not in workplaces:
             logger.error("Root workplace %s could not be fetched", root_eid)
@@ -464,8 +540,11 @@ def main() -> int:
         related_added = 0
         if args.fetch_related == "all":
             missing = related_eids_from_workplaces(workplaces) - set(workplaces)
+            # Only consider related IDs that are still in the population.
+            missing &= contracted_eids
             logger.info(
-                "Fetching %d related workplaces referenced by relations[]…",
+                "Fetching %d related workplaces referenced by relations[] "
+                "(contracted population only)…",
                 len(missing),
             )
             related_added = fetch_missing_workplaces(
@@ -474,10 +553,14 @@ def main() -> int:
                 missing,
                 cod_base,
                 args.fetch_delay,
+                contracted_eids=contracted_eids,
             )
 
         root_name = workplace_name(workplaces[root_eid])
-        affiliations = collect_w2w_relations(list(workplaces.values()))
+        affiliations = collect_w2w_relations(
+            list(workplaces.values()),
+            allowed_workplace_eids=contracted_eids,
+        )
 
         hcp_records: list[dict] = []
         for i, eid in enumerate(sorted(workplaces), 1):

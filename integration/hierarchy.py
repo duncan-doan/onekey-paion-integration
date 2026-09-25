@@ -14,8 +14,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def edges_from_hcos(hcos: list[dict]) -> list[tuple[str, str]]:
-    """Return (child_eid, parent_eid) from flattened HCO rows."""
+def edges_from_hcos(
+    hcos: list[dict],
+    allowed_workplace_eids: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Return (child_eid, parent_eid) from flattened HCO rows.
+
+    When ``allowed_workplace_eids`` is provided (contracted population from
+    ``refreshMyOnekey``), skip edges whose parent (or child) is not in that
+    set — do not chase out-of-contract parents via search.
+    """
     edges = []
     for hco in hcos:
         child = hco.get("workplaceEid")
@@ -24,7 +32,13 @@ def edges_from_hcos(hcos: list[dict]) -> list[tuple[str, str]]:
             continue
         if child == parent:
             continue
-        edges.append((str(child), str(parent)))
+        child_s, parent_s = str(child), str(parent)
+        if allowed_workplace_eids is not None and (
+            child_s not in allowed_workplace_eids
+            or parent_s not in allowed_workplace_eids
+        ):
+            continue
+        edges.append((child_s, parent_s))
     return edges
 
 

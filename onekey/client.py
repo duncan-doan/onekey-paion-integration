@@ -295,6 +295,10 @@ class OneKeyClient:
         where a search by criteria returns only a thin identifying subset.
         OneKey accounts records fetched this way against the subscription, and
         an id must be the *only* criterion in the request.
+
+        Callers that enforce the contracted population must check the EID
+        against ``/pop/refreshMyOnekey`` first and skip IDs not in that set —
+        search can still return out-of-contract entities.
         """
         field_name = {
             ACTIVITY: "activity.activityEid",
@@ -368,7 +372,14 @@ class OneKeyClient:
             payload["isoDateTo"] = date_to
 
         yielded = 0
+        packet = 0
+        logger.info(
+            "Starting refreshMyOnekey population walk (codBase=%s, page_size=%d)",
+            cod_base or iso_cod2,
+            page_size,
+        )
         while True:
+            packet += 1
             envelope = self.session.post_json("/pop/refreshMyOnekey", payload)
             results = envelope.get("results") or []
             if isinstance(results, dict):
@@ -378,7 +389,21 @@ class OneKeyClient:
                 yield record
                 yielded += 1
                 if max_records is not None and yielded >= max_records:
+                    logger.info(
+                        "refreshMyOnekey stopped at max_records=%d "
+                        "(packet %d)",
+                        max_records,
+                        packet,
+                    )
                     return
+
+            logger.info(
+                "refreshMyOnekey packet %d: +%d records (total %d)%s",
+                packet,
+                len(results),
+                yielded,
+                " [complete]" if envelope.get("isTransactionComplete") else "",
+            )
 
             if envelope.get("isTransactionComplete") or not results:
                 return

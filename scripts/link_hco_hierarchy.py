@@ -81,12 +81,22 @@ def iter_workplaces(client: OneKeyClient, codebase: str):
 
 
 def collect_edges(client: OneKeyClient, codebase: str) -> list[tuple[str, str]]:
-    """Return (child_eid, parent_eid) pairs from OneKey workplaces."""
+    """Return (child_eid, parent_eid) pairs from contracted workplaces only.
+
+    Parents outside the ``refreshMyOnekey`` population are dropped — do not
+    chase them via search / ``get_by_id``.
+    """
     flattened = list(iter_workplaces(client, codebase))
-    edges = edges_from_hcos(flattened)
+    contracted = {
+        str(h["workplaceEid"]) for h in flattened if h.get("workplaceEid")
+    }
+    edges = edges_from_hcos(flattened, allowed_workplace_eids=contracted)
     logger.info(
-        "OneKey %s: %d workplaces, %d parent edges",
-        codebase, len(flattened), len(edges),
+        "OneKey %s: %d contracted workplaces, %d parent edges "
+        "(out-of-contract parents skipped)",
+        codebase,
+        len(flattened),
+        len(edges),
     )
     return edges
 
