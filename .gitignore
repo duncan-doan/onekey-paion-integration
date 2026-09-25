@@ -130,7 +130,7 @@ cython_debug/
 # IDE / Editors
 # --------------------------------------------
 # VSCode
-.vscode/
+
 *.code-workspace
 
 # PyCharm / JetBrains
@@ -228,3 +228,11 @@ cache/
 .coverage
 htmlcov/
 test-results/
+
+# Azure Functions
+# --------------------------------------------
+local.settings.json
+.azure/
+.python_packages/
+bin/
+obj/

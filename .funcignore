@@ -1,0 +1,23 @@
+.venv/
+venv/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Never ship credentials. .env is gitignored but would otherwise be packaged;
+# on Azure these values come from App Settings instead.
+.env
+.env.example
+local.settings.json
+
+# Not needed at runtime: the CLI entry points, reference material and test data
+# are all developer-side only.
+scripts/
+tests/
+docs/
+data/
+logs/
+*.md
