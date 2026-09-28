@@ -170,13 +170,15 @@ class TransformEngine:
     def transform_w2w_affiliation(
         self,
         source: dict,
-        child_account_id: str = None,
-        parent_account_id: str = None,
+        from_account_id: str = None,
+        to_account_id: str = None,
     ) -> dict:
         """Transform a normalized HCO–HCO relation row to ``ts_affiliation``.
 
         Expects output of :func:`integration.w2w_relations.collect_w2w_relations`
-        with ``childWorkplaceEid``, ``parentWorkplaceEid``, and ``linkCode``.
+        with ``fromWorkplaceEid``, ``toWorkplaceEid``, and ``linkCode``.
+        ``ts_fromid`` binds to ``from_account_id`` (the workplace that owns the
+        OneKey ``relations[]`` entry) and ``ts_toid`` to ``to_account_id``.
         """
         external_id = source.get("ts_externalid")
         self.begin_record("ts_affiliation", external_id)
@@ -230,15 +232,15 @@ class TransformEngine:
                     "ts_externalid"
                 ]
 
-        if child_account_id:
-            payload["ts_FromID_account@odata.bind"] = f"/accounts({child_account_id})"
-        if parent_account_id:
-            payload["ts_ToID@odata.bind"] = f"/accounts({parent_account_id})"
+        if from_account_id:
+            payload["ts_FromID_account@odata.bind"] = f"/accounts({from_account_id})"
+        if to_account_id:
+            payload["ts_ToID@odata.bind"] = f"/accounts({to_account_id})"
 
         if not payload.get("ts_name"):
             payload["ts_name"] = (
                 source.get("ts_externalid")
-                or f"{source.get('childWorkplaceEid')} → {source.get('parentWorkplaceEid')}"
+                or f"{source.get('fromWorkplaceEid')} → {source.get('toWorkplaceEid')}"
             )
 
         return {k: v for k, v in payload.items() if v is not None}

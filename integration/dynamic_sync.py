@@ -835,8 +835,8 @@ class DynamicSyncEngine:
                 eid
                 for edge in edges
                 for eid in (
-                    edge.get("childWorkplaceEid"),
-                    edge.get("parentWorkplaceEid"),
+                    edge.get("fromWorkplaceEid"),
+                    edge.get("toWorkplaceEid"),
                 )
                 if eid
             }
@@ -848,37 +848,37 @@ class DynamicSyncEngine:
 
         for edge in edges:
             external_id = edge.get("ts_externalid")
-            child_eid = edge.get("childWorkplaceEid")
-            parent_eid = edge.get("parentWorkplaceEid")
+            from_eid = edge.get("fromWorkplaceEid")
+            to_eid = edge.get("toWorkplaceEid")
 
-            child_id = self._account_cache.get(child_eid)
-            parent_id = self._account_cache.get(parent_eid)
+            from_id = self._account_cache.get(from_eid)
+            to_id = self._account_cache.get(to_eid)
 
-            if not child_id:
+            if not from_id:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
                     external_id,
                     "account",
-                    child_eid,
-                    f"Child account not found for {child_eid}",
+                    from_eid,
+                    f"From account not found for {from_eid}",
                 )
                 continue
-            if not parent_id:
+            if not to_id:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
                     external_id,
                     "account",
-                    parent_eid,
-                    f"Parent account not found for {parent_eid}",
+                    to_eid,
+                    f"To account not found for {to_eid}",
                 )
                 continue
 
             payload = self.transformer.transform_w2w_affiliation(
                 edge,
-                child_account_id=child_id,
-                parent_account_id=parent_id,
+                from_account_id=from_id,
+                to_account_id=to_id,
             )
             if not payload.get(affiliation_key):
                 result["failed"] += 1
@@ -932,7 +932,7 @@ class DynamicSyncEngine:
                     external_id,
                     record_id,
                     "create" if created else "update",
-                    f"{edge.get('childWorkplaceEid')} → {edge.get('parentWorkplaceEid')}",
+                    f"{edge.get('fromWorkplaceEid')} → {edge.get('toWorkplaceEid')}",
                 )
 
             self.sync_logger.log_progress("affiliations", done, len(prepared))

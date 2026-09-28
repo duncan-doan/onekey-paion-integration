@@ -406,8 +406,8 @@ def build_summaries(
                 "linkCode": edge.get("linkCode"),
                 "beginValidDate": edge.get("beginValidDate"),
                 "endValidDate": edge.get("endValidDate"),
-                "dataverse_ts_fromid_lookup": child,
-                "dataverse_ts_toid_lookup": parent,
+                "dataverse_ts_fromid_lookup": edge.get("fromWorkplaceEid"),
+                "dataverse_ts_toid_lookup": edge.get("toWorkplaceEid"),
             }
         )
 
