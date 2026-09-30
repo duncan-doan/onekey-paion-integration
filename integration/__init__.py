@@ -41,6 +41,7 @@ from .validation import (
 from .transform import TransformEngine, create_transform_engine
 from .dynamic_sync import DynamicSyncEngine, create_sync_engine
 from .sync_logger import SyncLogger, setup_logging
+from .job_trace import JobTracer
 from .picklist_gaps import PicklistGapCollector
 from .picklist_sync import sync_picklists_from_config
 from .hierarchy import edges_from_hcos
@@ -86,6 +87,7 @@ __all__ = [
     # Logging
     "SyncLogger",
     "setup_logging",
+    "JobTracer",
 
     # Migration helpers
     "PicklistGapCollector",

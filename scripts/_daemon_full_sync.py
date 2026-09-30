@@ -42,6 +42,8 @@ def daemonize() -> None:
         str(REPO / "scripts" / "run_dynamic_sync.py"),
         "--codbase",
         "WUK",
+        "--trigger",
+        "daemon",
     )
 
 

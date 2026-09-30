@@ -73,15 +73,19 @@ def build_updates(
     }
     updates = []
     missing_parents = set()
+    missing_child_eids: list[str] = []
+    missing_parent_eids: list[str] = []
 
     for child_eid, parent_eid in edges:
         child = accounts.get(child_eid)
         parent = accounts.get(parent_eid)
         if not child or not child.get("accountid"):
             stats["missing_child"] += 1
+            missing_child_eids.append(child_eid)
             continue
         if not parent or not parent.get("accountid"):
             stats["missing_parent"] += 1
+            missing_parent_eids.append(child_eid)
             missing_parents.add(parent_eid)
             continue
 
@@ -110,6 +114,8 @@ def build_updates(
         stats["ready"] += 1
 
     stats["missing_parent_unique"] = len(missing_parents)
+    stats["missing_child_eids"] = missing_child_eids
+    stats["missing_parent_eids"] = missing_parent_eids
     return updates, stats
 
 
@@ -118,6 +124,7 @@ def apply_updates(
     updates: list[dict],
     batch_size: int,
     match_field: str | None = None,
+    failures: list | None = None,
 ) -> tuple[int, int]:
     updated = failed = 0
     total = len(updates)
@@ -165,4 +172,6 @@ def apply_updates(
                         else row.get("accountid")
                     )
                     logger.error("Failed to link %s: %s", label, single_exc)
+                    if failures is not None:
+                        failures.append((str(label) if label else "", single_exc))
     return updated, failed

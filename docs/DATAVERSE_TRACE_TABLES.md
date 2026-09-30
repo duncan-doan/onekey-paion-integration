@@ -52,7 +52,7 @@ One row per job execution.
 | `ts_jobid` | Job ID | Text | 36 | Required | |
 | `ts_jobtype` | Job type | Choice (local) | | Required | |
 | `ts_codebase` | Codebase | Text | 10 | Required | |
-| `ts_status` | Status | Choice (local) | | Required | Running (1) |
+| `ts_status` | Status | Choice (local) | | Required | Running (126870001) |
 | `ts_startedon` | Started on | Date and time | Time zone independent | Required | |
 | `ts_completedon` | Completed on | Date and time | Time zone independent | Optional | |
 | `ts_durationseconds` | Duration (seconds) | Whole number | Min 0 | Optional | |
@@ -76,33 +76,33 @@ One row per job execution.
 
 | Value | Label |
 | --- | --- |
-| 1 | Full |
-| 2 | Delta |
-| 3 | Affiliations Only |
-| 4 | HCO Only |
-| 5 | HCP Only |
-| 6 | Addresses Only |
-| 7 | Hierarchy Only |
+| 126870001 | Full |
+| 126870002 | Delta |
+| 126870003 | Affiliations Only |
+| 126870004 | HCO Only |
+| 126870005 | HCP Only |
+| 126870006 | Addresses Only |
+| 126870007 | Hierarchy Only |
 
 ### Choice: Status (`ts_status`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Running |
-| 2 | Succeeded |
-| 3 | Partially Succeeded |
-| 4 | Failed |
-| 5 | Abandoned |
+| 126870001 | Running |
+| 126870002 | Succeeded |
+| 126870003 | Partially Succeeded |
+| 126870004 | Failed |
+| 126870005 | Abandoned |
 
-Default: **Running** (1).
+Default: **Running** (126870001).
 
 ### Choice: Trigger (`ts_trigger`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Manual |
-| 2 | Timer |
-| 3 | Daemon |
+| 126870001 | Manual |
+| 126870002 | Timer |
+| 126870003 | Daemon |
 
 ### Alternate key
 
@@ -121,6 +121,7 @@ Create this after **Integration Failure** exists, or create the lookup from that
 | Schema name | `ts_integrationjob_retryofjob` |
 | Type | Self-referential, many-to-one |
 | Lookup column | `ts_retryofjob` |
+| Web API navigation property | `ts_Retryofjob` |
 | Related table | `ts_integrationjob` |
 | Behavior | Referential, Restrict Delete |
 | Display name | Retry of job |
@@ -148,7 +149,7 @@ One row per failed source record, linked to the job that produced it.
 | --- | --- | --- | --- | --- | --- |
 | `ts_name` | Name | Text | 250 | Required | |
 | `ts_failurekey` | Failure key | Text | 300 | Required | |
-| `ts_integrationjobid` | Integration Job | Lookup | See relationship below | Required | |
+| `ts_integrationjob` | Integration Job | Lookup | See relationship below | Required | |
 | `ts_sourceid` | Source ID | Text | 100 | Required | |
 | `ts_externalid` | External ID | Text | 200 | Optional | |
 | `ts_entitytype` | Entity type | Choice (local) | | Required | |
@@ -159,7 +160,7 @@ One row per failed source record, linked to the job that produced it.
 | `ts_errorcode` | Error code | Text | 100 | Optional | |
 | `ts_errormessage` | Error message | Multiline text | Plain text, 2,000 | Required | |
 | `ts_isretryable` | Retryable | Yes/No | | Required | No |
-| `ts_retrystatus` | Retry status | Choice (local) | | Required | Pending (1) |
+| `ts_retrystatus` | Retry status | Choice (local) | | Required | Pending (126870001) |
 | `ts_attemptcount` | Attempt count | Whole number | Min 1 | Required | 1 |
 | `ts_occurredon` | Occurred on | Date and time | Time zone independent | Required | |
 
@@ -171,54 +172,56 @@ One row per failed source record, linked to the job that produced it.
 
 | Value | Label |
 | --- | --- |
-| 1 | Account |
-| 2 | Contact |
-| 3 | Customer Address |
-| 4 | Affiliation |
+| 126870001 | Account |
+| 126870002 | Contact |
+| 126870003 | Customer Address |
+| 126870004 | Affiliation |
 
 ### Choice: Phase (`ts_phase`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Picklists |
-| 2 | HCO |
-| 3 | Addresses |
-| 4 | Hierarchy |
-| 5 | HCO Relations |
-| 6 | HCP |
-| 7 | HCP Activity |
+| 126870001 | Picklists |
+| 126870002 | HCO |
+| 126870003 | Addresses |
+| 126870004 | Hierarchy |
+| 126870005 | HCP |
+| 126870006 | HCP Activity |
+
+HCO–HCO relation failures use phase **HCO**. There is no separate HCO Relations choice on the table.
 
 ### Choice: Operation (`ts_operation`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Validate |
-| 2 | Create |
-| 3 | Update |
-| 4 | Upsert |
-| 5 | Relate |
+| 126870001 | Validate |
+| 126870002 | Create |
+| 126870003 | Update |
+| 126870004 | Upsert |
+| 126870005 | Relate |
 
 ### Choice: Error category (`ts_errorcategory`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Validation |
-| 2 | Mapping |
-| 3 | Lookup |
-| 4 | Dataverse |
-| 5 | Timeout |
-| 6 | Unknown |
+| 126870001 | Validation |
+| 126870002 | Mapping |
+| 126870003 | Lookup |
+| 126870004 | Timeout |
+| 126870005 | Unknown |
+
+Dataverse HTTP errors use **Unknown** and store the status on `ts_httpstatus`. Timeouts use **Timeout**.
 
 ### Choice: Retry status (`ts_retrystatus`)
 
 | Value | Label |
 | --- | --- |
-| 1 | Pending |
-| 2 | Retried |
-| 3 | Resolved |
-| 4 | Ignored |
+| 126870001 | Pending |
+| 126870002 | Retried |
+| 126870003 | Resolved |
+| 126870004 | Ignored |
 
-Default: **Pending** (1).
+Default: **Pending** (126870001).
 
 ### Alternate key
 
@@ -236,7 +239,8 @@ Create the lookup from Integration Failure.
 | --- | --- |
 | Schema name | `ts_integrationfailure_job` |
 | Type | Many-to-one |
-| Lookup column on Integration Failure | `ts_integrationjobid` |
+| Lookup column on Integration Failure | `ts_integrationjob` |
+| Web API navigation property | `ts_IntegrationJob` |
 | Related table | `ts_integrationjob` |
 | Behavior | Parental |
 | Delete | Cascade All |

@@ -42,6 +42,8 @@ def daemonize() -> None:
         "--affiliations-only",
         "--codbase",
         "WUK",
+        "--trigger",
+        "daemon",
     )
 
 

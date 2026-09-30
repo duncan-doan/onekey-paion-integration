@@ -38,6 +38,7 @@ from integration import (
     setup_logging,
     MappingValidator,
 )
+from integration.job_trace import TRIGGER_BY_NAME
 from integration.env import REPO_ROOT, load_env
 
 
@@ -147,6 +148,16 @@ def parse_args():
         help="Directory for delta watermarks (default: logs/)",
     )
 
+    parser.add_argument(
+        "--trigger",
+        choices=sorted(TRIGGER_BY_NAME),
+        default="manual",
+        help="How this job was started (stored on the integration job row)",
+    )
+    parser.add_argument(
+        "--retry-of-job",
+        help="ts_jobid of an earlier integration job this run retries",
+    )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
@@ -287,6 +298,8 @@ def main():
     engine = create_sync_engine(
         onekey, dataverse, args.config_dir, bulk_batch_size=args.bulk_batch_size
     )
+    engine.tracer.trigger = TRIGGER_BY_NAME[args.trigger]
+    engine.tracer.retry_of_job_id = args.retry_of_job
 
     try:
         if args.delta:
@@ -353,6 +366,8 @@ def main():
         print("SYNC SUMMARY")
         print("=" * 60)
         print(f"Success: {result.get('success', False)}")
+        if result.get("job_id"):
+            print(f"Job ID:  {result['job_id']} ({result.get('trace_status', '')})")
         print(f"Codebases: {', '.join(codebases)}")
         if result.get("mode") == "affiliations_only":
             print("Mode: affiliations-only (contracted IDs)")

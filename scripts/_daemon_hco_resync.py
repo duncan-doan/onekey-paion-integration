@@ -48,6 +48,8 @@ def daemonize() -> None:
         "--codbase",
         "WUK",
         "--hco-only",
+        "--trigger",
+        "daemon",
     )
 
 
