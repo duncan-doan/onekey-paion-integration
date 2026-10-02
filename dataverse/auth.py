@@ -150,7 +150,7 @@ class TokenProvider:
                     60, expires_in - _RENEW_MARGIN_SECONDS
                 )
                 logger.info(
-                    "Acquired Dataverse token for %s (valid %ds)",
+                    "Acquired Dataverse token: scope=%s valid_s=%d",
                     self.scope,
                     expires_in,
                 )

@@ -140,17 +140,20 @@ def apply_updates(
             dataverse.update_multiple("accounts", payloads)
             updated += len(batch)
             logger.info(
-                "Hierarchy UpdateMultiple batch %d: linked %d/%d (running %d)",
+                "Hierarchy progress: batch=%d linked=%d done=%d total=%d",
                 i,
                 len(batch),
-                total,
                 updated,
+                total,
             )
         except DataverseHTTPError as exc:
             logger.warning(
-                "Hierarchy batch %d failed (%s); falling back to PATCH",
+                "UpdateMultiple failed for hierarchy batch %d, linking one by one: "
+                "records=%d status=%s error=%r",
                 i,
-                exc,
+                len(batch),
+                exc.status_code,
+                str(exc)[:300],
             )
             for row in batch:
                 try:
@@ -171,7 +174,11 @@ def apply_updates(
                         if match_field
                         else row.get("accountid")
                     )
-                    logger.error("Failed to link %s: %s", label, single_exc)
+                    logger.error(
+                        "Account %s failed (relate parent): error=%r",
+                        label,
+                        str(single_exc)[:500],
+                    )
                     if failures is not None:
                         failures.append((str(label) if label else "", single_exc))
     return updated, failed

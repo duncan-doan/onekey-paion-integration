@@ -4,6 +4,7 @@ import logging
 import random
 import re
 import time
+from dataclasses import asdict, dataclass
 
 import requests
 
@@ -14,6 +15,32 @@ from .exceptions import DataverseHTTPError
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Web API base in absolute URLs (paging links); log lines keep the rest.
+_API_BASE = re.compile(r"^https?://[^/]+/api/data/v[\d.]+/")
+
+
+def _log_path(path: str) -> str:
+    """Entity set and key of a request, without host, API version or query."""
+    return _API_BASE.sub("", path.split("?", 1)[0])
+
+
+@dataclass
+class RequestStats:
+    """Running totals of the requests a client has sent.
+
+    The sync engine reads them when a job starts and finishes, and logs the
+    difference as one ``http_summary`` line per job.
+    """
+
+    calls: int = 0  # request() calls
+    attempts: int = 0  # HTTP attempts, retries included
+    throttled: int = 0  # 429 responses
+    failed: int = 0  # calls that raised after the last attempt
+    seconds: float = 0.0  # time inside request(), retry waits included
+
+    def as_dict(self) -> dict:
+        return asdict(self)
 
 # Microsoft recommends 100–1000 targets per CreateMultiple/UpdateMultiple for
 # standard tables; there is no fixed record maximum (message size / timeout
@@ -78,6 +105,7 @@ class DataverseClient:
             timeout=config.timeout,
         )
         self._session = session or requests.Session()
+        self.stats = RequestStats()
 
     @classmethod
     def connect(cls, environment_url, tenant_id, client_id, client_secret, **kwargs):
@@ -133,13 +161,43 @@ class DataverseClient:
         )
 
     def request(self, method, path, **kwargs):
-        """Issue one authenticated Web API request, retrying transient failures."""
+        """Issue one authenticated Web API request, retrying transient failures.
+
+        Each call is logged at DEBUG as ``dataverse_call`` and added to ``stats``.
+        """
+        started = time.monotonic()
+        attempts_before = self.stats.attempts
+        status = None
+        self.stats.calls += 1
+        try:
+            response = self._send(method, path, **kwargs)
+            status = response.status_code
+            return response
+        except Exception as exc:
+            self.stats.failed += 1
+            status = getattr(exc, "status_code", None) or type(exc).__name__
+            raise
+        finally:
+            elapsed = time.monotonic() - started
+            self.stats.seconds += elapsed
+            logger.debug(
+                "Dataverse %s %s: status=%s attempts=%d ms=%.0f",
+                method,
+                _log_path(path),
+                status,
+                self.stats.attempts - attempts_before,
+                elapsed * 1000,
+            )
+
+    def _send(self, method, path, **kwargs):
+        """The retry loop behind :meth:`request`."""
         url = path if path.startswith("http") else f"{self.config.api_url}/{path.lstrip('/')}"
         extra_headers = kwargs.pop("headers", None)
         kwargs.setdefault("timeout", self.config.timeout)
 
         last_error = None
         for attempt in range(1, self.config.max_retries + 1):
+            self.stats.attempts += 1
             # Rebuild headers each attempt so a renewed token is picked up.
             try:
                 response = self._session.request(
@@ -152,13 +210,15 @@ class DataverseClient:
             else:
                 if response.status_code == 401 and attempt < self.config.max_retries:
                     # Token rejected mid-run; force a refresh and try again.
-                    logger.info("Dataverse returned 401; refreshing the token.")
+                    logger.info("Dataverse returned 401, refreshing token: path=%s", _log_path(path))
                     self.tokens.token(force_refresh=True)
                     continue
                 if response.status_code not in _RETRY_STATUSES:
                     self._raise_for_status(response, url)
                     return response
 
+                if response.status_code == 429:
+                    self.stats.throttled += 1
                 try:
                     self._raise_for_status(response, url)
                 except DataverseHTTPError as exc:
@@ -176,8 +236,13 @@ class DataverseClient:
             if attempt < self.config.max_retries:
                 delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.warning(
-                    "Dataverse %s %s failed (attempt %d/%d); retrying in %.1fs",
-                    method, url, attempt, self.config.max_retries, delay,
+                    "Dataverse %s %s retrying: attempt=%d/%d reason=%s delay_s=%.1f",
+                    method,
+                    _log_path(path),
+                    attempt,
+                    self.config.max_retries,
+                    getattr(last_error, "status_code", None) or "connection_error",
+                    delay,
                 )
                 time.sleep(delay)
 
@@ -513,8 +578,8 @@ class DataverseClient:
         def _create_batch(batch):
             if entity_set in _NO_CREATE_MULTIPLE:
                 logger.info(
-                    "Creating %d %s one-by-one (CreateMultiple not supported)",
-                    len(batch), entity_set,
+                    "CreateMultiple not supported for %s, creating one by one: records=%d",
+                    entity_set, len(batch),
                 )
                 for index, match_value, payload in batch:
                     _create_one(index, match_value, payload)
@@ -525,12 +590,13 @@ class DataverseClient:
                 ids = self.create_multiple(entity_set, payloads)
                 for (index, match_value, _), record_id in zip(batch, ids):
                     results[index] = (match_value, record_id, True)
-            except DataverseHTTPError:
+            except DataverseHTTPError as exc:
                 if not fallback_on_error:
                     raise
                 logger.warning(
-                    "CreateMultiple failed for %d %s; falling back to single creates",
-                    len(batch), entity_set,
+                    "CreateMultiple failed for %s, creating one by one: "
+                    "records=%d status=%s error=%r",
+                    entity_set, len(batch), exc.status_code, str(exc)[:300],
                 )
                 for index, match_value, payload in batch:
                     _create_one(index, match_value, payload)
@@ -546,8 +612,8 @@ class DataverseClient:
         def _update_batch(batch):
             if entity_set in _NO_UPDATE_MULTIPLE:
                 logger.info(
-                    "Updating %d %s one-by-one (UpdateMultiple not supported)",
-                    len(batch), entity_set,
+                    "UpdateMultiple not supported for %s, updating one by one: records=%d",
+                    entity_set, len(batch),
                 )
                 for index, match_value, payload in batch:
                     _update_one(index, match_value, payload)
@@ -558,12 +624,13 @@ class DataverseClient:
                 self.update_multiple(entity_set, payloads)
                 for index, match_value, payload in batch:
                     results[index] = (match_value, payload[primary_id], False)
-            except DataverseHTTPError:
+            except DataverseHTTPError as exc:
                 if not fallback_on_error:
                     raise
                 logger.warning(
-                    "UpdateMultiple failed for %d %s; falling back to single updates",
-                    len(batch), entity_set,
+                    "UpdateMultiple failed for %s, updating one by one: "
+                    "records=%d status=%s error=%r",
+                    entity_set, len(batch), exc.status_code, str(exc)[:300],
                 )
                 for index, match_value, payload in batch:
                     _update_one(index, match_value, payload)

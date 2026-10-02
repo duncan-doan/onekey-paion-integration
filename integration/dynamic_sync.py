@@ -11,13 +11,14 @@ from OneKey to Dataverse with:
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .dynamic_mapping import load_mapping_config, MappingConfig
 from .transform import TransformEngine
 from .validation import MappingValidator, DataverseValidator, ValidationResult
-from .sync_logger import SyncLogger, setup_logging
+from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from .picklist_sync import sync_picklists_from_config
@@ -56,6 +57,11 @@ _EMPTY_HIERARCHY = {
     "missing_child": 0,
     "missing_parent": 0,
 }
+
+
+def _ctx(engine, **context) -> dict:
+    """Context for an engine log line: the given fields, then the short job ID."""
+    return {**context, "job": short_job(engine.tracer.job_id)}
 
 
 def _empty_entity_stats() -> dict:
@@ -118,7 +124,7 @@ class DynamicSyncEngine:
 
     def validate_before_sync(self) -> ValidationResult:
         """Run all validation checks before starting sync."""
-        self.sync_logger.log_phase("PRE-SYNC VALIDATION")
+        started = self.sync_logger.phase_started("validation")
 
         result = ValidationResult()
 
@@ -130,7 +136,12 @@ class DynamicSyncEngine:
         result.merge(schema_result)
         self.sync_logger.log_validation_result(schema_result, "Dataverse Schema")
 
-        logger.info("Pre-sync validation: %s", result.summary())
+        self.sync_logger.phase_finished(
+            "validation",
+            started,
+            {"errors": len(result.errors), "warnings": len(result.warnings)},
+            outcome="ok" if result.is_valid else "invalid",
+        )
         return result
 
     def _begin_job(
@@ -148,18 +159,69 @@ class DynamicSyncEngine:
             date_from=date_from,
             date_to=date_to,
         )
+        self.sync_logger.job_id = self.tracer.job_id
+        self._http_baseline = self._http_snapshot()
 
     def _checkpoint(self, results: dict | None) -> None:
         self.tracer.checkpoint(results)
 
     def _finish_job(self, results: dict | None, aborted: bool = False) -> None:
         self.tracer.finish(results, aborted=aborted)
+        self._log_http_summary()
+
+    def _http_snapshot(self) -> dict[str, dict]:
+        """Request totals of the OneKey and Dataverse clients, by service."""
+        clients = {
+            "onekey": getattr(getattr(self.onekey, "session", None), "stats", None),
+            "dataverse": getattr(self.dataverse, "stats", None),
+        }
+        return {
+            service: stats.as_dict()
+            for service, stats in clients.items()
+            if hasattr(stats, "as_dict")
+        }
+
+    def _log_http_summary(self) -> None:
+        """Log one http_summary line per service for the job that just finished."""
+        baseline = getattr(self, "_http_baseline", {}) or {}
+        for service, now in self._http_snapshot().items():
+            before = baseline.get(service, {})
+            delta = {key: now[key] - before.get(key, 0) for key in now}
+            calls = delta["calls"]
+            if not calls:
+                continue
+            logger.info(
+                msg(
+                    f"{'OneKey' if service == 'onekey' else 'Dataverse'} calls",
+                    _ctx(self),
+                    calls=calls,
+                    retries=delta["attempts"] - calls,
+                    throttled=delta["throttled"],
+                    failed=delta["failed"],
+                    seconds=delta["seconds"],
+                    avg_ms=round(delta["seconds"] * 1000 / calls),
+                )
+            )
 
     @contextmanager
-    def _phase(self, phase: int):
+    def _phase(self, phase: int, name: str, **fields):
+        """Set the trace phase and log phase_start / phase_complete with timing.
+
+        The body stores its counts in the yielded dict under ``"stats"``.
+        """
         self._trace_phase = phase
+        outcome: dict = {}
+        started = self.sync_logger.phase_started(name, **fields)
         try:
-            yield
+            yield outcome
+        except Exception as exc:
+            self.sync_logger.phase_finished(
+                name, started, outcome.get("stats"), outcome="error",
+                error=type(exc).__name__, **fields,
+            )
+            raise
+        else:
+            self.sync_logger.phase_finished(name, started, outcome.get("stats"), **fields)
         finally:
             self.tracer.flush(heartbeat=True)
 
@@ -199,15 +261,17 @@ class DynamicSyncEngine:
 
     def sync_picklists(self, dry_run: bool = False) -> list[dict]:
         """Phase 0: upsert choice options from value_mapping.csv into Dataverse."""
-        self.sync_logger.log_phase("PICKLIST SYNC")
-        if not hasattr(self.dataverse, "request"):
-            logger.info(
-                "Skipping picklist sync (Dataverse client has no metadata API)"
+        with self._phase(PHASE_PICKLISTS, "picklists") as phase:
+            if not hasattr(self.dataverse, "request"):
+                logger.info(
+                    msg("Picklists skipped, Dataverse client has no metadata API", _ctx(self))
+                )
+                return []
+            picklists = sync_picklists_from_config(
+                self.dataverse, self.config, dry_run=dry_run
             )
-            return []
-        return sync_picklists_from_config(
-            self.dataverse, self.config, dry_run=dry_run
-        )
+            phase["stats"] = {"types": len(picklists)}
+            return picklists
 
     def sync_full(
         self,
@@ -264,10 +328,10 @@ class DynamicSyncEngine:
 
             validation = self.validate_before_sync()
             if not validation.is_valid:
-                logger.error("Pre-sync validation failed. Aborting sync.")
+                logger.error(msg("Sync aborted, pre-sync validation failed", _ctx(self)))
                 results["validation"] = validation.summary()
                 results["errors"].append(validation.summary())
-                self.sync_logger.end_sync(success=False)
+                self.sync_logger.end_sync(success=False, results=results)
                 return results
 
             results["success"] = True
@@ -278,13 +342,16 @@ class DynamicSyncEngine:
                     results["picklists"] = self.sync_picklists(dry_run=dry_run)
                 except Exception as e:
                     # Missing option sets on a fresh env must not block HCO/HCP load.
-                    logger.exception("Picklist sync failed — continuing without option upsert")
+                    logger.exception(
+                        msg("Picklist sync failed, continuing without option upsert", _ctx(self))
+                    )
                     results["errors"].append(f"picklists: {e}")
                     results["picklists"] = []
                 self._checkpoint(results)
 
             for codebase in codebases:
-                self.sync_logger.log_phase(f"SYNC CODEBASE: {codebase}")
+                codebase_started = self.sync_logger.phase_started("codebase", codbase=codebase)
+                codebase_failed = False
                 try:
                     flattened_hcos: list[dict] = []
 
@@ -347,16 +414,23 @@ class DynamicSyncEngine:
                             self._checkpoint(results)
 
                 except Exception as e:
-                    logger.exception("Error syncing codebase %s", codebase)
+                    logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
                     results["errors"].append(f"{codebase}: {e}")
                     results["success"] = False
+                    codebase_failed = True
                     self._checkpoint(results)
+                self.sync_logger.phase_finished(
+                    "codebase",
+                    codebase_started,
+                    outcome="error" if codebase_failed else "ok",
+                    codbase=codebase,
+                )
 
             gap_path = self.transformer.picklist_gaps.write_report()
             results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
             results["picklist_gap_report"] = str(gap_path) if gap_path else None
 
-            self.sync_logger.end_sync(success=results["success"])
+            self.sync_logger.end_sync(success=results["success"], results=results)
             return results
         except Exception as exc:
             aborted = True
@@ -400,16 +474,17 @@ class DynamicSyncEngine:
 
             validation = self.validate_before_sync()
             if not validation.is_valid:
-                logger.error("Pre-sync validation failed. Aborting sync.")
+                logger.error(msg("Sync aborted, pre-sync validation failed", _ctx(self)))
                 results["validation"] = validation.summary()
                 results["errors"].append(validation.summary())
-                self.sync_logger.end_sync(success=False)
+                self.sync_logger.end_sync(success=False, results=results)
                 return results
 
             results["success"] = True
 
             for codebase in codebases:
-                self.sync_logger.log_phase(f"AFFILIATIONS ONLY: {codebase}")
+                codebase_started = self.sync_logger.phase_started("codebase", codbase=codebase)
+                codebase_failed = False
                 try:
                     workplaces, individuals, activities = self._collect_population_packets(
                         codebase, max_records=max_records
@@ -428,12 +503,13 @@ class DynamicSyncEngine:
                     self._contracted_individual_eids |= contracted_ind
 
                     logger.info(
-                        "Contracted allowlists for %s: %d workplaces, %d individuals, "
-                        "%d activity packets",
-                        codebase,
-                        len(contracted_wp),
-                        len(contracted_ind),
-                        len(activities),
+                        msg(
+                            "Contracted allowlist",
+                            _ctx(self, codbase=codebase),
+                            workplaces=len(contracted_wp),
+                            individuals=len(contracted_ind),
+                            activity_packets=len(activities),
+                        )
                     )
 
                     if not dry_run and contracted_wp:
@@ -455,16 +531,23 @@ class DynamicSyncEngine:
                     self._merge_entity(results["activity_affiliations"], act_aff)
                     self._checkpoint(results)
                 except Exception as e:
-                    logger.exception("Error syncing affiliations for %s", codebase)
+                    logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
                     results["errors"].append(f"{codebase}: {e}")
                     results["success"] = False
+                    codebase_failed = True
                     self._checkpoint(results)
+                self.sync_logger.phase_finished(
+                    "codebase",
+                    codebase_started,
+                    outcome="error" if codebase_failed else "ok",
+                    codbase=codebase,
+                )
 
             gap_path = self.transformer.picklist_gaps.write_report()
             results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
             results["picklist_gap_report"] = str(gap_path) if gap_path else None
 
-            self.sync_logger.end_sync(success=results["success"])
+            self.sync_logger.end_sync(success=results["success"], results=results)
             return results
         except Exception as exc:
             aborted = True
@@ -485,10 +568,7 @@ class DynamicSyncEngine:
         individuals: list[dict] = []
         activities: list[dict] = []
 
-        logger.info(
-            "Walking refreshMyOnekey population for %s (affiliations allowlist)...",
-            codebase,
-        )
+        started = self.sync_logger.phase_started("extract", codbase=codebase)
         for record in self.onekey.iter_population(
             cod_base=codebase, max_records=max_records
         ):
@@ -500,12 +580,15 @@ class DynamicSyncEngine:
             elif entity_type == "ACTIVITY":
                 activities.append(record)
 
-        logger.info(
-            "Population %s: %d workplaces, %d individuals, %d activities",
-            codebase,
-            len(workplaces),
-            len(individuals),
-            len(activities),
+        self.sync_logger.phase_finished(
+            "extract",
+            started,
+            {
+                "workplaces": len(workplaces),
+                "individuals": len(individuals),
+                "activities": len(activities),
+            },
+            codbase=codebase,
         )
         return workplaces, individuals, activities
 
@@ -554,10 +637,10 @@ class DynamicSyncEngine:
 
             validation = self.validate_before_sync()
             if not validation.is_valid:
-                logger.error("Pre-sync validation failed. Aborting sync.")
+                logger.error(msg("Sync aborted, pre-sync validation failed", _ctx(self)))
                 results["validation"] = validation.summary()
                 results["errors"].append(validation.summary())
-                self.sync_logger.end_sync(success=False)
+                self.sync_logger.end_sync(success=False, results=results)
                 return results
 
             results["success"] = True
@@ -567,15 +650,18 @@ class DynamicSyncEngine:
                 try:
                     results["picklists"] = self.sync_picklists(dry_run=dry_run)
                 except Exception as e:
-                    logger.exception("Picklist sync failed — continuing without option upsert")
+                    logger.exception(
+                        msg("Picklist sync failed, continuing without option upsert", _ctx(self))
+                    )
                     results["errors"].append(f"picklists: {e}")
                     results["picklists"] = []
                 self._checkpoint(results)
 
             for codebase in codebases:
-                self.sync_logger.log_phase(
-                    f"DELTA SYNC: {codebase} ({date_from} to {date_to})"
+                codebase_started = self.sync_logger.phase_started(
+                    "codebase", codbase=codebase, date_from=date_from, date_to=date_to
                 )
+                codebase_failed = False
                 try:
                     delta_result = self._sync_delta_codebase(
                         codebase,
@@ -604,16 +690,23 @@ class DynamicSyncEngine:
                         ).get(code, 0)
                     self._checkpoint(results)
                 except Exception as e:
-                    logger.exception("Error in delta sync for %s", codebase)
+                    logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
                     results["errors"].append(f"{codebase}: {e}")
                     results["success"] = False
+                    codebase_failed = True
                     self._checkpoint(results)
+                self.sync_logger.phase_finished(
+                    "codebase",
+                    codebase_started,
+                    outcome="error" if codebase_failed else "ok",
+                    codbase=codebase,
+                )
 
             gap_path = self.transformer.picklist_gaps.write_report()
             results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
             results["picklist_gap_report"] = str(gap_path) if gap_path else None
 
-            self.sync_logger.end_sync(success=results["success"])
+            self.sync_logger.end_sync(success=results["success"], results=results)
             return results
         except Exception as exc:
             aborted = True
@@ -641,13 +734,15 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         flattened: list[dict] | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
-        with self._phase(PHASE_HCO):
-            return self._sync_hcos_impl(
+        with self._phase(PHASE_HCO, "accounts", codbase=codebase) as phase:
+            result = self._sync_hcos_impl(
                 codebase,
                 max_records=max_records,
                 dry_run=dry_run,
                 flattened=flattened,
             )
+            phase["stats"] = result[0]
+            return result
 
     def _sync_hcos_impl(
         self,
@@ -663,24 +758,22 @@ class DynamicSyncEngine:
         Returns:
             stats, flattened HCO rows, raw OneKey WORKPLACE records (for W2W).
         """
-        self.sync_logger.log_phase(f"HCO SYNC: {codebase}")
 
         result = _empty_entity_stats()
         raw_workplaces: list[dict] = []
 
         if flattened is None:
             hcos = []
-            logger.info(
-                "Extracting HCOs from OneKey %s (refreshMyOnekey population)...",
-                codebase,
-            )
+            started = self.sync_logger.phase_started("extract", codbase=codebase)
             for record in self.onekey.iter_population(
                 cod_base=codebase, max_records=max_records
             ):
                 if (record.get("entityType") or "").upper() == "WORKPLACE":
                     hcos.append(record)
             raw_workplaces = hcos
-            logger.info("Extracted %d contracted HCOs from %s", len(hcos), codebase)
+            self.sync_logger.phase_finished(
+                "extract", started, {"workplaces": len(hcos)}, codbase=codebase
+            )
             flattened = [flatten_hco(r) for r in hcos]
 
         contracted = {
@@ -699,19 +792,23 @@ class DynamicSyncEngine:
         self._contracted_workplace_eids |= contracted
         if contracted:
             logger.info(
-                "Contracted workplace allowlist for %s: %d EIDs "
-                "(relations/hierarchy limited to this set)",
-                codebase,
-                len(contracted),
+                msg(
+                    "Contracted allowlist",
+                    _ctx(self, codbase=codebase),
+                    workplaces=len(contracted),
+                )
             )
 
         if not flattened:
             return result, flattened, raw_workplaces
 
         logger.info(
-            "Upserting %d accounts (batch size %d); parent links deferred",
-            len(flattened),
-            self.bulk_batch_size,
+            msg(
+                "Upserting accounts",
+                _ctx(self),
+                records=len(flattened),
+                batch_size=self.bulk_batch_size,
+            )
         )
 
         total = len(flattened)
@@ -762,7 +859,8 @@ class DynamicSyncEngine:
         if dry_run:
             for workplace_eid, _, _, payload, _ in prepared:
                 logger.debug(
-                    "DRY RUN: Would upsert account %s: %s", workplace_eid, payload
+                    "Dry run account %s: fields=%s | job=%s",
+                    workplace_eid, ",".join(sorted(payload)), short_job(self.tracer.job_id),
                 )
                 result["processed"] += 1
             self.sync_logger.log_progress("accounts", len(prepared), total)
@@ -810,7 +908,6 @@ class DynamicSyncEngine:
                 workplace_eid,
                 account_id,
                 "create" if created else "update",
-                hco.get("officialName"),
             )
             if done % 100 == 0 or done == len(prepared):
                 self.sync_logger.log_progress("accounts", done, len(prepared))
@@ -822,8 +919,9 @@ class DynamicSyncEngine:
         hcos: list[dict],
         dry_run: bool = False,
     ) -> dict:
-        with self._phase(PHASE_ADDRESSES):
-            return self._sync_addresses_impl(hcos, dry_run=dry_run)
+        with self._phase(PHASE_ADDRESSES, "addresses") as phase:
+            phase["stats"] = self._sync_addresses_impl(hcos, dry_run=dry_run)
+            return phase["stats"]
 
     def _sync_addresses_impl(
         self,
@@ -831,7 +929,6 @@ class DynamicSyncEngine:
         dry_run: bool = False,
     ) -> dict:
         """Phase 2: upsert customeraddress rows for flattened HCOs."""
-        self.sync_logger.log_phase("ADDRESS SYNC (customeraddress)")
         result = _empty_entity_stats()
         if not hcos:
             return result
@@ -883,7 +980,7 @@ class DynamicSyncEngine:
                 continue
             prepared.append((key, payload, workplace_eid))
 
-        logger.info("Prepared %d customeraddress payloads", len(prepared))
+        logger.info(msg("Upserting addresses", _ctx(self), records=len(prepared)))
         if dry_run:
             result["processed"] = len(prepared)
             return result
@@ -925,7 +1022,6 @@ class DynamicSyncEngine:
                 key,
                 record_id,
                 "create" if created else "update",
-                workplace_eid,
             )
 
         return result
@@ -937,13 +1033,14 @@ class DynamicSyncEngine:
         skip_unchanged: bool = True,
         allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
-        with self._phase(PHASE_HIERARCHY):
-            return self._sync_hierarchy_impl(
+        with self._phase(PHASE_HIERARCHY, "hierarchy") as phase:
+            phase["stats"] = self._sync_hierarchy_impl(
                 hcos,
                 dry_run=dry_run,
                 skip_unchanged=skip_unchanged,
                 allowed_workplace_eids=allowed_workplace_eids,
             )
+            return phase["stats"]
 
     def _sync_hierarchy_impl(
         self,
@@ -953,7 +1050,6 @@ class DynamicSyncEngine:
         allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
         """Phase 3: set parentaccountid from managerWorkplaceEid edges."""
-        self.sync_logger.log_phase("HCO HIERARCHY LINK")
         result = _empty_hierarchy_stats()
         allow = (
             allowed_workplace_eids
@@ -964,12 +1060,7 @@ class DynamicSyncEngine:
         result["edges"] = len(edges)
         if not edges:
             logger.info(
-                "No parent edges to link"
-                + (
-                    " (after contracted-ID filter)"
-                    if allow is not None
-                    else ""
-                )
+                msg("No parent edges to link", _ctx(self), contracted_filter=allow is not None)
             )
             return result
 
@@ -982,7 +1073,7 @@ class DynamicSyncEngine:
                     ready += 1
             result["linked"] = ready
             logger.info(
-                "DRY RUN: would link up to %d/%d hierarchy edges", ready, len(edges)
+                msg("Dry run, would link parents", _ctx(self), ready=ready, edges=len(edges))
             )
             return result
 
@@ -1018,12 +1109,14 @@ class DynamicSyncEngine:
             )
 
         logger.info(
-            "Hierarchy plan: ready=%d already_linked=%d missing_child=%d "
-            "missing_parent=%d",
-            stats["ready"],
-            stats["already_linked"],
-            stats["missing_child"],
-            stats["missing_parent"],
+            msg(
+                "Hierarchy plan",
+                _ctx(self),
+                ready=stats["ready"],
+                already_linked=stats["already_linked"],
+                missing_child=stats["missing_child"],
+                missing_parent=stats["missing_parent"],
+            )
         )
 
         if not updates:
@@ -1059,12 +1152,13 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
-        with self._phase(PHASE_HCO_RELATIONS):
-            return self._sync_hco_relations_impl(
+        with self._phase(PHASE_HCO_RELATIONS, "hco_relations") as phase:
+            phase["stats"] = self._sync_hco_relations_impl(
                 raw_workplaces,
                 dry_run=dry_run,
                 allowed_workplace_eids=allowed_workplace_eids,
             )
+            return phase["stats"]
 
     def _sync_hco_relations_impl(
         self,
@@ -1073,7 +1167,6 @@ class DynamicSyncEngine:
         allowed_workplace_eids: set[str] | None = None,
     ) -> dict:
         """Phase 3b: upsert deduped HCO–HCO links into ``ts_affiliation``."""
-        self.sync_logger.log_phase("HCO-HCO RELATION SYNC (ts_affiliation)")
         result = _empty_entity_stats()
 
         allow = (
@@ -1086,21 +1179,18 @@ class DynamicSyncEngine:
         )
         if not edges:
             logger.info(
-                "No HCO-HCO relations to sync"
-                + (
-                    " (after contracted-ID filter)"
-                    if allow is not None
-                    else ""
-                )
+                msg("No HCO relations to sync", _ctx(self), contracted_filter=allow is not None)
             )
             return result
 
         logger.info(
-            "Upserting %d HCO-HCO affiliation(s) from %d workplace(s) "
-            "(contracted allowlist=%s)",
-            len(edges),
-            len(raw_workplaces),
-            len(allow) if allow is not None else "off",
+            msg(
+                "Upserting HCO relations",
+                _ctx(self),
+                records=len(edges),
+                workplaces=len(raw_workplaces),
+                allowlist=len(allow) if allow is not None else "off",
+            )
         )
 
         affiliation_key = self.config.require_key_field("ts_affiliation")
@@ -1193,7 +1283,9 @@ class DynamicSyncEngine:
 
         if dry_run:
             result["processed"] = len(prepared)
-            logger.info("DRY RUN: would upsert %d HCO-HCO affiliations", len(prepared))
+            logger.info(
+                msg("Dry run, would upsert HCO relations", _ctx(self), records=len(prepared))
+            )
             return result
 
         if not prepared:
@@ -1241,7 +1333,6 @@ class DynamicSyncEngine:
                     external_id,
                     record_id,
                     "create" if created else "update",
-                    f"{edge.get('fromWorkplaceEid')} → {edge.get('toWorkplaceEid')}",
                 )
 
             self.sync_logger.log_progress("affiliations", done, len(prepared))
@@ -1253,10 +1344,11 @@ class DynamicSyncEngine:
         activity_records: list[dict],
         dry_run: bool = False,
     ) -> dict:
-        with self._phase(PHASE_HCP_ACTIVITY):
-            return self._sync_activity_affiliations_impl(
+        with self._phase(PHASE_HCP_ACTIVITY, "activity_affiliations") as phase:
+            phase["stats"] = self._sync_activity_affiliations_impl(
                 activity_records, dry_run=dry_run
             )
+            return phase["stats"]
 
     def _sync_activity_affiliations_impl(
         self,
@@ -1264,16 +1356,14 @@ class DynamicSyncEngine:
         dry_run: bool = False,
     ) -> dict:
         """Upsert HCP–HCO Activity rows into ``ts_affiliation`` (AFF-*)."""
-        self.sync_logger.log_phase("HCP-HCO ACTIVITY AFFILIATION SYNC (ts_affiliation)")
         result = _empty_entity_stats()
 
         if not activity_records:
-            logger.info("No HCP-HCO activities to sync")
+            logger.info(msg("No activity affiliations to upsert", _ctx(self)))
             return result
 
         logger.info(
-            "Upserting %d HCP-HCO activity affiliation(s)",
-            len(activity_records),
+            msg("Upserting activity affiliations", _ctx(self), records=len(activity_records))
         )
 
         affiliation_key = self.config.require_key_field("ts_affiliation")
@@ -1301,9 +1391,11 @@ class DynamicSyncEngine:
 
         if skipped_out_of_contract:
             logger.info(
-                "Skipped %d HCP-HCO affiliations outside contracted population "
-                "(workplace and/or individual)",
-                skipped_out_of_contract,
+                msg(
+                    "Activity affiliations skipped outside contracted population",
+                    _ctx(self),
+                    records=skipped_out_of_contract,
+                )
             )
 
         individual_eids = sorted(
@@ -1388,8 +1480,11 @@ class DynamicSyncEngine:
         if dry_run:
             result["processed"] = len(prepared)
             logger.info(
-                "DRY RUN: would upsert %d HCP-HCO activity affiliations",
-                len(prepared),
+                msg(
+                    "Dry run, would upsert activity affiliations",
+                    _ctx(self),
+                    records=len(prepared),
+                )
             )
             return result
 
@@ -1438,7 +1533,6 @@ class DynamicSyncEngine:
                     external_id,
                     record_id,
                     "create" if created else "update",
-                    f"{flat.get('individualEid')} → {flat.get('workplaceEid')}",
                 )
 
             self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
@@ -1465,10 +1559,7 @@ class DynamicSyncEngine:
         activities_by_individual: dict[str, dict] = {}
         all_activities: list[dict] = []
 
-        logger.info(
-            "Extracting HCPs from OneKey %s (joining INDIVIDUAL + ACTIVITY)...",
-            codebase,
-        )
+        started = self.sync_logger.phase_started("extract", codbase=codebase, entity="hcp")
 
         for record in self.onekey.iter_population(
             cod_base=codebase,
@@ -1516,10 +1607,9 @@ class DynamicSyncEngine:
             if workplace_eid and workplace_eid not in workplaces:
                 skipped_unjoined += 1
                 logger.debug(
-                    "Skipping activity for %s: workplace %s not in contracted "
-                    "population",
-                    individual_eid,
-                    workplace_eid,
+                    "Activity skipped, workplace outside contracted population: "
+                    "individual=%s workplace=%s | job=%s",
+                    individual_eid, workplace_eid, short_job(self.tracer.job_id),
                 )
                 continue
             if not workplace_eid:
@@ -1537,17 +1627,19 @@ class DynamicSyncEngine:
         self._contracted_workplace_eids |= contracted_wp
         self._contracted_individual_eids |= set(individuals)
 
-        logger.info(
-            "Joined %d HCPs from %s (%d individuals, %d main activities, "
-            "%d activity packets, %d workplaces indexed; skipped %d outside "
-            "contracted population)",
-            len(composed),
-            codebase,
-            len(individuals),
-            len(activities_by_individual),
-            len(all_activities),
-            len(workplaces),
-            skipped_unjoined,
+        self.sync_logger.phase_finished(
+            "extract",
+            started,
+            {
+                "hcps": len(composed),
+                "individuals": len(individuals),
+                "main_activities": len(activities_by_individual),
+                "activity_packets": len(all_activities),
+                "workplaces": len(workplaces),
+                "skipped_out_of_contract": skipped_unjoined,
+            },
+            codbase=codebase,
+            entity="hcp",
         )
         return composed, all_activities
 
@@ -1560,8 +1652,8 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
     ) -> dict:
-        with self._phase(PHASE_HCP):
-            return self._sync_hcps_impl(
+        with self._phase(PHASE_HCP, "contacts", codbase=codebase) as phase:
+            phase["stats"] = self._sync_hcps_impl(
                 codebase,
                 max_records=max_records,
                 dry_run=dry_run,
@@ -1569,6 +1661,7 @@ class DynamicSyncEngine:
                 date_to=date_to,
                 composed=composed,
             )
+            return phase["stats"]
 
     def _sync_hcps_impl(
         self,
@@ -1580,7 +1673,6 @@ class DynamicSyncEngine:
         composed: list[dict] | None = None,
     ) -> dict:
         """Sync HCPs for a single codebase using bulk upserts."""
-        self.sync_logger.log_phase(f"HCP SYNC: {codebase}")
 
         result = _empty_entity_stats()
 
@@ -1659,7 +1751,8 @@ class DynamicSyncEngine:
 
             if dry_run:
                 logger.debug(
-                    "DRY RUN: Would upsert contact %s: %s", individual_eid, payload
+                    "Dry run contact %s: fields=%s | job=%s",
+                    individual_eid, ",".join(sorted(payload)), short_job(self.tracer.job_id),
                 )
                 result["processed"] += 1
                 if i % 50 == 0 or i == total:
@@ -1706,14 +1799,12 @@ class DynamicSyncEngine:
                     result["updated"] += 1
                 result["processed"] += 1
                 done += 1
-                name = f"{hcp.get('firstName') or ''} {hcp.get('lastName') or ''}".strip()
                 self._note_success(individual_eid)
                 self.sync_logger.log_record_success(
                     "contact",
                     individual_eid,
                     contact_id,
                     "create" if created else "update",
-                    name,
                 )
 
             self.sync_logger.log_progress("contacts", done, len(prepared))
@@ -1748,6 +1839,9 @@ class DynamicSyncEngine:
         activities_by_individual: dict[str, dict] = {}
         all_activities: list[dict] = []
 
+        started = self.sync_logger.phase_started(
+            "extract", codbase=codebase, date_from=date_from, date_to=date_to
+        )
         for record in self.onekey.iter_population(
             cod_base=codebase,
             date_from=date_from,
@@ -1788,17 +1882,19 @@ class DynamicSyncEngine:
                     ):
                         activities_by_individual[individual_eid] = record
 
-        logger.info(
-            "Delta for %s: %d workplaces, %d individuals, %d main activities, "
-            "%d activity packets (I=%d, U=%d, R=%d)",
-            codebase,
-            len(workplaces),
-            len(individuals),
-            len(activities_by_individual),
-            len(all_activities),
-            result["by_process_code"].get("I", 0),
-            result["by_process_code"].get("U", 0),
-            result["by_process_code"].get("R", 0),
+        self.sync_logger.phase_finished(
+            "extract",
+            started,
+            {
+                "workplaces": len(workplaces),
+                "individuals": len(individuals),
+                "main_activities": len(activities_by_individual),
+                "activity_packets": len(all_activities),
+                "inserted": result["by_process_code"].get("I", 0),
+                "updated": result["by_process_code"].get("U", 0),
+                "removed": result["by_process_code"].get("R", 0),
+            },
+            codbase=codebase,
         )
 
         flattened_hcos: list[dict] = []
@@ -1849,9 +1945,11 @@ class DynamicSyncEngine:
                 )
             if skipped:
                 logger.info(
-                    "Delta HCP: skipped %d activities outside contracted "
-                    "population join",
-                    skipped,
+                    msg(
+                        "Contacts skipped outside contracted population",
+                        _ctx(self),
+                        records=skipped,
+                    )
                 )
             result["contacts"] = self._sync_hcps(
                 codebase,
@@ -1905,7 +2003,7 @@ class DynamicSyncEngine:
                     if record and record.get("contactid"):
                         self._contact_cache[eid] = record["contactid"]
         except Exception as e:
-            logger.warning("Failed bulk contact lookup: %s", e)
+            logger.warning(msg("Contact lookup failed", _ctx(self), error=str(e)))
 
         return {
             str(eid): self._contact_cache[str(eid)]
@@ -1956,7 +2054,7 @@ class DynamicSyncEngine:
                     if record and record.get("accountid"):
                         self._account_cache[eid] = record["accountid"]
         except Exception as e:
-            logger.warning("Failed bulk account lookup: %s", e)
+            logger.warning(msg("Account lookup failed", _ctx(self), error=str(e)))
         
         return {
             str(eid): self._account_cache[str(eid)]

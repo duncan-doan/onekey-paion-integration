@@ -71,6 +71,7 @@ class Engine:
         self.onekey = onekey or FakeOneKey()
         self.tracer = JobTracer(dataverse)
         self.succeeded_ids = set()
+        self.sync_logger = SimpleNamespace(job_id=None)
         self._contracted_workplace_eids = set()
         self._contracted_individual_eids = set()
         self.calls = []
@@ -78,6 +79,8 @@ class Engine:
     _begin_job = DynamicSyncEngine._begin_job
     _checkpoint = DynamicSyncEngine._checkpoint
     _finish_job = DynamicSyncEngine._finish_job
+    _http_snapshot = DynamicSyncEngine._http_snapshot
+    _log_http_summary = DynamicSyncEngine._log_http_summary
 
     def _sync_hcos(self, codebase, flattened=None, **kwargs):
         self.calls.append(("accounts", codebase, [row.get("workplaceEid") for row in flattened]))

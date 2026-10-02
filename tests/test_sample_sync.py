@@ -1,5 +1,7 @@
 """Offline tests for the OneKey to Dataverse sample."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from integration.dynamic_sync import DynamicSyncEngine
@@ -49,11 +51,14 @@ class Engine:
     _begin_job = DynamicSyncEngine._begin_job
     _checkpoint = DynamicSyncEngine._checkpoint
     _finish_job = DynamicSyncEngine._finish_job
+    _http_snapshot = DynamicSyncEngine._http_snapshot
+    _log_http_summary = DynamicSyncEngine._log_http_summary
 
     def __init__(self, onekey, in_dataverse=()):
         self.onekey = onekey
         self.dataverse = FakeDataverse()
         self.tracer = JobTracer(self.dataverse)
+        self.sync_logger = SimpleNamespace(job_id=None)
         self._account_cache = {}
         self._in_dataverse = set(in_dataverse)
         self.calls = []

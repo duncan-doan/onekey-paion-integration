@@ -124,8 +124,8 @@ class OneKeyClient:
         total = envelope.get("totalNumberOfResults")
         if total is not None and total > len(results):
             logger.info(
-                "OneKey matched %s entities; %d returned (resultSize=%s). "
-                "Narrow the criteria to see the rest.",
+                "OneKey search truncated: entity=%s matched=%s returned=%d result_size=%s",
+                entity_type,
                 total,
                 len(results),
                 result_size,
@@ -374,9 +374,12 @@ class OneKeyClient:
         yielded = 0
         packet = 0
         logger.info(
-            "Starting refreshMyOnekey population walk (codBase=%s, page_size=%d)",
+            "OneKey population walk started: codbase=%s page_size=%d "
+            "date_from=%s date_to=%s",
             cod_base or iso_cod2,
             page_size,
+            date_from,
+            date_to,
         )
         while True:
             packet += 1
@@ -390,19 +393,19 @@ class OneKeyClient:
                 yielded += 1
                 if max_records is not None and yielded >= max_records:
                     logger.info(
-                        "refreshMyOnekey stopped at max_records=%d "
-                        "(packet %d)",
+                        "OneKey population walk stopped at max_records: records=%d packet=%d",
                         max_records,
                         packet,
                     )
                     return
 
             logger.info(
-                "refreshMyOnekey packet %d: +%d records (total %d)%s",
+                "OneKey packet %d: records=%d total=%d complete=%s | codbase=%s",
                 packet,
                 len(results),
                 yielded,
-                " [complete]" if envelope.get("isTransactionComplete") else "",
+                bool(envelope.get("isTransactionComplete")),
+                cod_base or iso_cod2,
             )
 
             if envelope.get("isTransactionComplete") or not results:
@@ -411,9 +414,9 @@ class OneKeyClient:
             transaction_id = envelope.get("transactionUniqueIdentifier")
             if not transaction_id:
                 logger.warning(
-                    "OneKey did not return a transaction id; stopping after %d "
-                    "records to avoid replaying the first packet forever.",
+                    "OneKey population walk stopped, no transaction id: records=%d packet=%d",
                     yielded,
+                    packet,
                 )
                 return
 

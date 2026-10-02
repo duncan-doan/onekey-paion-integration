@@ -22,6 +22,7 @@ import base64
 import logging
 import random
 import time
+from dataclasses import asdict, dataclass
 
 import requests
 
@@ -38,6 +39,24 @@ from .exceptions import (
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+@dataclass
+class RequestStats:
+    """Running totals of the requests a session has sent.
+
+    The sync engine reads them when a job starts and finishes, and logs the
+    difference as one ``http_summary`` line per job.
+    """
+
+    calls: int = 0  # request() calls
+    attempts: int = 0  # HTTP attempts, retries included
+    throttled: int = 0  # 429 responses
+    failed: int = 0  # calls that raised after the last attempt
+    seconds: float = 0.0  # time inside request(), retry waits included
+
+    def as_dict(self) -> dict:
+        return asdict(self)
 
 
 def basic_auth_header(username, password):
@@ -60,6 +79,7 @@ class OneKeySession:
     def __init__(self, config, session=None):
         self.config = config
         self._session = session or requests.Session()
+        self.stats = RequestStats()
         self._apply_default_headers()
 
     def _apply_default_headers(self) -> None:
@@ -116,13 +136,43 @@ class OneKeySession:
         )
 
     def request(self, method, path, with_connector=True, **kwargs):
-        """Issue one authenticated request, with retries on transient failures."""
+        """Issue one authenticated request, with retries on transient failures.
+
+        Each call is logged at DEBUG as ``onekey_call`` and added to ``stats``.
+        """
         url = self.config.url(path, with_connector=with_connector)
         kwargs.setdefault("timeout", self.config.timeout)
         kwargs.setdefault("verify", self.config.verify_ssl)
 
+        started = time.monotonic()
+        attempts_before = self.stats.attempts
+        status = None
+        self.stats.calls += 1
+        try:
+            response = self._send(method, url, path, **kwargs)
+            status = response.status_code
+            return response
+        except Exception as exc:
+            self.stats.failed += 1
+            status = getattr(exc, "status_code", None) or type(exc).__name__
+            raise
+        finally:
+            elapsed = time.monotonic() - started
+            self.stats.seconds += elapsed
+            logger.debug(
+                "OneKey %s %s: status=%s attempts=%d ms=%.0f",
+                method,
+                path,
+                status,
+                self.stats.attempts - attempts_before,
+                elapsed * 1000,
+            )
+
+    def _send(self, method, url, path, **kwargs):
+        """The retry loop behind :meth:`request`."""
         last_error = None
         for attempt in range(1, self.config.max_retries + 1):
+            self.stats.attempts += 1
             try:
                 response = self._session.request(method, url, **kwargs)
             except requests.RequestException as exc:
@@ -135,12 +185,13 @@ class OneKeySession:
                 if attempt < self.config.max_retries:
                     delay = min(30 * attempt, 180) + random.uniform(0, 2)
                     logger.warning(
-                        "OneKey %s %s failed (attempt %d/%d); "
-                        "reset connection pool, retrying in %.1fs",
+                        "OneKey %s %s retrying after connection error: "
+                        "attempt=%d/%d error=%s delay_s=%.1f",
                         method,
-                        url,
+                        path,
                         attempt,
                         self.config.max_retries,
+                        type(exc).__name__,
                         delay,
                     )
                     time.sleep(delay)
@@ -157,6 +208,8 @@ class OneKeySession:
 
                 # Honour Retry-After on 429; use a long floor so we do not
                 # re-hit the limit immediately after a short exponential wait.
+                if response.status_code == 429:
+                    self.stats.throttled += 1
                 if response.status_code == 429 and attempt < self.config.max_retries:
                     headers = getattr(response, "headers", None) or {}
                     retry_after = headers.get("Retry-After")
@@ -171,9 +224,8 @@ class OneKeySession:
                     else:
                         delay = min(max(delay, 30), 300)
                     logger.warning(
-                        "OneKey rate limited (429) on %s %s "
-                        "(attempt %d/%d); sleeping %.0fs",
-                        method, url, attempt, self.config.max_retries, delay,
+                        "OneKey %s %s throttled (429): attempt=%d/%d delay_s=%.0f",
+                        method, path, attempt, self.config.max_retries, delay,
                     )
                     time.sleep(delay)
                     continue
@@ -182,11 +234,12 @@ class OneKeySession:
                 # Exponential backoff, jittered so parallel workers desynchronise.
                 delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.warning(
-                    "OneKey %s %s failed (attempt %d/%d); retrying in %.1fs",
+                    "OneKey %s %s retrying: attempt=%d/%d reason=%s delay_s=%.1f",
                     method,
-                    url,
+                    path,
                     attempt,
                     self.config.max_retries,
+                    getattr(last_error, "status_code", None) or "error",
                     delay,
                 )
                 time.sleep(delay)
@@ -222,7 +275,14 @@ class OneKeySession:
                 payload=envelope,
             )
         if status == "WARNING":
-            logger.warning("OneKey returned a WARNING status: %s", envelope)
+            # The envelope also carries the returned records; log only the status.
+            results = envelope.get("results")
+            logger.warning(
+                "OneKey returned WARNING for %s: message=%r results=%s",
+                path,
+                str(envelope.get("statusMessage") or "")[:300],
+                len(results) if isinstance(results, (list, dict)) else 0,
+            )
         return envelope
 
     def test_connection(self):
@@ -304,7 +364,7 @@ def authenticate(
             session.close()
             raise
         logger.info(
-            "Authenticated with OneKey at %s as %s (connector %s)",
+            "Authenticated with OneKey: base_url=%s user=%s connector=%s",
             config.base_url,
             config.username,
             config.connector_id,
