@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .env import REPO_ROOT
+from .env import log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -73,19 +73,30 @@ class PicklistGapCollector:
         self._seen.clear()
 
     def write_report(self, path: Path | None = None) -> Path | None:
-        """Write gaps to CSV. Returns path, or None if no gaps."""
+        """Write gaps to CSV. Returns path, or None if no gaps or nowhere to write.
+
+        Each gap is already logged as a warning, so a missing report never fails
+        the sync: SYNC_LOG_DIR=off skips it and a read-only directory is logged.
+        """
         if not self.gaps:
             return None
 
         if path is None:
-            logs = REPO_ROOT / "logs"
-            logs.mkdir(parents=True, exist_ok=True)
+            logs = log_dir()
+            if logs is None:
+                logger.info("Picklist gap report skipped (SYNC_LOG_DIR is off)")
+                return None
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             path = logs / f"picklist_gaps_{stamp}.csv"
 
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as fh:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = path.open("w", encoding="utf-8", newline="")
+        except OSError as exc:
+            logger.warning("Picklist gap report not written to %s: %s", path, exc)
+            return None
+        with fh:
             writer = csv.DictWriter(
                 fh,
                 fieldnames=[

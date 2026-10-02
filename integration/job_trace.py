@@ -193,6 +193,13 @@ def as_dataverse_datetime(value: str | None) -> str | None:
     return text + "Z"
 
 
+def job_codebase(codebases: list[str]) -> str:
+    """Return the ts_codebase value stored for a job over these codebases."""
+    codes = [c.strip().upper() for c in codebases if c and str(c).strip()]
+    joined = ",".join(codes) or "NA"
+    return joined if len(joined) <= 10 else (codes[0][:10] if codes else "NA")
+
+
 def summarize_results(results: dict | None) -> dict:
     """Roll phase stats into the job-level counters."""
     totals = {
@@ -613,7 +620,7 @@ class JobTracer:
     ) -> dict:
         codes = [c.strip().upper() for c in codebases if c and str(c).strip()]
         joined = ",".join(codes) or "NA"
-        codebase = joined if len(joined) <= 10 else (codes[0][:10] if codes else "NA")
+        codebase = job_codebase(codebases)
         label = JOB_LABELS.get(job_type, "Sync")
         started = self._started_at or datetime.now(timezone.utc)
         payload = {

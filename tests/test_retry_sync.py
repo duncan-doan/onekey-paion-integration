@@ -1,10 +1,17 @@
 """Offline tests for the integration failure retry queue."""
 
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from dataverse.exceptions import DataverseHTTPError
 from integration.dynamic_sync import DynamicSyncEngine
 from integration.job_trace import (
     ENTITY_ACCOUNT,
     ENTITY_AFFILIATION,
     FAILURES,
+    JOB_DELTA,
     JOB_FULL,
     JOB_HCO,
     JOBS,
@@ -14,15 +21,23 @@ from integration.job_trace import (
     RETRY_RESOLVED,
     RETRY_RETRIED,
     STATUS_RUNNING,
+    TRIGGER_MANUAL,
+    TRIGGER_TIMER,
     JobTracer,
 )
 from integration.retry_sync import (
+    _normalize_failure,
     fetch_pending_failures,
     pending_filter,
     resolve_pending_for_ids,
     retry_pending_failures,
 )
-from integration.scheduled_sync import delta_window, run_retry_then_delta
+from integration.scheduled_sync import (
+    covered_window,
+    delta_window,
+    run_full,
+    run_retry_then_delta,
+)
 
 
 class FakeDataverse:
@@ -344,13 +359,17 @@ def test_resolve_pending_for_succeeded_ids():
     assert "ts_sourceid eq 'WUKE00001259'" in dataverse.queries[0][1]["filter"]
 
 
-def test_scheduled_job_retries_then_delta_then_resolves(tmp_path):
+def test_scheduled_job_retries_then_delta_then_resolves():
     dataverse = FakeDataverse(
         rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259"}]
     )
     engine = Engine(dataverse)
+    # Left behind by a retry group; the delta must not inherit it.
+    engine.tracer.retry_of_job_id = "parent-job"
+    seen = {}
 
     def sync_delta(**kwargs):
+        seen["retry_of_job_id"] = engine.tracer.retry_of_job_id
         engine.succeeded_ids.add("WUKE00001259")
         return {"success": True, "job_id": "delta-job", "mode": "delta"}
 
@@ -358,25 +377,293 @@ def test_scheduled_job_retries_then_delta_then_resolves(tmp_path):
     result = run_retry_then_delta(
         engine,
         codebases=["WUK"],
-        date_from="2026-09-29T00:00:00Z",
-        date_to="2026-09-30T23:59:59Z",
-        watermark_date="2026-09-30",
-        watermark_dir=tmp_path,
+        date_from="2026-09-29",
+        date_to="2026-09-30",
     )
     assert result["success"] is True
     assert result["resolved_by_delta"] == 1
-    saved = (tmp_path / "sync_watermark_WUK.json").read_text(encoding="utf-8")
-    assert "2026-09-30" in saved
+    assert engine.tracer.trigger == TRIGGER_TIMER
+    assert seen["retry_of_job_id"] is None
 
 
-def test_delta_window_uses_watermark(tmp_path):
-    (tmp_path / "sync_watermark_WUK.json").write_text(
-        '{"date_to": "2026-09-28"}', encoding="utf-8"
+def test_delta_window_starts_from_last_covering_job():
+    dataverse = FakeDataverse(
+        rows=[
+            # Lost a codebase: its window was not covered, so it is skipped.
+            {
+                "ts_jobid": "delta-2",
+                "ts_startedon": "2026-10-01T00:00:03Z",
+                "ts_errorsummary": "WUK: OneKey 503",
+            },
+            # Picklist errors alone do not stop the HCO/HCP phases.
+            {
+                "ts_jobid": "full-1",
+                "ts_startedon": "2026-09-30T00:00:04Z",
+                "ts_errorsummary": "picklists: metadata denied",
+            },
+        ]
     )
-    iso_from, iso_to, stored = delta_window(tmp_path, ["WUK"], date_to="2026-09-30")
-    assert iso_from == "2026-09-28T00:00:00Z"
-    assert iso_to == "2026-09-30T23:59:59Z"
-    assert stored == "2026-09-30"
+    iso_from, iso_to = delta_window(dataverse, ["WUK"], date_to="2026-10-02")
+    assert iso_from == "2026-09-29T23:45:04Z"
+    assert iso_to == "2026-10-02T23:59:59Z"
+    entity_set, query = dataverse.queries[0]
+    assert entity_set == JOBS
+    assert "ts_codebase eq 'WUK'" in query["filter"]
+    assert f"ts_jobtype eq {JOB_FULL}" in query["filter"]
+    assert f"ts_jobtype eq {JOB_DELTA}" in query["filter"]
+    assert query["order_by"] == "ts_startedon desc"
+    # A multi-phase retry is typed Full; only ts_retryofjob tells it apart.
+    assert "_ts_retryofjob_value eq null" in query["filter"]
+
+
+def test_delta_window_explicit_dates_skip_lookup():
+    dataverse = FakeDataverse()
+    iso_from, iso_to = delta_window(
+        dataverse, ["WUK"], date_from="2026-09-28", date_to="2026-09-30"
+    )
+    assert (iso_from, iso_to) == ("2026-09-28T00:00:00Z", "2026-09-30T23:59:59Z")
+    assert dataverse.queries == []
+
+
+def test_delta_window_falls_back_to_yesterday_without_job():
+    iso_from, _ = delta_window(FakeDataverse(), ["WUK"])
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    assert iso_from == yesterday.strftime("%Y-%m-%dT00:00:00Z")
+
+
+def test_covered_window():
+    assert covered_window({"ts_errorsummary": None})
+    assert covered_window({"ts_errorsummary": "picklists: a | picklists: b"})
+    assert not covered_window({"ts_errorsummary": "Sync stopped before completion"})
+    assert not covered_window({"ts_errorsummary": "picklists: a | WUK: boom"})
+
+
+def test_scheduled_full_resolves_pending():
+    dataverse = FakeDataverse(
+        rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259"}]
+    )
+    engine = Engine(dataverse)
+
+    def sync_full(**kwargs):
+        engine.calls.append(("full", kwargs["codebases"]))
+        engine.succeeded_ids.add("WUKE00001259")
+        return {"success": True, "job_id": "full-job", "mode": "full"}
+
+    engine.sync_full = sync_full
+    result = run_full(engine, codebases=["WUK"])
+    assert result["success"] is True
+    assert result["resolved_by_full"] == 1
+    assert engine.calls == [("full", ["WUK"])]
+    assert engine.tracer.trigger == TRIGGER_TIMER
+
+
+def test_resolve_pending_scans_once_for_large_id_sets():
+    dataverse = FakeDataverse(
+        rows=[
+            {"ts_integrationfailureid": "fail-1", "ts_sourceid": "WUKE00000001"},
+            {"ts_integrationfailureid": "fail-2", "ts_sourceid": "WUKE99999999"},
+        ]
+    )
+    ids = {f"WUKE{n:08d}" for n in range(1, 1500)}
+    assert resolve_pending_for_ids(dataverse, ids) == 1
+    assert len(dataverse.queries) == 1
+    assert dataverse.queries[0][1]["filter"] == f"ts_retrystatus eq {RETRY_PENDING}"
+    assert dataverse.updated == [(FAILURES, "fail-1", {"ts_retrystatus": RETRY_RESOLVED})]
+
+
+class BulkDataverse(FakeDataverse):
+    """FakeDataverse with UpdateMultiple, a batch size of 2, and optional failures."""
+
+    def __init__(self, rows=None, fail_bulk=False, fail_ids=()):
+        super().__init__(rows=rows)
+        self.config = SimpleNamespace(bulk_batch_size=2)
+        self.fail_bulk = fail_bulk
+        self.fail_ids = set(fail_ids)
+        self.bulk = []
+
+    def update_multiple(self, entity_set, records, logical_name=None):
+        if self.fail_bulk:
+            raise DataverseHTTPError("UpdateMultiple is not enabled", status_code=400)
+        self.bulk.append((entity_set, logical_name, [dict(r) for r in records]))
+
+    def update(self, entity_set, record_id, data):
+        if record_id in self.fail_ids:
+            raise DataverseHTTPError("Record not found", status_code=404)
+        return super().update(entity_set, record_id, data)
+
+
+PENDING_ROWS = [
+    {"ts_integrationfailureid": f"fail-{n}", "ts_sourceid": f"WUKE0000000{n}"}
+    for n in range(1, 4)
+]
+PENDING_IDS = {row["ts_sourceid"] for row in PENDING_ROWS}
+
+
+def test_resolve_pending_uses_update_multiple_per_batch():
+    dataverse = BulkDataverse(rows=PENDING_ROWS)
+    assert resolve_pending_for_ids(dataverse, PENDING_IDS) == 3
+    assert dataverse.updated == []
+    assert [
+        (entity_set, logical, [r["ts_integrationfailureid"] for r in records])
+        for entity_set, logical, records in dataverse.bulk
+    ] == [
+        (FAILURES, "ts_integrationfailure", ["fail-1", "fail-2"]),
+        (FAILURES, "ts_integrationfailure", ["fail-3"]),
+    ]
+    assert dataverse.bulk[0][2][0] == {
+        "ts_integrationfailureid": "fail-1",
+        "ts_retrystatus": RETRY_RESOLVED,
+    }
+
+
+def test_resolve_pending_falls_back_to_patch_when_update_multiple_fails():
+    dataverse = BulkDataverse(rows=PENDING_ROWS, fail_bulk=True)
+    assert resolve_pending_for_ids(dataverse, PENDING_IDS) == 3
+    assert [item[1] for item in dataverse.updated] == ["fail-1", "fail-2", "fail-3"]
+
+
+def test_resolve_pending_skips_a_row_that_cannot_be_updated():
+    dataverse = BulkDataverse(rows=PENDING_ROWS, fail_bulk=True, fail_ids={"fail-2"})
+    # fail-2 stays Pending for the next retry run; the others are resolved.
+    assert resolve_pending_for_ids(dataverse, PENDING_IDS) == 2
+    assert [item[1] for item in dataverse.updated] == ["fail-1", "fail-3"]
+
+
+TWO_ROWS = [_row(record_id="fail-1"), _row(record_id="fail-2", source_id="WUKE00000002")]
+
+
+def test_retry_claims_and_outcomes_use_update_multiple():
+    dataverse = BulkDataverse()
+    engine = Engine(dataverse)
+    summary = retry_pending_failures(engine, rows=TWO_ROWS)
+    assert summary["resolved"] == 2
+    assert _failure_updates(dataverse) == []
+    claims, outcomes = [records for _, _, records in dataverse.bulk]
+    assert claims == [
+        {"ts_integrationfailureid": "fail-1", "ts_retrystatus": RETRY_RETRIED},
+        {"ts_integrationfailureid": "fail-2", "ts_retrystatus": RETRY_RETRIED},
+    ]
+    assert outcomes == [
+        {"ts_integrationfailureid": "fail-1", "ts_retrystatus": RETRY_RESOLVED, "ts_attemptcount": 1},
+        {"ts_integrationfailureid": "fail-2", "ts_retrystatus": RETRY_RESOLVED, "ts_attemptcount": 1},
+    ]
+
+
+def test_one_failed_outcome_write_does_not_spoil_the_others():
+    dataverse = BulkDataverse(fail_bulk=True)
+    engine = Engine(dataverse)
+    patch = dataverse.update
+
+    def update(entity_set, record_id, data):
+        if record_id == "fail-1" and data.get("ts_retrystatus") == RETRY_RESOLVED:
+            raise DataverseHTTPError("Record is locked", status_code=409)
+        return patch(entity_set, record_id, data)
+
+    dataverse.update = update
+    summary = retry_pending_failures(engine, rows=TWO_ROWS)
+    # fail-2's outcome is still written; fail-1 counts as a failed attempt.
+    assert summary["resolved"] == 1
+    assert summary["pending"] == 1
+    last = {record_id: data for _, record_id, data in _failure_updates(dataverse)}
+    assert last["fail-2"]["ts_retrystatus"] == RETRY_RESOLVED
+    assert last["fail-1"]["ts_retrystatus"] == RETRY_PENDING
+    assert last["fail-1"]["ts_attemptcount"] == 2
+
+
+def test_resolve_skips_rows_written_by_the_same_job():
+    # Same workplace: the account upserted, but its address failed in that run.
+    dataverse = FakeDataverse(
+        rows=[
+            {"ts_integrationfailureid": "old", "ts_sourceid": "WUKE00001259",
+             "_ts_integrationjob_value": "job-yesterday"},
+            {"ts_integrationfailureid": "new", "ts_sourceid": "WUKE00001259",
+             "_ts_integrationjob_value": "job-today"},
+        ]
+    )
+    resolved = resolve_pending_for_ids(
+        dataverse, {"WUKE00001259"}, exclude_job_guid="JOB-TODAY"
+    )
+    assert resolved == 1
+    assert [item[1] for item in dataverse.updated] == ["old"]
+
+
+def test_resolve_reads_every_pending_row_for_an_id():
+    dataverse = FakeDataverse(
+        rows=[
+            {"ts_integrationfailureid": "fail-1", "ts_sourceid": "WUKE00001259"},
+            {"ts_integrationfailureid": "fail-2", "ts_sourceid": "WUKE00001259"},
+        ]
+    )
+    assert resolve_pending_for_ids(dataverse, {"WUKE00001259"}) == 2
+    assert "top" not in dataverse.queries[0][1]
+
+
+def test_pending_filter_retries_failures_of_a_stale_running_job():
+    now = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+    text = pending_filter(now=now)
+    assert (
+        f"(ts_IntegrationJob/ts_status ne {STATUS_RUNNING}"
+        " or ts_IntegrationJob/ts_lastheartbeat lt 2026-10-03T00:00:00Z)"
+    ) in text
+
+
+def test_fetch_asks_for_only_the_limit():
+    dataverse = FakeDataverse()
+    fetch_pending_failures(dataverse, limit=25)
+    assert dataverse.queries[0][1]["top"] == 25
+
+
+@pytest.mark.parametrize(
+    "source_id, parent_codebase, expected",
+    [
+        ("WDEH02963729", "WUK,WDE", "WDE"),  # multi-codebase job
+        ("WFRH00453901", "WUK", "WFR"),      # codebases truncated to the first
+        ("12345", "WUK", "WUK"),             # not a OneKey ID: parent codebase
+    ],
+)
+def test_normalize_takes_codebase_from_the_onekey_id(source_id, parent_codebase, expected):
+    row = _normalize_failure(
+        {
+            "ts_integrationfailureid": "fail-1",
+            "ts_sourceid": source_id,
+            "ts_IntegrationJob": {"ts_jobid": "parent-job", "ts_codebase": parent_codebase},
+        }
+    )
+    assert row["codebase"] == expected
+
+
+def test_retry_restores_engine_and_tracer_state():
+    engine = Engine(FakeDataverse())
+    engine._contracted_workplace_eids.add("WUKE00000001")
+    engine.tracer.trigger = TRIGGER_TIMER
+    engine.tracer.retry_of_job_id = None
+    rows = [_row(entity=ENTITY_AFFILIATION)]
+    retry_pending_failures(engine, rows=rows, trigger=TRIGGER_MANUAL)
+    # The affiliation step allowed the related HCO; the delta after it must not.
+    assert engine.calls[0][1] >= {"WUKE00001259", "WUKE00009999"}
+    assert engine._contracted_workplace_eids == {"WUKE00000001"}
+    assert engine._contracted_individual_eids == set()
+    assert engine.tracer.trigger == TRIGGER_TIMER
+    assert engine.tracer.retry_of_job_id is None
+    assert engine.tracer.persist_failures is True
+
+
+def test_retry_fetches_each_onekey_record_once():
+    onekey = FakeOneKey()
+    fetched = []
+    get_by_id = onekey.get_by_id
+
+    def counting(eid, entity_type, cod_base=None):
+        fetched.append((entity_type, eid))
+        return get_by_id(eid, entity_type, cod_base=cod_base)
+
+    onekey.get_by_id = counting
+    engine = Engine(FakeDataverse(), onekey=onekey)
+    # One workplace failed as an account and as an HCO relation.
+    rows = [_row(record_id="fail-1"), _row(record_id="fail-2", entity=ENTITY_AFFILIATION)]
+    retry_pending_failures(engine, rows=rows)
+    assert [name for name, *_ in engine.calls] == ["accounts", "affiliations"]
+    assert fetched == [("WORKPLACE", "WUKE00001259")]
 
 
 def test_two_parent_jobs_open_two_retry_jobs():

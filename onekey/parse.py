@@ -155,11 +155,9 @@ def primary_address(workplace):
     ``addressShortLabel`` (street) plus ``buildingLabel`` on the workplace
     address entry.
     """
-    empty = {field: None for field in _ADDRESS_FIELDS}
-
     addresses = (workplace or {}).get("workplaceAddresses") or {}
     if not isinstance(addresses, dict) or not addresses:
-        return empty
+        return {field: None for field in _ADDRESS_FIELDS}
 
     def sort_key(item):
         key, value = item
@@ -167,6 +165,13 @@ def primary_address(workplace):
         return (0 if type_code == "P" else 1, value.get("rank") or 0)
 
     _, entry = sorted(addresses.items(), key=sort_key)[0]
+    return flatten_address_entry(entry)
+
+
+def flatten_address_entry(entry):
+    """Flatten one ``workplaceAddresses`` entry into the address field set."""
+    empty = {field: None for field in _ADDRESS_FIELDS}
+    entry = entry or {}
     address = entry.get("address") or {}
     town = address.get("postalTownReference") or {}
 

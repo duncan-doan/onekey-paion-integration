@@ -13,9 +13,11 @@ Resolved, Pending, or Ignored.
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
-from dataverse.client import escape_odata
+from dataverse.client import chunked, escape_odata
 from integration.job_trace import (
     ENTITY_ACCOUNT,
     ENTITY_ADDRESS,
@@ -47,6 +49,19 @@ from onekey.parse import compose_hcp_result, flatten_hco
 
 logger = logging.getLogger(__name__)
 
+# Above this many upserted IDs, resolve by reading the pending rows once.
+_RESOLVE_SCAN_AT = 1000
+
+# A parent job still Running with no heartbeat for this long was killed (timeout,
+# crash) and will never finish. The tracer writes a heartbeat after every phase.
+STALE_JOB_AFTER = timedelta(hours=12)
+
+# OneKey IDs start with their codebase: WUKE00001259, WDEH02963729, WFRH00453901.
+_CODEBASE_PREFIX = re.compile(r"W[A-Z]{2}")
+
+# Marks a cache miss, since a OneKey record that was not found is cached as None.
+_NOT_FETCHED = object()
+
 # Account, address, hierarchy, HCO affiliation, contact, then activity affiliation.
 PHASE_STEPS = (
     ("accounts", PHASE_HCO, ENTITY_ACCOUNT),
@@ -64,13 +79,21 @@ def pending_filter(
     job_id: str | None = None,
     source_ids: list[str] | None = None,
     max_attempts: int = MAX_RETRY_ATTEMPTS,
+    now: datetime | None = None,
 ) -> str:
-    """OData filter for retryable failures whose parent job is not running."""
+    """OData filter for retryable failures whose parent job is not running.
+
+    Nothing marks a killed job Abandoned, so a parent stuck at Running with a
+    heartbeat older than STALE_JOB_AFTER counts as finished; otherwise its
+    failures would never be retried.
+    """
+    stale = (now or datetime.now(timezone.utc)) - STALE_JOB_AFTER
     parts = [
         f"ts_retrystatus eq {RETRY_PENDING}",
         "ts_isretryable eq true",
         f"ts_attemptcount lt {int(max_attempts)}",
-        f"ts_IntegrationJob/ts_status ne {STATUS_RUNNING}",
+        f"(ts_IntegrationJob/ts_status ne {STATUS_RUNNING}"
+        f" or ts_IntegrationJob/ts_lastheartbeat lt {stale.strftime('%Y-%m-%dT%H:%M:%SZ')})",
     ]
     if codebase:
         parts.append(
@@ -118,6 +141,8 @@ def fetch_pending_failures(
             "ts_IntegrationJob($select=ts_integrationjobid,ts_jobid,"
             "ts_codebase,ts_status)"
         ),
+        # Without $top the first page holds up to 5,000 expanded rows.
+        top=limit,
         max_records=limit,
     )
     return [_normalize_failure(row) for row in rows if row.get("ts_sourceid")]
@@ -162,8 +187,15 @@ def retry_pending_failures(
     for row in pending:
         grouped[(row["parent_job_id"], row["codebase"])].append(row)
 
-    previous_persist = engine.tracer.persist_failures
-    engine.tracer.persist_failures = False
+    # Retry steps widen the engine's contracted allowlists and change tracer
+    # settings. Restore both, so a sync that reuses this engine (the delta after
+    # the retry) is not filtered by the handful of retried IDs.
+    tracer = engine.tracer
+    saved_tracer = (tracer.persist_failures, tracer.trigger, tracer.retry_of_job_id)
+    saved_workplaces = set(engine._contracted_workplace_eids)
+    saved_individuals = set(engine._contracted_individual_eids)
+    tracer.persist_failures = False
+    engine._retry_onekey_cache = {}
     try:
         for (parent_job_id, group_code), group_rows in grouped.items():
             job_summary = _retry_group(
@@ -183,36 +215,74 @@ def retry_pending_failures(
             if not job_summary["success"]:
                 summary["success"] = False
     finally:
-        engine.tracer.persist_failures = previous_persist
+        tracer.persist_failures, tracer.trigger, tracer.retry_of_job_id = saved_tracer
+        engine._contracted_workplace_eids.clear()
+        engine._contracted_workplace_eids.update(saved_workplaces)
+        engine._contracted_individual_eids.clear()
+        engine._contracted_individual_eids.update(saved_individuals)
+        engine._retry_onekey_cache = None
     return summary
 
 
-def resolve_pending_for_ids(dataverse, source_ids: set[str] | list[str]) -> int:
-    """Mark pending failures Resolved when a later delta upserts those IDs."""
-    ids = [str(source_id) for source_id in source_ids if source_id]
+def resolve_pending_for_ids(
+    dataverse,
+    source_ids: set[str] | list[str],
+    exclude_job_guid: str | None = None,
+) -> int:
+    """Mark pending failures Resolved when a later sync upserts those IDs.
+
+    ``exclude_job_guid`` is the job that produced ``source_ids``. Its own failure
+    rows share source IDs with its successes (a workplace's account upserts
+    while its address or parent link fails), so they stay Pending.
+
+    A delta's IDs are looked up 20 at a time. A full sync upserts far more IDs
+    than there are pending rows, so above _RESOLVE_SCAN_AT the pending rows
+    are read once and matched here.
+    """
+    ids = sorted({str(source_id) for source_id in source_ids if source_id})
     if not ids:
         return 0
-    resolved = 0
-    for start in range(0, len(ids), 20):
-        chunk = ids[start:start + 20]
-        quoted = " or ".join(
-            f"ts_sourceid eq '{escape_odata(source_id)}'" for source_id in chunk
-        )
-        rows = dataverse.retrieve_multiple(
-            FAILURES,
-            select=["ts_integrationfailureid", "ts_sourceid"],
-            filter=f"ts_retrystatus eq {RETRY_PENDING} and ({quoted})",
-            top=len(chunk),
-        )
-        for row in rows:
-            dataverse.update(
-                FAILURES,
-                row["ts_integrationfailureid"],
-                {"ts_retrystatus": RETRY_RESOLVED},
+    select = ["ts_integrationfailureid", "ts_sourceid", "_ts_integrationjob_value"]
+    if len(ids) > _RESOLVE_SCAN_AT:
+        wanted = set(ids)
+        rows = [
+            row
+            for row in dataverse.retrieve_multiple(
+                FAILURES, select=select, filter=f"ts_retrystatus eq {RETRY_PENDING}"
             )
-            resolved += 1
+            if row.get("ts_sourceid") in wanted
+        ]
+    else:
+        rows = []
+        for start in range(0, len(ids), 20):
+            chunk = ids[start:start + 20]
+            quoted = " or ".join(
+                f"ts_sourceid eq '{escape_odata(source_id)}'" for source_id in chunk
+            )
+            # No $top: one source ID can have several pending rows.
+            rows.extend(
+                dataverse.retrieve_multiple(
+                    FAILURES,
+                    select=select,
+                    filter=f"ts_retrystatus eq {RETRY_PENDING} and ({quoted})",
+                )
+            )
+    if exclude_job_guid:
+        current = exclude_job_guid.lower()
+        rows = [
+            row
+            for row in rows
+            if str(row.get("_ts_integrationjob_value") or "").lower() != current
+        ]
+    # A row that cannot be updated stays Pending for the next retry run.
+    resolved = len(
+        _update_failures(
+            dataverse,
+            [(row["ts_integrationfailureid"], _failure_payload(RETRY_RESOLVED)) for row in rows],
+        )
+    )
     if resolved:
-        logger.info("Resolved %d pending failure(s) from the delta upsert", resolved)
+        logger.info("Resolved %d pending failure(s) from the sync upsert", resolved)
     return resolved
 
 
@@ -279,13 +349,21 @@ def _retry_group(
 
 
 def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict) -> None:
+    dataverse = engine.dataverse
     claimed: list[dict] = []
     finalized: set[str] = set()
     started = False
     try:
-        for row in rows:
-            _update_failure(engine.dataverse, row["id"], RETRY_RETRIED)
-            claimed.append(row)
+        # Claim every row (Retried) before replaying; if any row cannot be
+        # claimed, release the others and skip the replay.
+        claimed_ids = _update_failures(
+            dataverse, [(row["id"], _failure_payload(RETRY_RETRIED)) for row in rows]
+        )
+        claimed = [row for row in rows if row["id"] in claimed_ids]
+        if len(claimed) < len(rows):
+            raise RuntimeError(
+                f"could not claim {len(rows) - len(claimed)} of {len(rows)} failure row(s)"
+            )
         engine.tracer.recent_failures.clear()
         engine._last_step_stats = None
         started = True
@@ -301,37 +379,54 @@ def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict
                     "message": "OneKey record was not found",
                 }
             )
-        for row in claimed:
-            outcome = _outcome(row, _matching_failure(row, failed))
-            _update_failure(
-                engine.dataverse,
-                row["id"],
-                outcome["status"],
-                attempt=outcome["attempt"],
-                message=outcome["message"],
+        outcomes = [(row, _outcome(row, _matching_failure(row, failed))) for row in claimed]
+        written = _update_failures(
+            dataverse,
+            [
+                (
+                    row["id"],
+                    _failure_payload(
+                        outcome["status"],
+                        attempt=outcome["attempt"],
+                        message=outcome["message"],
+                    ),
+                )
+                for row, outcome in outcomes
+            ],
+        )
+        for row, outcome in outcomes:
+            if row["id"] in written:
+                finalized.add(row["id"])
+                result[outcome["bucket"]] += 1
+        if len(finalized) < len(outcomes):
+            raise RuntimeError(
+                f"could not record the outcome of {len(outcomes) - len(finalized)} failure row(s)"
             )
-            finalized.add(row["id"])
-            result[outcome["bucket"]] += 1
     except Exception as exc:
         result["errors"].append(f"{name}: {exc}")
         result["success"] = False
         logger.exception("Retry step %s failed for %s", name, codebase)
+        # Rows not finalized: release the claim if the replay never started,
+        # otherwise count a failed attempt.
+        updates: list[tuple[str, dict]] = []
+        buckets: dict[str, str] = {}
         for row in claimed:
             if row["id"] in finalized:
                 continue
             if not started:
-                _release_claim(engine.dataverse, row)
+                updates.append(
+                    (row["id"], _failure_payload(RETRY_PENDING, attempt=row["attempt"]))
+                )
                 continue
             attempt = row["attempt"] + 1
             status = RETRY_IGNORED if attempt >= MAX_RETRY_ATTEMPTS else RETRY_PENDING
-            _update_failure(
-                engine.dataverse,
-                row["id"],
-                status,
-                attempt=attempt,
-                message=str(exc),
+            updates.append(
+                (row["id"], _failure_payload(status, attempt=attempt, message=str(exc)))
             )
-            result["ignored" if status == RETRY_IGNORED else "pending"] += 1
+            buckets[row["id"]] = "ignored" if status == RETRY_IGNORED else "pending"
+        for record_id in _update_failures(dataverse, updates):
+            if record_id in buckets:
+                result[buckets[record_id]] += 1
 
 
 def _execute_step(engine, name: str, codebase: str, rows: list[dict]) -> list[str]:
@@ -410,6 +505,25 @@ def _apply_step_stats(engine, name: str, result: dict) -> None:
             result[key][field] += int(stats.get(field) or 0)
 
 
+def _get_by_id(engine, eid: str, entity_type: str, codebase: str) -> dict | None:
+    """OneKey record by ID, fetched at most once per retry run.
+
+    By-ID reads count against the OneKey subscription, and one failed workplace
+    is often retried in several steps (account, address, hierarchy, relations),
+    while many HCPs share a main workplace.
+    """
+    cache = getattr(engine, "_retry_onekey_cache", None)
+    key = (entity_type, eid, codebase)
+    if cache is not None:
+        cached = cache.get(key, _NOT_FETCHED)
+        if cached is not _NOT_FETCHED:
+            return cached
+    record = engine.onekey.get_by_id(eid, entity_type, cod_base=codebase)
+    if cache is not None:
+        cache[key] = record
+    return record
+
+
 def _workplaces(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], list[str]]:
     flats = []
     missing = []
@@ -419,7 +533,7 @@ def _workplaces(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], li
         if source_id in seen:
             continue
         seen.add(source_id)
-        raw = engine.onekey.get_by_id(source_id, WORKPLACE, cod_base=codebase)
+        raw = _get_by_id(engine, source_id, WORKPLACE, codebase)
         if not raw:
             missing.append(source_id)
             continue
@@ -436,7 +550,7 @@ def _raw_workplaces(engine, codebase: str, rows: list[dict]) -> tuple[list[dict]
         if source_id in seen:
             continue
         seen.add(source_id)
-        raw = engine.onekey.get_by_id(source_id, WORKPLACE, cod_base=codebase)
+        raw = _get_by_id(engine, source_id, WORKPLACE, codebase)
         if not raw:
             missing.append(source_id)
             continue
@@ -468,15 +582,12 @@ def _composed_hcps(engine, codebase: str, rows: list[dict]) -> tuple[list[dict],
         if individual_eid in seen:
             continue
         seen.add(individual_eid)
-        individual = engine.onekey.get_by_id(
-            individual_eid, INDIVIDUAL, cod_base=codebase
-        )
-        activity = _main_activity(engine, codebase, individual_eid)
+        # Stop at the first missing piece: each lookup is another OneKey call.
+        individual = _get_by_id(engine, individual_eid, INDIVIDUAL, codebase)
+        activity = _main_activity(engine, codebase, individual_eid) if individual else None
         workplace_eid = ((activity or {}).get("activity") or {}).get("workplaceEid")
         workplace = (
-            engine.onekey.get_by_id(workplace_eid, WORKPLACE, cod_base=codebase)
-            if workplace_eid
-            else None
+            _get_by_id(engine, workplace_eid, WORKPLACE, codebase) if workplace_eid else None
         )
         if not individual or not activity or not workplace:
             missing.append(individual_eid)
@@ -502,7 +613,7 @@ def _main_activity(engine, codebase: str, individual_eid: str) -> dict | None:
     activity_eid = (chosen.get("activity") or {}).get("activityEid")
     if not activity_eid:
         return chosen
-    return engine.onekey.get_by_id(activity_eid, ACTIVITY, cod_base=codebase) or chosen
+    return _get_by_id(engine, activity_eid, ACTIVITY, codebase) or chosen
 
 
 def _activities(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], list[str]]:
@@ -514,7 +625,7 @@ def _activities(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], li
         if source_id in seen:
             continue
         seen.add(source_id)
-        raw = engine.onekey.get_by_id(source_id, ACTIVITY, cod_base=codebase)
+        raw = _get_by_id(engine, source_id, ACTIVITY, codebase)
         if not raw:
             missing.append(source_id)
             continue
@@ -561,35 +672,72 @@ def _outcome(row: dict, failure: dict | None) -> dict:
     }
 
 
-def _release_claim(dataverse, row: dict) -> None:
-    """Put a claimed row back to Pending when the replay never started."""
-    try:
-        _update_failure(dataverse, row["id"], RETRY_PENDING, attempt=row["attempt"])
-    except Exception:
-        logger.warning("Could not release retry claim %s", row.get("id"), exc_info=True)
-
-
-def _update_failure(
-    dataverse,
-    record_id: str,
+def _failure_payload(
     status: int,
     attempt: int | None = None,
     message: str | None = None,
-) -> None:
+) -> dict:
     payload = {"ts_retrystatus": int(status)}
     if attempt is not None:
         payload["ts_attemptcount"] = int(attempt)
     if message:
         payload["ts_errormessage"] = clip(message, 2000)
-    dataverse.update(FAILURES, record_id, payload)
+    return payload
+
+
+def _update_failures(dataverse, updates: list[tuple[str, dict]]) -> set[str]:
+    """Write per-row payloads to ts_integrationfailure; return the ids written.
+
+    One UpdateMultiple per batch, each row keeping its own values. UpdateMultiple
+    is all-or-nothing, so a rejected batch is retried row by row. A row that
+    still fails is logged and left unchanged; like the other trace writes, this
+    never raises into the sync.
+    """
+    update_multiple = getattr(dataverse, "update_multiple", None)
+    batch_size = getattr(getattr(dataverse, "config", None), "bulk_batch_size", None) or 100
+    written: set[str] = set()
+    for batch in chunked(updates, batch_size):
+        if update_multiple is not None:
+            try:
+                update_multiple(
+                    FAILURES,
+                    [
+                        {"ts_integrationfailureid": record_id, **payload}
+                        for record_id, payload in batch
+                    ],
+                    logical_name="ts_integrationfailure",
+                )
+                written.update(record_id for record_id, _ in batch)
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "UpdateMultiple failed for %d failure row(s) (%s); updating one by one",
+                    len(batch),
+                    exc,
+                )
+        for record_id, payload in batch:
+            try:
+                dataverse.update(FAILURES, record_id, payload)
+                written.add(record_id)
+            except Exception:
+                logger.warning(
+                    "Could not update integration failure %s", record_id, exc_info=True
+                )
+    return written
 
 
 def _normalize_failure(row: dict) -> dict:
     parent = row.get("ts_IntegrationJob") or {}
     source_id = str(row.get("ts_sourceid") or "")
-    codebase = str(parent.get("ts_codebase") or "").split(",")[0].strip().upper()
-    if not codebase:
-        codebase = source_id[:3].upper()
+    # Prefer the codebase in the OneKey ID: a job over several codebases stores
+    # them all ("WUK,WDE"), or only the first when they do not fit.
+    prefix = source_id[:3].upper()
+    codes = [
+        code.strip().upper()
+        for code in str(parent.get("ts_codebase") or "").split(",")
+        if code.strip()
+    ]
+    codebase = prefix if _CODEBASE_PREFIX.fullmatch(prefix) else (codes[0] if codes else prefix)
     return {
         "id": row.get("ts_integrationfailureid"),
         "source_id": source_id,

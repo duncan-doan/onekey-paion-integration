@@ -12,6 +12,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def log_dir():
+    """Directory for local log files and reports, or None when they are off.
+
+    ``SYNC_LOG_DIR`` picks the directory; ``off`` (or none/false/0) turns file
+    output off. Unset means ``logs/`` beside the repo. The Azure app folder is
+    read-only, so function_app.py defaults it to off; App Insights has the logs.
+    """
+    value = os.environ.get("SYNC_LOG_DIR", "").strip()
+    if value.lower() in {"off", "none", "false", "0"}:
+        return None
+    return Path(value) if value else REPO_ROOT / "logs"
+
+
 def load_env(path=None, override=False):
     """Read a ``.env`` file into ``os.environ``.
 

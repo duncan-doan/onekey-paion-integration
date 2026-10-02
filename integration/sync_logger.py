@@ -20,13 +20,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .env import log_dir as env_log_dir
+
 if TYPE_CHECKING:
     from .validation import ValidationResult
 
 logger = logging.getLogger(__name__)
 
-# Default log directory
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+
+
+def _open_file_handler(log_file: Path) -> logging.FileHandler | None:
+    """File handler for ``log_file``, or None when its directory cannot be written."""
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_file, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Log file disabled, cannot write %s: %s", log_file, exc)
+        return None
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    return handler
 
 
 @dataclass
@@ -105,9 +119,9 @@ class SyncLogger:
     
     def __init__(self, session_id: str = None, log_dir: Path = None):
         self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_dir = Path(log_dir or LOG_DIR)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        
+        # None when SYNC_LOG_DIR is off or the directory is not writable.
+        self.log_dir = Path(log_dir) if log_dir else env_log_dir()
+
         self.session = SyncSession(
             session_id=self.session_id,
             sync_type="unknown",
@@ -119,14 +133,15 @@ class SyncLogger:
         self._setup_file_logging()
     
     def _setup_file_logging(self):
-        """Configure file handler for this session."""
+        """Configure file handler for this session, unless file logs are off."""
+        if self.log_dir is None:
+            return
         log_file = self.log_dir / f"sync_{self.session_id}.log"
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        ))
-        
+        file_handler = _open_file_handler(log_file)
+        if file_handler is None:
+            self.log_dir = None
+            return
+
         # Add to root logger
         logging.getLogger().addHandler(file_handler)
         logger.info("Sync session %s logging to %s", self.session_id, log_file)
@@ -202,6 +217,8 @@ class SyncLogger:
     
     def _write_summary(self):
         """Write session summary to JSON file."""
+        if self.log_dir is None:
+            return
         summary_file = self.log_dir / f"sync_{self.session_id}_summary.json"
         with open(summary_file, "w", encoding="utf-8") as f:
             json.dump(self.session.to_dict(), f, indent=2)
@@ -367,12 +384,11 @@ def setup_logging(
     
     Args:
         level: Logging level (default INFO)
-        log_dir: Directory for log files
+        log_dir: Directory for log files (default: SYNC_LOG_DIR, else logs/)
         include_console: Whether to also log to console
     """
-    log_dir = Path(log_dir or LOG_DIR)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
+    log_dir = Path(log_dir) if log_dir else env_log_dir()
+
     # Configure root logger
     root = logging.getLogger()
     root.setLevel(level)
@@ -387,13 +403,18 @@ def setup_logging(
         ))
         root.addHandler(console)
     
-    # Always log to file
-    log_file = log_dir / f"integration_{datetime.now().strftime('%Y%m%d')}.log"
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-    ))
-    root.addHandler(file_handler)
-    
-    logger.info("Logging configured: level=%s, file=%s", logging.getLevelName(level), log_file)
+    # Log to file unless SYNC_LOG_DIR is off or the directory is not writable
+    log_file = None
+    if log_dir is not None:
+        log_file = log_dir / f"integration_{datetime.now().strftime('%Y%m%d')}.log"
+        file_handler = _open_file_handler(log_file)
+        if file_handler is None:
+            log_file = None
+        else:
+            root.addHandler(file_handler)
+
+    logger.info(
+        "Logging configured: level=%s, file=%s",
+        logging.getLevelName(level),
+        log_file or "off",
+    )

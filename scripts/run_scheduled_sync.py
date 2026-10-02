@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Scheduled OneKey job: retry pending failures, then pull the delta.
 
-The watermark advances only when the delta succeeds. Failed IDs stay in
-ts_integrationfailure so the next run retries them even if OneKey does not
-change those records again.
+The delta starts from ts_startedon of the last Full or Delta integration job
+that covered its window. Failed IDs stay in ts_integrationfailure so the next
+run retries them even if OneKey does not change those records again.
 
 Usage:
     python scripts/run_scheduled_sync.py --dry-run --codbase WUK
     python scripts/run_scheduled_sync.py --codbase WUK
     python scripts/run_scheduled_sync.py --date-from 2026-09-29 --date-to 2026-09-30
+    python scripts/run_scheduled_sync.py --full --codbase WUK
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from integration import setup_logging
-from integration.env import REPO_ROOT
 from integration.job_trace import TRIGGER_BY_NAME
 from integration.scheduled_sync import run_from_env
 
@@ -32,7 +32,13 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--codbase", default="WUK", help="Comma-separated OneKey codebases")
-    parser.add_argument("--date-from", help="Delta start (YYYY-MM-DD). Defaults to the watermark.")
+    parser.add_argument(
+        "--full", action="store_true", help="Run the monthly full sync instead of the delta"
+    )
+    parser.add_argument(
+        "--date-from",
+        help="Delta start (YYYY-MM-DD). Defaults to the last integration job's start.",
+    )
     parser.add_argument("--date-to", help="Delta end (YYYY-MM-DD). Defaults to today.")
     parser.add_argument("--retry-limit", type=int, default=100, help="Pending failures per run")
     parser.add_argument("--dry-run", action="store_true")
@@ -40,11 +46,6 @@ def parse_args():
         "--trigger",
         choices=sorted(TRIGGER_BY_NAME),
         default="timer",
-    )
-    parser.add_argument(
-        "--watermark-dir",
-        type=Path,
-        default=REPO_ROOT / "logs",
     )
     parser.add_argument("--bulk-batch-size", type=int, default=None)
     parser.add_argument("--config-dir")
@@ -62,9 +63,9 @@ def main() -> int:
     codebases = [part.strip().upper() for part in args.codbase.split(",") if part.strip()]
     result = run_from_env(
         codebases=codebases,
+        full=args.full,
         date_from=args.date_from,
         date_to=args.date_to,
-        watermark_dir=args.watermark_dir,
         dry_run=args.dry_run,
         trigger=TRIGGER_BY_NAME[args.trigger],
         retry_limit=args.retry_limit,

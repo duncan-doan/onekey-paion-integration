@@ -315,8 +315,14 @@ Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.
 ### Delta Sync Order
 
 Same phases for CDC window records: workplaces first, then addresses and
-hierarchy for those HCOs, then activities → contacts. Watermarks are stored
-under ``logs/sync_watermark_{CODEBASE}.json``.
+hierarchy for those HCOs, then activities → contacts. ``run_dynamic_sync.py``
+stores watermarks under ``logs/sync_watermark_{CODEBASE}.json``.
+
+The scheduled jobs (``function_app.py`` timers and ``scripts/run_scheduled_sync.py``)
+use ``ts_integrationjob`` instead: the daily delta runs from the ``ts_startedon``
+of the last Full or Delta job that covered its window (less 15 minutes of
+overlap) up to now. A full sync runs at 00:00 on the 1st of each month and the
+delta runs at 00:00 on every other day.
 
 ### CLI
 
