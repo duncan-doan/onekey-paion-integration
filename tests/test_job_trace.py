@@ -1,6 +1,6 @@
 """Offline tests for Dataverse integration-job tracing."""
 
-from dataverse.exceptions import DataverseHTTPError
+from dataverse.exceptions import DataverseAmbiguousWriteError, DataverseHTTPError
 from integration.dynamic_sync import DynamicSyncEngine
 from integration.job_trace import (
     FAILURES,
@@ -270,3 +270,36 @@ def test_engine_records_a_failed_source_id(tmp_path):
     engine._finish_job(results)
     assert dataverse.batches[0][2][0]["ts_sourceid"] == "WUKE00001260"
     assert results["trace_status"] == "Partially Succeeded"
+
+
+class UncertainBatchDataverse(FakeDataverse):
+    """CreateMultiple stores the first failure row, then times out."""
+
+    def __init__(self):
+        super().__init__()
+        self.stored_keys = set()
+
+    def create_multiple(self, entity_set, records, logical_name=None):
+        self.stored_keys.add(records[0]["ts_failurekey"])
+        raise DataverseAmbiguousWriteError("read timed out")
+
+    def find_many_by_field(self, entity_set, match_field, values, select=None, **kwargs):
+        return {value: {match_field: value} for value in values if value in self.stored_keys}
+
+
+def test_uncertain_failure_batch_writes_only_the_missing_rows():
+    dataverse = UncertainBatchDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_DELTA, codebases=["WUK"])
+    for source_id in ("WUKE00000001", "WUKE00000002"):
+        tracer.record_failure(
+            phase=PHASE_HCO,
+            entity="account",
+            source_id=source_id,
+            operation="upsert",
+            message="Dataverse timeout",
+        )
+    tracer.flush()
+    written_one_by_one = [data for entity_set, data in dataverse.created if entity_set == FAILURES]
+    assert [row["ts_sourceid"] for row in written_one_by_one] == ["WUKE00000002"]
+    assert tracer.written_failures == 2

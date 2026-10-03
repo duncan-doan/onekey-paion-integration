@@ -236,3 +236,7 @@ local.settings.json
 .python_packages/
 bin/
 obj/
+
+# Deployment archives can carry .env and other secrets; build them outside the
+# repository and never commit them.
+*.zip

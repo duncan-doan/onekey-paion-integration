@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from dataverse.client import chunked, escape_odata
-from dataverse.exceptions import DataverseHTTPError
+from dataverse.exceptions import DataverseAmbiguousWriteError, DataverseHTTPError
 
 if TYPE_CHECKING:
     from dataverse import DataverseClient
@@ -568,7 +568,12 @@ class JobTracer:
                     FAILURES, batch, logical_name="ts_integrationfailure"
                 )
                 self.written_failures += len(batch)
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, DataverseAmbiguousWriteError):
+                    # The batch may have been created; write only what is missing.
+                    missing = self._not_written(batch)
+                    self.written_failures += len(batch) - len(missing)
+                    batch = missing
                 logger.warning(
                     "CreateMultiple failed for %d integration failure(s); writing one by one",
                     len(batch),
@@ -584,6 +589,30 @@ class JobTracer:
                             row.get("ts_failurekey"),
                             exc_info=True,
                         )
+
+    def _not_written(self, rows: list[dict]) -> list[dict]:
+        """Rows of an uncertain CreateMultiple that are not in Dataverse.
+
+        ``ts_failurekey`` includes the job ID, so it identifies each row. If the
+        check itself fails, all rows are written: a duplicate queue row only
+        means one extra retry, a missing one means none.
+        """
+        find_many = getattr(self.dataverse, "find_many_by_field", None)
+        if find_many is None:
+            return rows
+        try:
+            found = find_many(
+                FAILURES,
+                "ts_failurekey",
+                [row.get("ts_failurekey") for row in rows],
+                select=["ts_failurekey"],
+            )
+        except Exception:
+            logger.warning(
+                "Could not check which integration failures were written", exc_info=True
+            )
+            return rows
+        return [row for row in rows if row.get("ts_failurekey") not in found]
 
     def _duration_seconds(self) -> int:
         if self._started_at is None:

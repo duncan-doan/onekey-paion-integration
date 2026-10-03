@@ -7,14 +7,32 @@ import time
 from dataclasses import asdict, dataclass
 
 import requests
+from urllib3.exceptions import NewConnectionError
 
 from .auth import TokenProvider
 from .config import DataverseConfig
-from .exceptions import DataverseHTTPError
+from .exceptions import DataverseAmbiguousWriteError, DataverseHTTPError
 
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# The gateway gave up waiting for the backend, which may still have committed.
+_GATEWAY_TIMEOUT_STATUSES = frozenset({502, 504})
+
+# POST actions that are safe to repeat: they set the same values again.
+_IDEMPOTENT_ACTIONS = ("UpdateMultiple", "UpsertMultiple")
+
+
+def _never_sent(exc: requests.RequestException) -> bool:
+    """True when the request failed before reaching Dataverse (safe to repeat)."""
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        reason = exc.args[0] if exc.args else None
+        reason = getattr(reason, "reason", reason)  # urllib3 MaxRetryError wraps it
+        return isinstance(reason, NewConnectionError)
+    return False
 
 # Web API base in absolute URLs (paging links); log lines keep the rest.
 _API_BASE = re.compile(r"^https?://[^/]+/api/data/v[\d.]+/")
@@ -160,17 +178,24 @@ class DataverseClient:
             url=url,
         )
 
-    def request(self, method, path, **kwargs):
+    def request(self, method, path, idempotent=None, **kwargs):
         """Issue one authenticated Web API request, retrying transient failures.
 
-        Each call is logged at DEBUG as ``dataverse_call`` and added to ``stats``.
+        Each call is logged at DEBUG and added to ``stats``. A POST is treated as
+        a non-idempotent write (``idempotent=False``) unless it is an
+        UpdateMultiple/UpsertMultiple action: once it may have reached Dataverse
+        it is not repeated, and :class:`DataverseAmbiguousWriteError` is raised.
         """
+        if idempotent is None:
+            idempotent = method != "POST" or path.split("?", 1)[0].endswith(
+                _IDEMPOTENT_ACTIONS
+            )
         started = time.monotonic()
         attempts_before = self.stats.attempts
         status = None
         self.stats.calls += 1
         try:
-            response = self._send(method, path, **kwargs)
+            response = self._send(method, path, idempotent, **kwargs)
             status = response.status_code
             return response
         except Exception as exc:
@@ -189,7 +214,7 @@ class DataverseClient:
                 elapsed * 1000,
             )
 
-    def _send(self, method, path, **kwargs):
+    def _send(self, method, path, idempotent, **kwargs):
         """The retry loop behind :meth:`request`."""
         url = path if path.startswith("http") else f"{self.config.api_url}/{path.lstrip('/')}"
         extra_headers = kwargs.pop("headers", None)
@@ -204,6 +229,11 @@ class DataverseClient:
                     method, url, headers=self._headers(extra_headers), **kwargs
                 )
             except requests.RequestException as exc:
+                if not idempotent and not _never_sent(exc):
+                    raise DataverseAmbiguousWriteError(
+                        f"{method} {_log_path(path)} may or may not have been applied: {exc}",
+                        url=url,
+                    ) from exc
                 last_error = DataverseHTTPError(
                     f"Could not reach Dataverse at {url}: {exc}", url=url
                 )
@@ -219,6 +249,13 @@ class DataverseClient:
 
                 if response.status_code == 429:
                     self.stats.throttled += 1
+                if not idempotent and response.status_code in _GATEWAY_TIMEOUT_STATUSES:
+                    raise DataverseAmbiguousWriteError(
+                        f"{method} {_log_path(path)} may or may not have been applied: "
+                        f"gateway returned {response.status_code}",
+                        status_code=response.status_code,
+                        url=url,
+                    )
                 try:
                     self._raise_for_status(response, url)
                 except DataverseHTTPError as exc:
@@ -346,17 +383,26 @@ class DataverseClient:
         Returns:
             tuple[str, bool]: the record id, and True when it was created.
         """
-        existing = self.find_one(
-            entity_set,
-            filter=f"{match_field} eq '{escape_odata(match_value)}'",
-            select=[match_field],
-        )
+        _, primary_id = entity_meta(entity_set)
+        match_filter = f"{match_field} eq '{escape_odata(match_value)}'"
+        existing = self.find_one(entity_set, filter=match_filter, select=[primary_id])
         if existing:
-            record_id = existing[next(k for k in existing if k.endswith("id") and
-                                      not k.startswith("@"))]
+            # Read the primary key by name: ts_externalid also ends in "id".
+            record_id = existing[primary_id]
             self.update(entity_set, record_id, data)
             return record_id, False
-        return self.create(entity_set, data), True
+        try:
+            return self.create(entity_set, data), True
+        except DataverseAmbiguousWriteError:
+            # The create may have landed; look again before repeating it.
+            landed = self.find_one(entity_set, filter=match_filter, select=[primary_id])
+            if landed:
+                logger.info(
+                    "Create of %s %s had landed despite the error: id=%s",
+                    entity_set, match_value, landed[primary_id],
+                )
+                return landed[primary_id], True
+            return self.create(entity_set, data), True
 
     # -- bulk writes ------------------------------------------------------
 
@@ -530,6 +576,11 @@ class DataverseClient:
         Returns:
             list[tuple[str, str, bool]]: ``(match_value, record_id, created)``
             in the same order as ``records``.
+
+        Records sharing a match value are written once, later fields overriding
+        earlier ones; the repeats report ``created=False``. A CreateMultiple
+        that may or may not have been applied is checked by match value before
+        anything is created again.
         """
         if not records:
             return []
@@ -539,14 +590,30 @@ class DataverseClient:
         ) or DEFAULT_BULK_BATCH_SIZE
         _, primary_id = entity_meta(entity_set)
 
-        prepared = []
+        # One entry per match value: the same value twice would become two
+        # creates, i.e. two records with the same key.
+        prepared = []  # (match_value, payload)
+        positions = {}  # match_value -> index in prepared
+        owners = []  # index in prepared for each input record
         for index, data in enumerate(records):
             match_value = data.get(match_field)
             if match_value is None or match_value == "":
                 raise DataverseHTTPError(
                     f"bulk_upsert_by_field record[{index}] missing {match_field}"
                 )
-            prepared.append((str(match_value), dict(data)))
+            key = str(match_value)
+            if key in positions:
+                position = positions[key]
+                prepared[position] = (key, {**prepared[position][1], **data})
+            else:
+                positions[key] = len(prepared)
+                prepared.append((key, dict(data)))
+            owners.append(positions[key])
+        if len(prepared) < len(records):
+            logger.warning(
+                "Duplicate %s values merged before upsert: entity=%s duplicates=%d",
+                match_field, entity_set, len(records) - len(prepared),
+            )
 
         existing = self.find_many_by_field(
             entity_set,
@@ -590,6 +657,33 @@ class DataverseClient:
                 ids = self.create_multiple(entity_set, payloads)
                 for (index, match_value, _), record_id in zip(batch, ids):
                     results[index] = (match_value, record_id, True)
+            except DataverseAmbiguousWriteError as exc:
+                # The batch may have been created: keep what landed and create
+                # only the rest.
+                landed = self.find_many_by_field(
+                    entity_set,
+                    match_field,
+                    [match_value for _, match_value, _ in batch],
+                    select=[match_field, primary_id],
+                    chunk_size=lookup_chunk_size,
+                )
+                missing = []
+                for index, match_value, payload in batch:
+                    row = landed.get(match_value)
+                    if row and row.get(primary_id):
+                        results[index] = (match_value, row[primary_id], True)
+                    else:
+                        missing.append((index, match_value, payload))
+                logger.warning(
+                    "CreateMultiple outcome unknown for %s, checked by %s: "
+                    "records=%d landed=%d missing=%d error=%r",
+                    entity_set, match_field, len(batch), len(batch) - len(missing),
+                    len(missing), str(exc)[:300],
+                )
+                if missing and not fallback_on_error:
+                    raise
+                for index, match_value, payload in missing:
+                    _create_one(index, match_value, payload)
             except DataverseHTTPError as exc:
                 if not fallback_on_error:
                     raise
@@ -644,7 +738,14 @@ class DataverseClient:
             raise DataverseHTTPError(
                 f"bulk_upsert_by_field on {entity_set} produced incomplete results"
             )
-        return results
+        # One result per input record; a repeated match value reports an update.
+        expanded = []
+        reported = set()
+        for position in owners:
+            match_value, record_id, created = results[position]
+            expanded.append((match_value, record_id, created and position not in reported))
+            reported.add(position)
+        return expanded
 
     def close(self):
         self._session.close()

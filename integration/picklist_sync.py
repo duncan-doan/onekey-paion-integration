@@ -90,8 +90,10 @@ def build_update_body(target: dict, value: int, label: str) -> dict:
     return body
 
 
+# Option actions are safe to repeat after a timeout: Dataverse rejects an
+# InsertOptionValue whose value exists, and UpdateOptionValue sets the same label.
 def post_action(dv: "DataverseClient", action: str, body: dict) -> None:
-    dv.request("POST", action, json=body)
+    dv.request("POST", action, json=body, idempotent=True)
 
 
 def run_batch(dv: "DataverseClient", operations: list[tuple[str, dict]]) -> list[str]:
@@ -128,6 +130,7 @@ def run_batch(dv: "DataverseClient", operations: list[tuple[str, dict]]) -> list
         "$batch",
         data=payload.encode("utf-8"),
         headers={"Content-Type": f"multipart/mixed;boundary={batch_id}"},
+        idempotent=True,  # option actions only, see post_action
     )
     text = response.text
     errors = []

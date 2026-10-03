@@ -33,3 +33,12 @@ class DataverseHTTPError(DataverseError):
         self.code = code
         self.body = body
         self.url = url
+
+
+class DataverseAmbiguousWriteError(DataverseHTTPError):
+    """A non-idempotent write may or may not have been applied.
+
+    Raised instead of retrying a create when the request may have reached
+    Dataverse but no answer came back (read timeout, dropped connection, gateway
+    502/504). Repeating it could create the record twice: look it up first.
+    """

@@ -3,8 +3,11 @@
 import json
 
 import pytest
+import requests
+from urllib3.exceptions import MaxRetryError, NewConnectionError
 
 from dataverse import (
+    DataverseAmbiguousWriteError,
     DataverseAuthError,
     DataverseClient,
     DataverseConfig,
@@ -42,7 +45,10 @@ class FakeTransport:
 
     def request(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
-        return self.responses.pop(0)
+        answer = self.responses.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def close(self):
         pass
@@ -492,3 +498,152 @@ def test_a_contact_without_a_surname_still_gets_one():
 def test_account_falls_back_to_the_usual_name():
     record = hco_to_account({**HCO, "officialName": None})
     assert record["name"] == "Kliniken Hartenstein"
+
+
+# -- writes that may or may not have been applied ---------------------------
+
+GUID_1 = "11111111-1111-1111-1111-111111111111"
+GUID_2 = "22222222-2222-2222-2222-222222222222"
+
+
+def created(guid, entity_set="accounts"):
+    return FakeResponse(204, headers={"OData-EntityId": f"https://x/{entity_set}({guid})"})
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr("dataverse.client.time.sleep", lambda _: None)
+
+
+def test_create_is_not_repeated_after_a_read_timeout(no_sleep):
+    client = make_client([requests.exceptions.ReadTimeout("read timed out")])
+    with pytest.raises(DataverseAmbiguousWriteError):
+        client.create("accounts", {"name": "X"})
+    assert len(client._session.calls) == 1
+
+
+def test_create_after_a_gateway_timeout_is_not_repeated(no_sleep):
+    client = make_client([FakeResponse(504, {"error": {"message": "Gateway Timeout"}})])
+    with pytest.raises(DataverseAmbiguousWriteError) as raised:
+        client.create("accounts", {"name": "X"})
+    assert raised.value.status_code == 504
+    assert len(client._session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "never_sent",
+    [
+        requests.exceptions.ConnectTimeout("connect timed out"),
+        requests.exceptions.ConnectionError(
+            MaxRetryError(None, "https://x", NewConnectionError(None, "refused"))
+        ),
+    ],
+)
+def test_create_is_retried_when_it_never_reached_dataverse(no_sleep, never_sent):
+    client = make_client([never_sent, created(GUID_1)])
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+    assert len(client._session.calls) == 2
+
+
+def test_create_is_retried_when_throttled(no_sleep):
+    client = make_client([FakeResponse(429, headers={"Retry-After": "1"}), created(GUID_1)])
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+
+
+def test_update_and_update_multiple_are_retried_after_a_read_timeout(no_sleep):
+    client = make_client(
+        [
+            requests.exceptions.ReadTimeout("read timed out"),
+            FakeResponse(204),
+            requests.exceptions.ReadTimeout("read timed out"),
+            FakeResponse(204),
+        ]
+    )
+    client.update("accounts", GUID_1, {"name": "X"})
+    client.update_multiple("accounts", [{"accountid": GUID_1, "name": "X"}])
+    assert len(client._session.calls) == 4
+
+
+def test_upsert_by_field_patches_the_primary_key_not_another_id_field():
+    client = make_client(
+        [
+            # ts_externalid also ends in "id" and comes first in the row.
+            FakeResponse(200, {"value": [
+                {"@odata.etag": "W/1", "ts_externalid": "WUKH1", "accountid": GUID_1}
+            ]}),
+            FakeResponse(204),
+        ]
+    )
+    assert client.upsert_by_field("accounts", "ts_externalid", "WUKH1", {"name": "X"}) == (
+        GUID_1,
+        False,
+    )
+    assert client._session.calls[1]["url"].endswith(f"accounts({GUID_1})")
+
+
+def test_upsert_by_field_keeps_a_create_that_landed(no_sleep):
+    client = make_client(
+        [
+            FakeResponse(200, {"value": []}),
+            requests.exceptions.ReadTimeout("read timed out"),
+            FakeResponse(200, {"value": [{"accountid": GUID_1}]}),
+        ]
+    )
+    assert client.upsert_by_field("accounts", "ts_externalid", "WUKH1", {"name": "X"}) == (
+        GUID_1,
+        True,
+    )
+    assert [call["method"] for call in client._session.calls] == ["GET", "POST", "GET"]
+
+
+def test_upsert_by_field_creates_again_when_nothing_landed(no_sleep):
+    client = make_client(
+        [
+            FakeResponse(200, {"value": []}),
+            requests.exceptions.ReadTimeout("read timed out"),
+            FakeResponse(200, {"value": []}),
+            created(GUID_1),
+        ]
+    )
+    assert client.upsert_by_field("accounts", "ts_externalid", "WUKH1", {"name": "X"}) == (
+        GUID_1,
+        True,
+    )
+
+
+def test_bulk_upsert_checks_an_uncertain_create_multiple(no_sleep):
+    client = make_client(
+        [
+            FakeResponse(200, {"value": []}),  # lookup: both new
+            requests.exceptions.ReadTimeout("read timed out"),  # CreateMultiple
+            # check: W1 landed, W2 did not
+            FakeResponse(200, {"value": [{"accountnumber": "W1", "accountid": GUID_1}]}),
+            FakeResponse(200, {"value": []}),  # upsert_by_field(W2): find
+            created(GUID_2),  # upsert_by_field(W2): create
+        ]
+    )
+    results = client.bulk_upsert_by_field(
+        "accounts",
+        "accountnumber",
+        [{"accountnumber": "W1"}, {"accountnumber": "W2"}],
+    )
+    assert results == [("W1", GUID_1, True), ("W2", GUID_2, True)]
+    creates = [call for call in client._session.calls if call["method"] == "POST"]
+    assert len(creates) == 2  # the CreateMultiple, then W2 alone
+
+
+def test_bulk_upsert_writes_a_repeated_key_once():
+    client = make_client(
+        [
+            FakeResponse(200, {"value": []}),
+            FakeResponse(200, {"Ids": [GUID_1]}),
+        ]
+    )
+    results = client.bulk_upsert_by_field(
+        "accounts",
+        "accountnumber",
+        [{"accountnumber": "W1", "name": "Old"}, {"accountnumber": "W1", "name": "New"}],
+    )
+    assert results == [("W1", GUID_1, True), ("W1", GUID_1, False)]
+    [target] = client._session.calls[1]["json"]["Targets"]
+    assert target["name"] == "New"

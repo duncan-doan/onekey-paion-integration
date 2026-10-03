@@ -4,6 +4,7 @@ from .auth import AUTHORITY, TokenProvider, get_access_token
 from .client import DataverseClient, escape_odata, entity_meta, chunked
 from .config import DataverseConfig
 from .exceptions import (
+    DataverseAmbiguousWriteError,
     DataverseAuthError,
     DataverseConfigError,
     DataverseError,
@@ -12,6 +13,7 @@ from .exceptions import (
 
 __all__ = [
     "AUTHORITY",
+    "DataverseAmbiguousWriteError",
     "DataverseAuthError",
     "DataverseClient",
     "DataverseConfig",

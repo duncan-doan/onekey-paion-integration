@@ -15,6 +15,7 @@ from integration.job_trace import (
     JOB_FULL,
     JOB_HCO,
     JOBS,
+    MAX_RETRY_ATTEMPTS,
     PHASE_HCO,
     RETRY_IGNORED,
     RETRY_PENDING,
@@ -667,6 +668,66 @@ def test_retry_fetches_each_onekey_record_once():
     retry_pending_failures(engine, rows=rows)
     assert [name for name, *_ in engine.calls] == ["accounts", "affiliations"]
     assert fetched == [("WORKPLACE", "WUKE00001259")]
+
+
+def test_pending_filter_takes_back_expired_claims():
+    now = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+    text = pending_filter(now=now)
+    assert (
+        f"(ts_retrystatus eq {RETRY_PENDING} or (ts_retrystatus eq {RETRY_RETRIED}"
+        " and modifiedon lt 2026-10-03T10:00:00Z))"
+    ) in text
+
+
+def test_fetch_marks_rows_still_claimed():
+    dataverse = FakeDataverse(
+        rows=[
+            {"ts_integrationfailureid": "fail-1", "ts_sourceid": "WUKE00001259",
+             "ts_retrystatus": RETRY_RETRIED, "ts_attemptcount": 2},
+            {"ts_integrationfailureid": "fail-2", "ts_sourceid": "WUKE00000002",
+             "ts_retrystatus": RETRY_PENDING, "ts_attemptcount": 1},
+        ]
+    )
+    rows = fetch_pending_failures(dataverse)
+    assert [row["claim_expired"] for row in rows] == [True, False]
+    assert "ts_retrystatus" in dataverse.queries[0][1]["select"]
+
+
+def _expired(attempt):
+    row = _row(attempt=attempt)
+    row["claim_expired"] = True
+    return row
+
+
+def test_expired_claim_counts_the_stopped_run_as_an_attempt():
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+    summary = retry_pending_failures(engine, rows=[_expired(1)])
+    assert summary["resolved"] == 1
+    claim, outcome = _failure_updates(dataverse)
+    # Saved at claim time, in case this run stops as well.
+    assert claim[2] == {"ts_retrystatus": RETRY_RETRIED, "ts_attemptcount": 2}
+    assert outcome[2] == {"ts_retrystatus": RETRY_RESOLVED, "ts_attemptcount": 2}
+
+
+def test_expired_claim_at_the_limit_is_ignored_without_replay():
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+    summary = retry_pending_failures(engine, rows=[_expired(MAX_RETRY_ATTEMPTS - 1)])
+    assert summary["ignored"] == 1
+    assert engine.calls == []
+    [(_, record_id, payload)] = _failure_updates(dataverse)
+    assert record_id == "fail-1"
+    assert payload["ts_retrystatus"] == RETRY_IGNORED
+    assert payload["ts_attemptcount"] == MAX_RETRY_ATTEMPTS
+    assert "stopped before recording the outcome" in payload["ts_errormessage"]
+
+
+def test_expired_claim_at_the_limit_is_left_alone_in_a_dry_run():
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+    retry_pending_failures(engine, rows=[_expired(MAX_RETRY_ATTEMPTS - 1)], dry_run=True)
+    assert dataverse.updated == []
 
 
 def test_two_parent_jobs_open_two_retry_jobs():

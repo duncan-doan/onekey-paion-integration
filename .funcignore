@@ -21,3 +21,8 @@ docs/
 data/
 logs/
 *.md
+
+# Archives can carry .env (an old app.zip did), and output/ holds raw OneKey
+# extracts with HCP data from scripts/export_dv_csv.py. Neither is needed at runtime.
+*.zip
+output/

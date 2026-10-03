@@ -56,6 +56,10 @@ _RESOLVE_SCAN_AT = 1000
 # crash) and will never finish. The tracer writes a heartbeat after every phase.
 STALE_JOB_AFTER = timedelta(hours=12)
 
+# A row left Retried this long was claimed by a run that stopped (killed,
+# timed out) before recording the outcome; the next run takes it back.
+CLAIM_EXPIRES_AFTER = timedelta(hours=2)
+
 # OneKey IDs start with their codebase: WUKE00001259, WDEH02963729, WFRH00453901.
 _CODEBASE_PREFIX = re.compile(r"W[A-Z]{2}")
 
@@ -85,11 +89,16 @@ def pending_filter(
 
     Nothing marks a killed job Abandoned, so a parent stuck at Running with a
     heartbeat older than STALE_JOB_AFTER counts as finished; otherwise its
-    failures would never be retried.
+    failures would never be retried. Likewise a row left Retried for
+    CLAIM_EXPIRES_AFTER belongs to a retry run that stopped, and is selected
+    again.
     """
-    stale = (now or datetime.now(timezone.utc)) - STALE_JOB_AFTER
+    now = now or datetime.now(timezone.utc)
+    stale = now - STALE_JOB_AFTER
+    expired = now - CLAIM_EXPIRES_AFTER
     parts = [
-        f"ts_retrystatus eq {RETRY_PENDING}",
+        f"(ts_retrystatus eq {RETRY_PENDING} or (ts_retrystatus eq {RETRY_RETRIED}"
+        f" and modifiedon lt {expired.strftime('%Y-%m-%dT%H:%M:%SZ')}))",
         "ts_isretryable eq true",
         f"ts_attemptcount lt {int(max_attempts)}",
         f"(ts_IntegrationJob/ts_status ne {STATUS_RUNNING}"
@@ -132,6 +141,7 @@ def fetch_pending_failures(
             "ts_attemptcount",
             "ts_errormessage",
             "ts_isretryable",
+            "ts_retrystatus",
         ],
         filter=pending_filter(
             codebase=codebase, job_id=job_id, source_ids=source_ids
@@ -179,6 +189,40 @@ def retry_pending_failures(
         "jobs": [],
         "errors": [],
     }
+    # A row still Retried was claimed by a run that stopped before recording
+    # the outcome. Count that run as an attempt, so a record that keeps
+    # stopping the worker ends up Ignored instead of being reclaimed forever.
+    expired = [row for row in pending if row.get("claim_expired")]
+    for row in expired:
+        row["attempt"] += 1
+    exhausted = [row for row in expired if row["attempt"] >= MAX_RETRY_ATTEMPTS]
+    if expired:
+        logger.warning(
+            "Recovered %d expired retry claim(s); %d reached the attempt limit",
+            len(expired),
+            len(exhausted),
+        )
+    if exhausted:
+        if not dry_run:
+            written = _update_failures(
+                engine.dataverse,
+                [
+                    (
+                        row["id"],
+                        _failure_payload(
+                            RETRY_IGNORED,
+                            attempt=row["attempt"],
+                            message="Retry run stopped before recording the outcome "
+                            f"{MAX_RETRY_ATTEMPTS} times",
+                        ),
+                    )
+                    for row in exhausted
+                ],
+            )
+            summary["ignored"] += len(written)
+        exhausted_ids = {row["id"] for row in exhausted}
+        pending = [row for row in pending if row["id"] not in exhausted_ids]
+
     if not pending:
         logger.info("No pending retryable integration failures")
         return summary
@@ -356,8 +400,19 @@ def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict
     try:
         # Claim every row (Retried) before replaying; if any row cannot be
         # claimed, release the others and skip the replay.
+        # An expired claim's lost attempt is saved now, in case this run stops too.
         claimed_ids = _update_failures(
-            dataverse, [(row["id"], _failure_payload(RETRY_RETRIED)) for row in rows]
+            dataverse,
+            [
+                (
+                    row["id"],
+                    _failure_payload(
+                        RETRY_RETRIED,
+                        attempt=row["attempt"] if row.get("claim_expired") else None,
+                    ),
+                )
+                for row in rows
+            ],
         )
         claimed = [row for row in rows if row["id"] in claimed_ids]
         if len(claimed) < len(rows):
@@ -749,6 +804,8 @@ def _normalize_failure(row: dict) -> dict:
         "parent_guid": parent.get("ts_integrationjobid")
         or row.get("_ts_integrationjob_value"),
         "codebase": codebase,
+        # Still Retried: the run that claimed it stopped before the outcome.
+        "claim_expired": row.get("ts_retrystatus") == RETRY_RETRIED,
     }
 
 
