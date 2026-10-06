@@ -242,7 +242,7 @@ VAL-SPE-198,specialty,Z5,Clinical Pathology,126870198,Clinical Pathology,
 VAL-SPE-199,specialty,Z9,Client Specific Specialty,126870199,Client Specific Specialty,
 VAL-SPE-200,specialty,ZZ,Client Specific Specialty,126870200,Client Specific Specialty,
 # State Code Mapping (stateCode -> statecode),,,,,,
-# State Code Mapping (OneKey statusCode numeric + alpha codes -> account/contact statecode)
+# State Code Mapping (OneKey statusCode numeric + alpha codes -> account/contact statecode),,,,,,
 VAL-STA-N01,statecode,3,Valid,0,Active,OneKey statusCode 3=Valid -> Active
 VAL-STA-N02,statecode,9,Invalid,1,Inactive,OneKey statusCode 9=Invalid -> Inactive
 VAL-STA-N03,statecode,1,Created,1,Inactive,OneKey statusCode 1=Created -> Inactive
@@ -263,6 +263,10 @@ VAL-STA-012,statecode,TIN,Temporarily Inactive,1,Inactive,
 VAL-STR-001,structuretype,POR,Primary Organisation,126870001,Primary Organisation,
 VAL-STR-002,structuretype,ORG,Organisation,126870002,Organisation,
 VAL-STR-003,structuretype,DPT,Department,126870003,Department,
+VAL-STR-004,structuretype,ETA,"Organisation, Hospital, Affiliate, Antenna",126870004,"Organisation, Hospital, Affiliate, Antenna",
+VAL-STR-005,structuretype,SER,Department,126870005,Department,
+VAL-STR-006,structuretype,SSE,Sub department,126870006,Sub department,
+VAL-STR-007,structuretype,SSS,Sub Sub department,126870007,Sub Sub department,
 # Title Code Mapping (individual.titleCode -> title decode),,,,,,
 VAL-TIT-001,title,02,Mx,126870001,Mx,Mx
 VAL-TIT-002,title,03,Doctor,126870002,Doctor,Doctor
@@ -882,16 +886,6 @@ VAL-ROL-453,role,XP,Pharmacy Technician,126870453,Pharmacy Technician,Pharmacy T
 VAL-ROL-454,role,YT,Psychosexual Therapist,126870454,Psychosexual Therapist,Psychosexual Therapist
 VAL-ROL-455,role,Z1,Advanced Clinical Practitioner,126870455,Advanced Clinical Practitioner,Advanced Clinical Practitioner
 VAL-ROL-456,role,ZZ,Client Specific Role,126870456,Client Specific Role,Client Specific Role
-# HCO-HCO Relation Link Code (workplace.relations[*].linkCode -> ts_affiliation.ts_linktype),,,,,,
-# Values align with existing local option 126870001 (was placeholder "test"); insert 002-007 via picklist sync.,,,,,,
-# source_value = child/non-parent label; notes = parent-side label,,,,,,
-VAL-LNK-001,linkcode,AUT,Affiliated auth,126870001,Affiliated auth,Parent label: Has affiliated; updates existing option 126870001
-VAL-LNK-002,linkcode,CGR,Is member of group,126870002,Is member of group,Parent label: Is head of
-VAL-LNK-003,linkcode,GRP,Is secondary address of,126870003,Is secondary address of,Parent label: Is main office of
-VAL-LNK-004,linkcode,HIE,Is managed by,126870004,Is managed by,Parent label: Manages
-VAL-LNK-005,linkcode,HSP,Within,126870005,Within,Parent label: Has within
-VAL-LNK-006,linkcode,MAI,Has for main workplace,126870006,Has for main workplace,Parent label: Is main workplace of
-VAL-LNK-007,linkcode,TRU,Has affiliated,126870007,Has affiliated,Parent label: Affiliated trust
 # Affiliation Working Status Mapping,,,,,,
 VAL-WST-001,workingstatus,C,Full Time,126870001,Full Time,Align with ts_affiliation.ts_workingstatus
 VAL-WST-002,workingstatus,D,Home,126870002,Home,
@@ -899,6 +893,58 @@ VAL-WST-003,workingstatus,P,Part Time,126870003,Part Time,
 VAL-WST-004,workingstatus,W,Regular Substitute,126870004,Regular Substitute,
 VAL-WST-005,workingstatus,T,Market Access,126870005,Market Access,
 VAL-WST-006,workingstatus,N,Unknown Activity,126870006,Unknown Activity,
+# HCO-HCO Relation Link Code (workplace.relations[*].linkCode -> ts_affiliation.ts_linktype),,,,,,
+"# Values align with existing local option 126870001 (was placeholder ""test""); insert 002-007 via picklist sync.",,,,,,
+# source_value = child/non-parent label; notes = parent-side label,,,,,,
+VAL-LNK-001,linkcode,AUT,Affiliated auth,126870001,Affiliated auth,Parent label: Has affiliated; updates existing option 126870001
+VAL-LNK-002,linkcode,CGR,Is member of group,126870002,Is member of group,Parent label: Is head of
+VAL-LNK-003,linkcode,GRP,Is secondary address of,126870003,Is secondary address of,Parent label: Is main office of
+VAL-LNK-004,linkcode,HIE,Is managed by,126870004,Is managed by,Parent label: Manages
+VAL-LNK-005,linkcode,HSP,Within,126870005,Within,Parent label: Has within
+VAL-LNK-006,linkcode,MAI,Has for main workplace,126870006,Has for main workplace,Parent label: Is main workplace of
+VAL-LNK-007,linkcode,TRU,Affiliated trust,126870007,Affiliated trust,Parent label: Affiliated trust
+VAL-LNK-008,linkcode,ACQ,Has been acquired by,126870008,Has been acquired by,
+VAL-LNK-009,linkcode,DOU,Is duplicate of,126870009,Is duplicate of,
+VAL-LNK-010,linkcode,GPSS,Is managed by GPSS main workplace,126870010,Is managed by GPSS main workplace,
+VAL-LNK-011,linkcode,HSE,Health Services Executive,126870011,Health Services Executive,
+VAL-LNK-012,linkcode,MRG,Has merged with,126870012,Has merged with,
+VAL-LNK-013,linkcode,PCG,PCG,126870013,PCG,
+VAL-LNK-014,linkcode,PCO,Affiliated PCO,126870014,Affiliated PCO,
+VAL-LNK-015,linkcode,PCT,PCT,126870015,PCT,
+VAL-LNK-016,linkcode,REM,Is relocated to,126870016,Is relocated to,
+VAL-LNK-017,linkcode,SUP,SUP,126870017,SUP,
+VAL-LNK-018,linkcode,AEH,Belongs to Practice house,126870018,Belongs to Practice house,
+VAL-LNK-019,linkcode,APP,Belongs to Medical equipment group,126870019,Belongs to Medical equipment group,
+VAL-LNK-020,linkcode,ATL,manages the ASV Core Team,126870020,manages the ASV Core Team,
+VAL-LNK-021,linkcode,DIA,Belongs to Practice / MVZ,126870021,Belongs to Practice / MVZ,
+VAL-LNK-022,linkcode,DRK,Supplied by - DRK -,126870022,Supplied by - DRK -,
+VAL-LNK-023,linkcode,EKM,Belongs to Buying Group - medical,126870023,Belongs to Buying Group - medical,
+VAL-LNK-024,linkcode,EKR,Belongs to Buying Group - pharma,126870024,Belongs to Buying Group - pharma,
+VAL-LNK-025,linkcode,EKS,Belongs to Buying Group - sanitary,126870025,Belongs to Buying Group - sanitary,
+VAL-LNK-026,linkcode,ELA,has Own laboratory,126870026,has Own laboratory,
+VAL-LNK-027,linkcode,FIL,Is affiliate of,126870027,Is affiliate of,
+VAL-LNK-028,linkcode,FLA,has external laboratory,126870028,has external laboratory,
+VAL-LNK-029,linkcode,FRA,Belongs to Franchise company,126870029,Belongs to Franchise company,
+VAL-LNK-030,linkcode,GZE,Health care center,126870030,Health care center,
+VAL-LNK-031,linkcode,HFA,is consulting physician,126870031,is consulting physician,
+VAL-LNK-032,linkcode,HFI,is consulting institution,126870032,is consulting institution,
+VAL-LNK-033,linkcode,KLI,Belongs to Hospitals - KLI - ,126870033,Belongs to Hospitals - KLI - ,
+VAL-LNK-034,linkcode,KRK,Is affiliated to hospitals,126870034,Is affiliated to hospitals,
+VAL-LNK-035,linkcode,KTM,is a member of the ASV Core Team,126870035,is a member of the ASV Core Team,
+VAL-LNK-036,linkcode,LVB,bel to LVB,126870036,bel to LVB,
+VAL-LNK-037,linkcode,MIT,is a member of the network,126870037,is a member of the network,
+VAL-LNK-038,linkcode,NET,belongs to the network,126870038,belongs to the network,
+VAL-LNK-039,linkcode,NMA,manages the network,126870039,manages the network,
+VAL-LNK-040,linkcode,ONZ,Belongs to Onco Network,126870040,Belongs to Onco Network,
+VAL-LNK-041,linkcode,PGE,Belongs to Group of practices,126870041,Belongs to Group of practices,
+VAL-LNK-042,linkcode,PKL,Hospital with practices,126870042,Hospital with practices,
+VAL-LNK-043,linkcode,SER,Belongs to Service center,126870043,Belongs to Service center,
+VAL-LNK-044,linkcode,TRA,Belongs to Management company,126870044,Belongs to Management company,
+VAL-LNK-045,linkcode,UEZ,Belongs to Interlocational union,126870045,Belongs to Interlocational union,
+VAL-LNK-046,linkcode,UNI,Universityhospital - Center,126870046,Universityhospital - Center,
+VAL-LNK-047,linkcode,VAB,Supplied by - VAB -,126870047,Supplied by - VAB -,
+VAL-LNK-048,linkcode,VAS,Supplied by - VAS -,126870048,Supplied by - VAS -,
+VAL-LNK-049,linkcode,VER,Supplied by - VER -,126870049,Supplied by - VER -,
 # HCP Professional Type Code (individual.typeCode -> typecode decode),,,,,,
 VAL-TYP-001,hcptype,A,Administrator,126870001,Administrator,Administrator
 VAL-TYP-002,hcptype,C,Researcher/Scientist,126870002,Researcher/Scientist,Researcher/Scientist
@@ -924,3 +970,17 @@ VAL-TYP-021,hcptype,V,Veterinarian,126870021,Veterinarian,Veterinarian
 VAL-TYP-022,hcptype,VX,Veterinary Assistant,126870022,Veterinary Assistant,Veterinary Assistant
 VAL-TYP-023,hcptype,W,Wholesaler,126870023,Wholesaler,Wholesaler
 VAL-TYP-024,hcptype,Z,Other,126870024,Other,Other
+VAL-TYP-025,hcptype,PT,Pharmacy technician,126870025,Pharmacy technician,Pharmacy technician
+# Sub status mapping,,,,,,
+VAL-SST-001,substatus,ACT,Active,126870001,Active,Active
+VAL-SST-002,substatus,CLO,Closed,126870002,Closed,Closed
+VAL-SST-003,substatus,DED,Deceased,126870003,Deceased,Deceased
+VAL-SST-004,substatus,DER,Deregistered,126870004,Deregistered,Deregistered
+VAL-SST-005,substatus,INA,Inactive,126870005,Inactive,Inactive
+VAL-SST-006,substatus,MAT,Maternity/Paternity Leave,126870006,Maternity/Paternity Leave,Maternity/Paternity Leave
+VAL-SST-007,substatus,OPE,Open,126870007,Open,Open
+VAL-SST-008,substatus,OPG,Is opening,126870008,Is opening,Is opening
+VAL-SST-009,substatus,RED,Reduced Activity,126870009,Reduced Activity,Reduced Activity
+VAL-SST-010,substatus,RET,Retired,126870010,Retired,Retired
+VAL-SST-011,substatus,TCL,Temporarily Closed,126870011,Temporarily Closed,Temporarily Closed
+VAL-SST-012,substatus,TIN,Temporarily Inactive,126870012,Temporarily Inactive,Temporarily Inactive
