@@ -1,0 +1,15 @@
+lookup_id,list_code,lookup_entity,entity_set,key_field,name_field,name_max_length,external_id_template,label_field,iso_language,notes
+# ============================================================================================================,,,,,,,,,,
+# Lookup tables that replace large OneKey choice lists.,,,,,,,,,,
+# external_id_template placeholders: {codBase} {list} {code},,,,,,,,,,
+# {list} is list_code on this row. {code} is the OneKey code externalId. {codBase} is the country being loaded.,,,,,,,,,,
+# Example: WUK + TET + HOS → WUK.TET.HOS written to key_field (ts_externalid).,,,,,,,,,
+# Change the template here; do not hardcode the pattern in Python.,,,,,,,,,,
+# entity_set / key_field / name_field must match the Dataverse table.,,,,,,,,,,
+# ============================================================================================================,,,,,,,,,,
+LK-TET,TET,ts_hcotype_ref,ts_hcotype_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,HCO type; workplace.typeCode
+LK-SP,SP,ts_specialty_ref,ts_specialty_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Specialty; workplace/individual ada SP_1..SP_5
+LK-LEX,LEX,ts_hcocategory_ref,ts_hcocategory_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Category; workplace.activityLocationCode
+LK-CAJ,CAJ,ts_hcolegalcategory_ref,ts_hcolegalcategory_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Legal category; workplace ada CAJ_1
+LK-TIT,TIT,ts_title_ref,ts_title_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Title; individual.titleCode
+LK-TIH,TIH,ts_role_ref,ts_role_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Activity role; activity ada TIH_1..TIH_10

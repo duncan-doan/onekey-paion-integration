@@ -4,10 +4,7 @@ mapping_type,kind,option_set,entity,attribute,notes
 # mapping_type must match value_mapping.csv and decode:TYPE / map rules in entity_mapping.csv,,,,,
 # kind=global → OptionSetName; kind=local → EntityLogicalName + AttributeLogicalName,,,,,
 # ============================================================================================================,,,,,
-hcotype,global,ts_hcotype,,,Account HCO type (account.ts_type)
-specialty,global,ts_specialty,,,Specialty global choice (account/contact ts_specialty*)
 structuretype,global,ts_hcostructuretype,,,HCO structure type (account.ts_structuretype)
-title,local,,contact,ts_title,Contact title local choice
 hcptype,global,ts_hcptype,,,Contact HCP type (contact.ts_type → global ts_hcptype)
 language,global,ts_preferredlanguage,,,Contact preferred language (contact.ts_preferredlanguage)
 linkcode,global,ts_affiliationlinktype,,,HCO-HCO link type global choice (ts_affiliation.ts_linktype); W2W-005 decode:linkcode

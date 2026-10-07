@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Bulk upsert Dataverse choice options from config/value_mapping.csv.
+"""Bulk upsert Dataverse choice options and code-list lookup tables.
 
-Thin CLI around :mod:`integration.picklist_sync`. Targets come from
-``config/picklist_targets.csv`` (global OptionSetName or local entity/attribute).
+Choice options come from ``config/value_mapping.csv`` and
+``config/picklist_targets.csv``. Lists stored as tables (specialty, HCO type,
+title, …) come from OneKey ``/ok/code``. Their ``ts_externalid`` is the
+template in ``config/lookup_table_mapping.csv`` (for example ``WUK.TET.HOS``).
 
 Usage:
     python scripts/load_picklist_values.py
-    python scripts/load_picklist_values.py --types hcotype,specialty --dry-run
-    python scripts/load_picklist_values.py --no-batch
+    python scripts/load_picklist_values.py --types structuretype,language --dry-run
+    python scripts/load_picklist_values.py --codebases WUK,WDE
+    python scripts/load_picklist_values.py --codebases WUK --lookup-tables LK-TET --dry-run
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dataverse import DataverseClient, DataverseConfig
 from integration import load_mapping_config, setup_logging
 from integration.env import load_env
+from integration.lookup_sync import sync_lookup_tables
 from integration.picklist_sync import sync_picklists_from_config
+from onekey import OneKeyClient, OneKeyConfig, OneKeySession
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,21 @@ def parse_args(known_types: list[str]):
         default=50,
         help="Option operations per $batch changeset (default: 50)",
     )
+    parser.add_argument(
+        "--codebases",
+        default="",
+        help="Comma-separated OneKey codBase values (WUK,WDE). Required to load lookup tables.",
+    )
+    parser.add_argument(
+        "--lookup-tables",
+        default="",
+        help="Comma-separated lookup_id or list_code values (default: all lookup tables)",
+    )
+    parser.add_argument(
+        "--skip-choices",
+        action="store_true",
+        help="Do not upsert choice options; only load lookup tables",
+    )
     return parser.parse_args()
 
 
@@ -82,24 +102,52 @@ def main() -> int:
             )
             return 2
 
-    print("Picklist bulk upsert from value_mapping.csv")
-    print(f"Types   : {', '.join(types)}")
+    codebases = [c.strip() for c in args.codebases.split(",") if c.strip()]
+    lookup_tables = [t.strip() for t in args.lookup_tables.split(",") if t.strip()]
+
+    print("Picklist bulk upsert")
+    if not args.skip_choices:
+        print(f"Choices : {', '.join(types)}")
+    if codebases:
+        print(f"Lookups : {', '.join(lookup_tables) or 'all'} for {', '.join(codebases)}")
+    else:
+        print("Lookups : skipped (pass --codebases WUK to load lookup tables)")
     print(
         f"Mode    : {'DRY RUN' if args.dry_run else 'WRITE'}"
         f"{'' if args.no_batch else ' ($batch)'}"
     )
 
+    onekey = None
+    if codebases:
+        onekey_config = OneKeyConfig.from_env()
+        onekey = OneKeyClient(OneKeySession(onekey_config))
+
     with DataverseClient(DataverseConfig.from_env()) as dv:
         identity = dv.whoami()
         print(f"Dataverse user: {identity.get('UserId')}")
-        summaries = sync_picklists_from_config(
-            dv,
-            config,
-            types=types,
-            dry_run=args.dry_run,
-            use_batch=not args.no_batch,
-            batch_size=args.batch_size,
-        )
+        summaries = []
+        if not args.skip_choices:
+            summaries.extend(
+                sync_picklists_from_config(
+                    dv,
+                    config,
+                    types=types,
+                    dry_run=args.dry_run,
+                    use_batch=not args.no_batch,
+                    batch_size=args.batch_size,
+                )
+            )
+        if codebases and onekey is not None:
+            summaries.extend(
+                sync_lookup_tables(
+                    dv,
+                    onekey,
+                    config,
+                    codebases,
+                    dry_run=args.dry_run,
+                    tables=lookup_tables or None,
+                )
+            )
 
     print("\n" + "=" * 72)
     print("PICKLIST SUMMARY")

@@ -9,6 +9,7 @@ CSV Files:
     config/entity_definition.csv   - Entity metadata for validation
     config/value_mapping.csv       - Picklist/code value transformations
     config/picklist_targets.csv    - Dataverse choice option-set targets
+    config/lookup_table_mapping.csv - Code lists stored as lookup tables
     config/field_constraints.csv   - Field validation constraints
 """
 
@@ -129,6 +130,29 @@ class PicklistTarget:
 
 
 @dataclass
+class LookupTableMapping:
+    """One OneKey code list stored in a Dataverse lookup table.
+
+    ``external_id_template`` builds ``ts_externalid``. Placeholders are
+    ``{codBase}``, ``{list}`` (this row's ``list_code``), and ``{code}``
+    (the OneKey code's local externalId). ``WUK`` + ``TET`` + ``HOS`` with
+    ``{codBase}.{list}.{code}`` is ``WUK.TET.HOS``.
+    """
+
+    lookup_id: str
+    list_code: str
+    lookup_entity: str
+    entity_set: str
+    key_field: str
+    name_field: str
+    external_id_template: str
+    label_field: str = "longLabel"
+    iso_language: str = "en"
+    name_max_length: int = 100
+    notes: str = ""
+
+
+@dataclass
 class MappingConfig:
     """Complete mapping configuration loaded from CSVs."""
     field_mappings: list[FieldMapping] = field(default_factory=list)
@@ -137,6 +161,7 @@ class MappingConfig:
     value_mappings: list[ValueMapping] = field(default_factory=list)
     field_constraints: list[FieldConstraint] = field(default_factory=list)
     picklist_targets: list[PicklistTarget] = field(default_factory=list)
+    lookup_tables: list[LookupTableMapping] = field(default_factory=list)
 
     # Indexes for fast lookup
     _field_by_target: dict[str, list[FieldMapping]] = field(default_factory=dict)
@@ -144,6 +169,7 @@ class MappingConfig:
     _entity_by_name: dict[str, EntityDefinition] = field(default_factory=dict)
     _constraints_by_field: dict[str, list[FieldConstraint]] = field(default_factory=dict)
     _picklist_by_type: dict[str, PicklistTarget] = field(default_factory=dict)
+    _lookup_by_entity: dict[str, LookupTableMapping] = field(default_factory=dict)
 
     def build_indexes(self):
         """Build lookup indexes after loading."""
@@ -172,14 +198,28 @@ class MappingConfig:
             for pt in self.picklist_targets
         }
 
+        self._lookup_by_entity = {}
+        for table in self.lookup_tables:
+            key = (table.lookup_entity or "").lower()
+            if not key:
+                continue
+            if key in self._lookup_by_entity:
+                logger.warning(
+                    "Duplicate lookup table for %s; keeping %s",
+                    table.lookup_entity,
+                    table.lookup_id,
+                )
+            self._lookup_by_entity[key] = table
+
         logger.info(
             "Mapping indexes built: %d field mappings, %d value maps, %d entities, "
-            "%d constraints, %d picklist targets",
+            "%d constraints, %d picklist targets, %d lookup tables",
             len(self.field_mappings),
             len(self._value_map),
             len(self._entity_by_name),
             len(self.field_constraints),
             len(self._picklist_by_type),
+            len(self._lookup_by_entity),
         )
 
     def get_field_mappings(self, target_entity: str) -> list[FieldMapping]:
@@ -248,6 +288,10 @@ class MappingConfig:
         """Return picklist upsert target for a value_mapping mapping_type."""
         key = (mapping_type or "").lower().replace(" ", "")
         return self._picklist_by_type.get(key)
+
+    def get_lookup_table(self, lookup_entity: str) -> LookupTableMapping | None:
+        """Return the code-list table that backs a lookup column."""
+        return self._lookup_by_entity.get((lookup_entity or "").lower())
 
     def picklist_target_map(self) -> dict[str, dict]:
         """mapping_type → target dict for picklist_sync."""
@@ -469,6 +513,51 @@ def load_picklist_targets(csv_path: Path) -> list[PicklistTarget]:
     return targets
 
 
+def load_lookup_tables(csv_path: Path) -> list[LookupTableMapping]:
+    """Load code-list lookup tables and their external-id templates."""
+    tables = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lookup_id = (row.get("lookup_id") or "").strip()
+            if not lookup_id or lookup_id.startswith("#"):
+                continue
+            list_code = (row.get("list_code") or "").strip()
+            lookup_entity = (row.get("lookup_entity") or "").strip()
+            entity_set = (row.get("entity_set") or "").strip()
+            template = (row.get("external_id_template") or "").strip()
+            if not (list_code and lookup_entity and entity_set and template):
+                logger.warning(
+                    "Skip lookup table %s: list_code, lookup_entity, entity_set, "
+                    "and external_id_template are required",
+                    lookup_id,
+                )
+                continue
+            raw_max = (row.get("name_max_length") or "").strip()
+            try:
+                name_max = int(raw_max) if raw_max else 100
+            except ValueError:
+                name_max = 100
+            tables.append(
+                LookupTableMapping(
+                    lookup_id=lookup_id,
+                    list_code=list_code,
+                    lookup_entity=lookup_entity,
+                    entity_set=entity_set,
+                    key_field=(row.get("key_field") or "ts_externalid").strip(),
+                    name_field=(row.get("name_field") or "ts_name").strip(),
+                    external_id_template=template,
+                    label_field=(row.get("label_field") or "longLabel").strip()
+                    or "longLabel",
+                    iso_language=(row.get("iso_language") or "en").strip() or "en",
+                    name_max_length=name_max,
+                    notes=row.get("notes", "") or "",
+                )
+            )
+    logger.info("Loaded %d lookup tables from %s", len(tables), csv_path)
+    return tables
+
+
 def load_mapping_config(config_dir: Path = None) -> MappingConfig:
     """Load complete mapping configuration from CSV files.
     
@@ -522,7 +611,13 @@ def load_mapping_config(config_dir: Path = None) -> MappingConfig:
         config.picklist_targets = load_picklist_targets(picklist_path)
     else:
         logger.warning("picklist_targets.csv not found at %s", picklist_path)
-    
+
+    lookup_path = config_dir / "lookup_table_mapping.csv"
+    if lookup_path.exists():
+        config.lookup_tables = load_lookup_tables(lookup_path)
+    else:
+        logger.warning("lookup_table_mapping.csv not found at %s", lookup_path)
+
     # Build lookup indexes
     config.build_indexes()
     

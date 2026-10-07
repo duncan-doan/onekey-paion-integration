@@ -65,6 +65,7 @@ def flatten_activity_for_affiliation(record: dict) -> dict[str, Any]:
         "activityEid": activity_eid,
         "individualEid": individual_eid,
         "workplaceEid": workplace_eid,
+        "codBase": record.get("codBase") or activity.get("codBase"),
         "isMainActivity": activity.get("isMainActivity"),
         "workingStatusCode": activity.get("workingStatusCode"),
         "stateCode": activity.get("stateCode") or activity.get("statusCode"),

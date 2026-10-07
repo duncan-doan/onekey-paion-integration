@@ -7,45 +7,62 @@ from integration.hierarchy import edges_from_hcos
 from integration.transform import create_transform_engine
 
 
-def test_decode_unmapped_omits_field_and_records_gap(tmp_path: Path):
+def test_lookup_without_codbase_records_gap(tmp_path: Path):
     engine = create_transform_engine(load_mapping_config())
     engine.picklist_gaps.clear()
 
-    source = {
-        "workplaceEid": "WUKHCO0001",
-        "officialName": "Test Hospital",
-        "typeCode": "ZZZ_UNKNOWN_TYPE",  # not in value_mapping as this exact path — use fake
-    }
-    # Force an unmapped hcotype by using a code that is not in CSV.
-    source["typeCode"] = "@@@NOT_A_REAL_HCOTYPE@@@"
-
-    payload = engine.transform_hco(source)
+    payload = engine.transform_hco(
+        {
+            "workplaceEid": "WUKHCO0001",
+            "officialName": "Test Hospital",
+            "typeCode": "HOS",
+        }
+    )
+    assert "ts_type_ref@odata.bind" not in payload
     assert "ts_type" not in payload
     assert any(
-        g.mapping_type == "hcotype" and g.source_value == "@@@NOT_A_REAL_HCOTYPE@@@"
+        g.mapping_type == "TET" and g.source_value == "HOS"
         for g in engine.picklist_gaps.gaps
     )
 
     report = engine.picklist_gaps.write_report(tmp_path / "gaps.csv")
     assert report is not None
     text = report.read_text(encoding="utf-8")
-    assert "@@@NOT_A_REAL_HCOTYPE@@@" in text
-    assert "hcotype" in text
+    assert "HOS" in text
+    assert "TET" in text
 
 
-def test_decode_mapped_hcotype_sets_picklist():
+def test_lookup_hcotype_binds_full_external_id():
     engine = create_transform_engine(load_mapping_config())
     engine.picklist_gaps.clear()
     payload = engine.transform_hco(
         {
             "workplaceEid": "WUKHCO0001",
             "officialName": "Hospital",
+            "codBase": "WUK",
             "typeCode": "HOS",
+            "specialtyCode1": "01",
+            "activityLocationCode": "H",
+            "legalCategoryCode": "PRV",
         }
     )
-    expected = engine.config.get_value("hcotype", "HOS")
-    assert expected is not None
-    assert str(payload.get("ts_type")) == str(expected)
+    assert (
+        payload["ts_type_ref@odata.bind"]
+        == "/ts_hcotype_refs(ts_externalid='WUK.TET.HOS')"
+    )
+    assert (
+        payload["ts_specialty1_ref@odata.bind"]
+        == "/ts_specialty_refs(ts_externalid='WUK.SP.01')"
+    )
+    assert (
+        payload["ts_category_ref@odata.bind"]
+        == "/ts_hcocategory_refs(ts_externalid='WUK.LEX.H')"
+    )
+    assert (
+        payload["ts_legalcategory_ref@odata.bind"]
+        == "/ts_hcolegalcategory_refs(ts_externalid='WUK.CAJ.PRV')"
+    )
+    assert "ts_type" not in payload
     assert not engine.picklist_gaps.gaps
 
 

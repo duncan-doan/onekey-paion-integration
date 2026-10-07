@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .lookup_sync import odata_lookup_bind, render_external_id
 from .picklist_gaps import PicklistGapCollector
 
 if TYPE_CHECKING:
@@ -55,6 +56,11 @@ class TransformEngine:
             if fm.target_field.startswith("address1_"):
                 continue
             if fm.target_field == "parentaccountid":
+                continue
+
+            catalog = self._catalog_payload(fm, source)
+            if catalog is not None:
+                payload.update(catalog)
                 continue
 
             value = self._extract_value(source, fm.source_field)
@@ -114,6 +120,11 @@ class TransformEngine:
             if fm.target_field.startswith("address1_"):
                 continue
             if fm.target_field == "parentcustomerid":
+                continue
+
+            catalog = self._catalog_payload(fm, source)
+            if catalog is not None:
+                payload.update(catalog)
                 continue
 
             value = self._extract_value(source, fm.source_field)
@@ -515,6 +526,56 @@ class TransformEngine:
         if isinstance(value, str):
             return value.strip().lower() in ("true", "1", "yes", "y")
         return bool(value)
+
+    def _catalog_payload(self, mapping: "FieldMapping", source: dict) -> dict | None:
+        """Bind a code-list lookup using the configured external-id template.
+
+        Returns ``None`` when the field is not a catalog lookup (caller keeps
+        the normal transform). Returns ``{}`` when the code is blank or the
+        key cannot be built. Otherwise returns the ``@odata.bind`` property.
+        """
+        if not mapping.is_lookup or not mapping.lookup_entity:
+            return None
+        table = self.config.get_lookup_table(mapping.lookup_entity)
+        if table is None:
+            return None
+
+        value = self._extract_value(source, mapping.source_field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return {}
+
+        code = str(value).strip()
+        cod_base = source.get("codBase") or source.get("codbase")
+        if cod_base is None or not str(cod_base).strip():
+            self.picklist_gaps.record(
+                table.list_code,
+                code,
+                target_field=mapping.target_field,
+                target_entity=self._current_entity or mapping.target_entity,
+                source_eid=self._current_eid,
+                transform_rule=mapping.transform_rule or "lookup_by_key",
+            )
+            return {}
+
+        external = render_external_id(
+            table.external_id_template,
+            cod_base=str(cod_base).strip(),
+            list_code=table.list_code,
+            code=code,
+        )
+        if not external:
+            self.picklist_gaps.record(
+                table.list_code,
+                code,
+                target_field=mapping.target_field,
+                target_entity=self._current_entity or mapping.target_entity,
+                source_eid=self._current_eid,
+                transform_rule=table.external_id_template,
+            )
+            return {}
+
+        bind = odata_lookup_bind(table.entity_set, table.key_field, external)
+        return {f"{mapping.target_field}@odata.bind": bind}
 
     def _extract_value(self, source: dict, field_name: str) -> Any:
         """Extract value from source record.

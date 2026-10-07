@@ -7,6 +7,8 @@ lists: qualifications arrive as ``{"SP,1": {...}}`` where the key is
 normally wants, leaving the raw payload untouched for anything else.
 """
 
+from __future__ import annotations
+
 
 def _coded_values(container):
     """Normalise a OneKey coded-value map into a list ordered by rank.
@@ -36,6 +38,19 @@ def _coded_values(container):
             }
         )
     return sorted(entries, key=lambda e: (e["listCode"] or "", e["rank"]))
+
+
+def first_ada_code(entity, list_code: str) -> str | None:
+    """Return the first coded value on ``entity.ada`` for ``list_code``."""
+    container = (entity or {}).get("ada") or {}
+    matches = [
+        entry
+        for entry in _coded_values(container)
+        if (entry.get("listCode") or "").upper() == list_code.upper() and entry.get("code")
+    ]
+    if not matches:
+        return None
+    return matches[0]["code"]
 
 
 def specialties(entity):
@@ -293,6 +308,7 @@ def flatten_hco(result):
         "typeCode": workplace.get("typeCode"),
         "typeLabel": workplace.get("typeCorporateLabel") or workplace.get("typeLabel"),
         "activityLocationCode": workplace.get("activityLocationCode"),
+        "legalCategoryCode": first_ada_code(workplace, "CAJ"),
         "structureTypeCode": workplace.get("structureTypeCode"),
         **specialty_slots(workplace),
         "statusCode": status,

@@ -9,6 +9,13 @@ ENT-DV-002,Dataverse,contact,contacts,contactid,Yes,ts_externalid,TRUE,2,account
 ENT-DV-003,Dataverse,customeraddress,customeraddresses,customeraddressid,Yes,ts_externalid,FALSE,3,account,Address per HCO (1-n). Upsert key ts_externalid = workplaceEid - addressEid; shared OneKey addresses are duplicated per Account
 ENT-DV-004,Dataverse,connection,connections,connectionid,No,,FALSE,4,account,Legacy option for HCO-HCO; prefer ts_affiliation (W2W-*) instead
 ENT-DV-005,Dataverse,ts_affiliation,ts_affiliations,ts_affiliationid,Yes,ts_externalid,FALSE,4,account,Affiliation junction: HCP-HCO (AFF-*) and HCO-HCO (W2W-* from workplace.relations[]); load after account+contact
+ENT-DV-006,Dataverse,ts_affiliation_role,ts_affiliation_roles,ts_affiliation_roleid,No,,FALSE,5,ts_affiliation,Activity role child rows; ts_role looks up ts_role_ref
+ENT-DV-010,Dataverse,ts_hcotype_ref,ts_hcotype_refs,ts_hcotype_refid,Yes,ts_externalid,FALSE,0,,HCO type codes; alternate key ts_externalid from lookup_table_mapping.csv
+ENT-DV-011,Dataverse,ts_specialty_ref,ts_specialty_refs,ts_specialty_refid,Yes,ts_externalid,FALSE,0,,Specialty codes; alternate key ts_externalid
+ENT-DV-012,Dataverse,ts_hcocategory_ref,ts_hcocategory_refs,ts_hcocategory_refid,Yes,ts_externalid,FALSE,0,,Activity-location / category codes
+ENT-DV-013,Dataverse,ts_hcolegalcategory_ref,ts_hcolegalcategory_refs,ts_hcolegalcategory_refid,Yes,ts_externalid,FALSE,0,,Legal category codes (CAJ)
+ENT-DV-014,Dataverse,ts_title_ref,ts_title_refs,ts_title_refid,Yes,ts_externalid,FALSE,0,,Individual title codes (TIT)
+ENT-DV-015,Dataverse,ts_role_ref,ts_role_refs,ts_role_refid,Yes,ts_externalid,FALSE,0,,Activity role codes (TIH)
 # OneKey Source Entities (for reference/validation),,,,,,,,,,
 ENT-OK-001,OneKey,Workplace,N/A,workplaceEid,N/A,workplaceEid,TRUE,N/A,,Healthcare Organization source; entityType=WORKPLACE in search/refresh
 ENT-OK-002,OneKey,Individual,N/A,individualEid,N/A,individualEid,TRUE,N/A,,Healthcare Professional source; accessed via Activity

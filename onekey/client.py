@@ -286,6 +286,21 @@ class OneKeyClient:
             **kwargs
         )
 
+    def get_code_list(self, cod_base, list_external_id, iso_language="en"):
+        """Return one OneKey code list (``/ok/code``).
+
+        ``list_external_id`` is the list code (``TET``, ``SP``, ``TIT``, …).
+        Each code's ``uid`` is ``{codBase}.{list}.{externalId}`` (for example
+        ``WUK.TET.HOS``). The integration writes that value from
+        ``lookup_table_mapping.csv``, not from ``uid`` itself.
+        """
+        payload = {
+            "codBase": cod_base,
+            "listExternalId": list_external_id,
+            "isoLanguage": iso_language or "en",
+        }
+        return self.session.post_json("/ok/code", payload)
+
     # -- retrieval by OneKey id -------------------------------------------
 
     def get_by_id(self, onekey_eid, entity_type=ACTIVITY, cod_base=None, iso_cod2=None):

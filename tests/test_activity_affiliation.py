@@ -77,7 +77,18 @@ def test_transform_activity_affiliation_payload():
     assert payload["ts_ToID@odata.bind"] == "/accounts(account-guid)"
     assert payload["ts_isprimary"] is True
     assert payload["ts_workingstatus"] in (126870001, "126870001")
-    # roles decoded to option values, comma-joined
-    assert "ts_role" in payload
-    assert "," in payload["ts_role"] or payload["ts_role"].isdigit()
+    # Roles are rows on ts_affiliation_role, not a choice on ts_affiliation.
+    assert "ts_role" not in payload
     assert payload.get("ts_name")
+
+
+def test_role_lookup_uses_full_external_id():
+    engine = create_transform_engine(load_mapping_config())
+    role = next(
+        fm for fm in engine.config.field_mappings if fm.mapping_id == "AFF-007"
+    )
+    engine.begin_record("ts_affiliation_role", "WUKM0000000101")
+    payload = engine._catalog_payload(role, {"role": "28", "codBase": "WUK"})
+    assert payload == {
+        "ts_role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')"
+    }

@@ -21,6 +21,7 @@ from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
+from .lookup_sync import sync_lookup_tables
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
@@ -259,17 +260,40 @@ class DynamicSyncEngine:
             if source_id:
                 self.succeeded_ids.add(str(source_id))
 
-    def sync_picklists(self, dry_run: bool = False) -> list[dict]:
-        """Phase 0: upsert choice options from value_mapping.csv into Dataverse."""
+    def sync_picklists(
+        self,
+        dry_run: bool = False,
+        codebases: list[str] | None = None,
+    ) -> list[dict]:
+        """Phase 0: choice options, then code-list lookup tables.
+
+        Choice options still come from ``value_mapping.csv``. Lists that live
+        in lookup tables (specialty, HCO type, title, …) are loaded from
+        OneKey ``/ok/code``. Their ``ts_externalid`` is the template in
+        ``lookup_table_mapping.csv`` (``WUK.TET.HOS``).
+        """
         with self._phase(PHASE_PICKLISTS, "picklists") as phase:
-            if not hasattr(self.dataverse, "request"):
-                logger.info(
-                    msg("Picklists skipped, Dataverse client has no metadata API", _ctx(self))
+            picklists: list[dict] = []
+            if hasattr(self.dataverse, "request"):
+                picklists.extend(
+                    sync_picklists_from_config(
+                        self.dataverse, self.config, dry_run=dry_run
+                    )
                 )
-                return []
-            picklists = sync_picklists_from_config(
-                self.dataverse, self.config, dry_run=dry_run
-            )
+            else:
+                logger.info(
+                    msg("Choice picklists skipped, Dataverse client has no metadata API", _ctx(self))
+                )
+            if codebases:
+                picklists.extend(
+                    sync_lookup_tables(
+                        self.dataverse,
+                        self.onekey,
+                        self.config,
+                        codebases,
+                        dry_run=dry_run,
+                    )
+                )
             phase["stats"] = {"types": len(picklists)}
             return picklists
 
@@ -336,10 +360,12 @@ class DynamicSyncEngine:
 
             results["success"] = True
 
-            if sync_picklists and not hcp_only:
+            if sync_picklists:
                 self._trace_phase = PHASE_PICKLISTS
                 try:
-                    results["picklists"] = self.sync_picklists(dry_run=dry_run)
+                    results["picklists"] = self.sync_picklists(
+                        dry_run=dry_run, codebases=codebases
+                    )
                 except Exception as e:
                     # Missing option sets on a fresh env must not block HCO/HCP load.
                     logger.exception(
@@ -648,7 +674,9 @@ class DynamicSyncEngine:
             if sync_picklists:
                 self._trace_phase = PHASE_PICKLISTS
                 try:
-                    results["picklists"] = self.sync_picklists(dry_run=dry_run)
+                    results["picklists"] = self.sync_picklists(
+                        dry_run=dry_run, codebases=codebases
+                    )
                 except Exception as e:
                     logger.exception(
                         msg("Picklist sync failed, continuing without option upsert", _ctx(self))
