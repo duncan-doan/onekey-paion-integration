@@ -4,9 +4,10 @@ sample_ok_to_dv upserts a few OneKey HCOs and their related data to Dataverse,
 through the same engine phases as the full sync. It is a small end-to-end
 check: a failure there is a connectivity, configuration or mapping problem.
 
-scheduled_onekey_delta (daily) and scheduled_onekey_full (monthly) run the
-real syncs. All three trace each run to ts_integrationjob /
-ts_integrationfailure.
+scheduled_onekey_delta (daily) and scheduled_onekey_full (monthly) enqueue
+one work item per codebase. scheduled_onekey_worker runs the real sync and
+lets Azure retry failures before moving them to onekey-queue-poison. Sync
+runs are traced to ts_integrationjob / ts_integrationfailure.
 
 App Settings required (the same names the CLI scripts read from .env):
     ONEKEY_ENV or ONEKEY_BASE_URL, ONEKEY_USERNAME, ONEKEY_PASSWORD,
@@ -14,6 +15,7 @@ App Settings required (the same names the CLI scripts read from .env):
     DATAVERSE_CLIENT_ID, DATAVERSE_CLIENT_SECRET
 Scheduled syncs also need:
     SYNC_SCHEDULE=true
+    AzureWebJobsStorage
 Optional:
     ONEKEY_CODBASE   comma-separated territories (default WUK); the
                      sample uses the first
@@ -23,6 +25,7 @@ Optional:
 
 import logging
 import os
+from datetime import datetime, timezone
 
 import azure.functions as func
 
@@ -121,9 +124,16 @@ def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None
 # and the delta on the 2nd starts from the full sync's ts_startedon.
 
 
+@app.queue_output(
+    arg_name="work",
+    queue_name="onekey-queue",
+    connection="AzureWebJobsStorage",
+)
 @app.timer_trigger(schedule="0 0 0 2-31 * *", arg_name="timer", run_on_startup=False)
-def scheduled_onekey_delta(timer: func.TimerRequest) -> None:
-    """Daily at midnight, except the 1st: retry pending failures, then delta.
+def scheduled_onekey_delta(
+    timer: func.TimerRequest, work: func.Out[list[str]]
+) -> None:
+    """Daily at midnight, except the 1st: enqueue retry-and-delta work.
 
     The delta window runs from ts_startedon of the last Full or Delta
     ts_integrationjob that covered its window, up to now. Stays idle unless
@@ -133,44 +143,71 @@ def scheduled_onekey_delta(timer: func.TimerRequest) -> None:
     if codebases is None:
         return
 
-    from integration.scheduled_sync import run_from_env
+    from integration.queue_sync import scheduled_messages
 
-    logging.info("scheduled_delta_start codebases=%s", ",".join(codebases))
-    result = run_from_env(codebases=codebases)
-    delta = result.get("delta") or {}
+    date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    messages = scheduled_messages("delta", codebases, date_to=date_to)
+    work.set(messages)
     logging.info(
-        "scheduled_delta_complete success=%s window=%s..%s job=%s status=%s "
-        "retry_selected=%s resolved_by_delta=%s",
-        result.get("success"),
-        delta.get("date_from"),
-        delta.get("date_to"),
-        delta.get("job_id"),
-        delta.get("trace_status"),
-        (result.get("retry") or {}).get("selected"),
-        result.get("resolved_by_delta"),
+        "scheduled_delta_enqueued codebases=%s messages=%d date_to=%s",
+        ",".join(codebases),
+        len(messages),
+        date_to,
     )
 
 
+@app.queue_output(
+    arg_name="work",
+    queue_name="onekey-queue",
+    connection="AzureWebJobsStorage",
+)
 @app.timer_trigger(schedule="0 0 0 1 * *", arg_name="timer", run_on_startup=False)
-def scheduled_onekey_full(timer: func.TimerRequest) -> None:
-    """Midnight on the 1st of each month: full sync of the whole population.
+def scheduled_onekey_full(
+    timer: func.TimerRequest, work: func.Out[list[str]]
+) -> None:
+    """Midnight on the 1st: enqueue one full-sync item per codebase.
 
-    Stays idle unless App Setting SYNC_SCHEDULE is true. A country full sync
-    takes longer than the delta, so host.json functionTimeout must allow it.
+    Stays idle unless App Setting SYNC_SCHEDULE is true.
     """
     codebases = _scheduled_codebases("full", timer)
     if codebases is None:
         return
 
-    from integration.scheduled_sync import run_from_env
+    from integration.queue_sync import scheduled_messages
 
-    logging.info("scheduled_full_start codebases=%s", ",".join(codebases))
-    result = run_from_env(codebases=codebases, full=True)
-    full = result.get("full") or {}
+    messages = scheduled_messages("full", codebases)
+    work.set(messages)
     logging.info(
-        "scheduled_full_complete success=%s job=%s status=%s resolved_by_full=%s",
-        result.get("success"),
-        full.get("job_id"),
-        full.get("trace_status"),
-        result.get("resolved_by_full"),
+        "scheduled_full_enqueued codebases=%s messages=%d",
+        ",".join(codebases),
+        len(messages),
+    )
+
+
+@app.queue_trigger(
+    arg_name="message",
+    queue_name="onekey-queue",
+    connection="AzureWebJobsStorage",
+)
+def scheduled_onekey_worker(message: func.QueueMessage) -> None:
+    """Process one codebase; an exception lets Azure retry then poison it."""
+    from integration.queue_sync import SyncQueueMessage, dispatch
+
+    item = SyncQueueMessage.decode(message.get_body())
+    logging.info(
+        "scheduled_queue_start id=%s dequeue_count=%s mode=%s codebase=%s",
+        message.id,
+        message.dequeue_count,
+        item.mode,
+        item.codebase,
+    )
+    result = dispatch(item)
+    detail = result.get(item.mode) or {}
+    logging.info(
+        "scheduled_queue_complete id=%s mode=%s codebase=%s job=%s status=%s",
+        message.id,
+        item.mode,
+        item.codebase,
+        detail.get("job_id"),
+        detail.get("trace_status"),
     )

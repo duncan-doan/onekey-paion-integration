@@ -372,9 +372,11 @@ This file defines **how entities relate to each other** and the order they must 
 
 ## 6. Value Transformations
 
+Country-specific OneKey lists (specialty, HCO type, title, role, and the other large lists) are stored in the code catalog, not in `value_mapping.csv`. Build steps, languages, and the three tables are in [PICKLIST_GUIDE.md](PICKLIST_GUIDE.md). This section remains the reference for short choices such as gender and status.
+
 ### 6.1 Understanding `value_mapping.csv`
 
-This file defines **how to translate codes** from OneKey to Dataverse picklist values.
+This file defines **how to translate codes** from OneKey to Dataverse picklist values for those short choices.
 
 #### Column Reference
 

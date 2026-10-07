@@ -303,7 +303,7 @@ class ValidationResult:
 ### Full Sync Order
 
 ```
-0. Upsert picklists from value_mapping.csv (load_picklist_values / Phase 0)
+0. Load the OneKey code catalog, then upsert short choices from value_mapping.csv
 1. Extract HCOs (Workplaces) → upsert Accounts (no parent bind yet)
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
 3. Link parentaccountid from managerWorkplaceEid
@@ -311,6 +311,7 @@ class ValidationResult:
 ```
 
 Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.
+Specialty, HCO type, and the other large OneKey lists are loaded into the code catalog before this step. See [PICKLIST_GUIDE.md](PICKLIST_GUIDE.md).
 
 ### Delta Sync Order
 
