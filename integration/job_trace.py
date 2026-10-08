@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -331,6 +332,12 @@ def classify_failure(exc: BaseException | None, category: str | None, retryable:
     return cat, bool(retryable), status, code
 
 
+# A running job refreshes ts_lastheartbeat at most this often, after any
+# OneKey or Dataverse request (see JobTracer.beat). A Running job whose
+# heartbeat is several intervals old has stopped.
+HEARTBEAT_EVERY_SECONDS = 300
+
+
 class JobTracer:
     """Writes ``ts_integrationjob`` and ``ts_integrationfailure`` rows."""
 
@@ -357,6 +364,8 @@ class JobTracer:
         self._finished = False
         self.persist_failures = True
         self.recent_failures: list[dict] = []
+        self._last_beat: float | None = None
+        self._beating = False
 
     def begin(
         self,
@@ -377,6 +386,7 @@ class JobTracer:
         self.enabled = self._can_trace and not dry_run
         self.job_id = str(uuid.uuid4())
         self._started_at = datetime.now(timezone.utc)
+        self._last_beat = None
         if not self.enabled:
             logger.info("Integration job trace skipped (dry-run or no Dataverse writes)")
             return
@@ -390,6 +400,7 @@ class JobTracer:
                 status=STATUS_RUNNING,
             )
             self.job_guid = self.dataverse.create(JOBS, payload)
+            self._last_beat = time.monotonic()
             logger.info(
                 "Integration job %s started (%s)",
                 self.job_id,
@@ -491,6 +502,7 @@ class JobTracer:
         try:
             self._flush()
             if heartbeat:
+                self._last_beat = time.monotonic()
                 self.dataverse.update(
                     JOBS,
                     self.job_guid,
@@ -503,12 +515,36 @@ class JobTracer:
                 exc_info=True,
             )
 
+    def beat(self) -> None:
+        """Refresh ts_lastheartbeat if HEARTBEAT_EVERY_SECONDS have passed.
+
+        Called after every OneKey and Dataverse request while a job runs, so a
+        live job's heartbeat stays fresh inside long phases. The update is a
+        Dataverse request itself; ``_beating`` stops it from beating again.
+        """
+        if self._beating or not self.enabled or not self.job_guid or self._finished:
+            return
+        now = time.monotonic()
+        if self._last_beat is not None and now - self._last_beat < HEARTBEAT_EVERY_SECONDS:
+            return
+        self._last_beat = now
+        self._beating = True
+        try:
+            self.dataverse.update(JOBS, self.job_guid, {"ts_lastheartbeat": utc_now()})
+        except Exception:
+            logger.warning(
+                "Could not refresh the heartbeat of job %s", self.job_id, exc_info=True
+            )
+        finally:
+            self._beating = False
+
     def checkpoint(self, results: dict | None) -> None:
         """Flush buffered failures and refresh counts while the job is running."""
         if not self.enabled or not self.job_guid or self._finished:
             return
         try:
             self._flush()
+            self._last_beat = time.monotonic()
             self.dataverse.update(JOBS, self.job_guid, self._progress_payload(results))
         except Exception:
             logger.warning(

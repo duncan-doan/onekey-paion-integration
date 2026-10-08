@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Scheduled OneKey job: retry pending failures, then pull the delta.
 
-The delta starts from ts_startedon of the last Full or Delta integration job
-that covered its window. Failed IDs stay in ts_integrationfailure so the next
-run retries them even if OneKey does not change those records again.
+The delta starts where the last Full or Delta integration job of the codebase
+that covered its window stopped reading (the earlier of its ts_watermarkto and
+ts_startedon). Each codebase retries only its own failed IDs, which stay in
+ts_integrationfailure so the next run retries them even if OneKey does not
+change those records again. Unlike the queue worker, the CLI does not check
+whether the codebase is already syncing.
 
 Usage:
     python scripts/run_scheduled_sync.py --dry-run --codbase WUK

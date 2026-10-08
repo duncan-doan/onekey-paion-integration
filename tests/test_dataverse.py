@@ -345,56 +345,143 @@ def test_bulk_upsert_falls_back_to_single_on_create_failure():
     assert results == [("W1", guid, True)]
 
 
-def test_bulk_upsert_customeraddress_updates_one_by_one():
-    """customeraddress does not support UpdateMultiple — skip it entirely."""
+def batch_response(*parts):
+    """A $batch response; each part is (status, entity_id or None, error or None)."""
+    boundary = "batchresponse_test"
+    chunks = []
+    for status, entity_id, error in parts:
+        lines = [
+            f"--{boundary}",
+            "Content-Type: application/http",
+            "Content-Transfer-Encoding: binary",
+            "",
+            f"HTTP/1.1 {status} {'No Content' if status < 400 else 'Bad Request'}",
+            "OData-Version: 4.0",
+        ]
+        if entity_id:
+            lines.append(f"OData-EntityId: https://x/api/data/v9.2/ts_affiliations({entity_id})")
+        lines.append("")
+        lines.append(json.dumps({"error": {"code": "0x1", "message": error}}) if error else "")
+        chunks.append("\r\n".join(lines))
+    text = "\r\n".join(chunks) + f"\r\n--{boundary}--\r\n"
+    return FakeResponse(
+        200,
+        headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
+        text=text,
+    )
+
+
+ADDRESSES = [
+    {"ts_externalid": "W1 - A1", "line1": "1 Main"},
+    {"ts_externalid": "W2 - A2", "line1": "2 High"},
+]
+EXISTING_ADDRESSES = FakeResponse(200, {
+    "value": [
+        {"customeraddressid": "addr-1", "ts_externalid": "W1 - A1"},
+        {"customeraddressid": "addr-2", "ts_externalid": "W2 - A2"},
+    ]
+})
+
+
+def test_bulk_upsert_customeraddress_updates_in_one_batch():
+    """customeraddress rejects UpdateMultiple, so its updates share one $batch."""
     client = make_client([
-        FakeResponse(200, {
-            "value": [
-                {"customeraddressid": "addr-1", "ts_externalid": "W1 - A1"},
-                {"customeraddressid": "addr-2", "ts_externalid": "W2 - A2"},
-            ]
-        }),
-        FakeResponse(204),  # PATCH addr-1
-        FakeResponse(204),  # PATCH addr-2
+        EXISTING_ADDRESSES,
+        batch_response((204, None, None), (204, None, None)),
     ])
     results = client.bulk_upsert_by_field(
-        "customeraddresses",
-        "ts_externalid",
-        [
-            {"ts_externalid": "W1 - A1", "line1": "1 Main"},
-            {"ts_externalid": "W2 - A2", "line1": "2 High"},
-        ],
-        batch_size=100,
-        fallback_on_error=False,
+        "customeraddresses", "ts_externalid", ADDRESSES,
+        batch_size=100, fallback_on_error=False,
     )
     assert results == [
         ("W1 - A1", "addr-1", False),
         ("W2 - A2", "addr-2", False),
     ]
-    urls = [c["url"] for c in client._session.calls]
-    assert not any("UpdateMultiple" in u for u in urls)
-    assert client._session.calls[1]["method"] == "PATCH"
-    assert client._session.calls[2]["method"] == "PATCH"
+    calls = client._session.calls
+    assert len(calls) == 2
+    assert calls[1]["url"].endswith("/$batch")
+    assert calls[1]["headers"]["Prefer"] == "odata.continue-on-error"
+    body = calls[1]["data"].decode()
+    assert "PATCH https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/customeraddresses(addr-1) HTTP/1.1" in body
+    assert "customeraddresses(addr-2)" in body
+    assert "customeraddressid" not in body  # the id is in the URL, not the body
+    assert not any("UpdateMultiple" in c["url"] for c in calls)
 
 
-def test_bulk_upsert_ts_affiliation_creates_one_by_one():
-    """ts_affiliation rejects CreateMultiple — create via upsert_by_field."""
-    guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+def test_batch_update_rejected_row_is_retried_alone():
+    client = make_client([
+        EXISTING_ADDRESSES,
+        batch_response((204, None, None), (412, None, "Record is locked")),
+        FakeResponse(204),  # PATCH addr-2 on its own
+    ])
+    results = client.bulk_upsert_by_field(
+        "customeraddresses", "ts_externalid", ADDRESSES,
+        batch_size=100, fallback_on_error=False,
+    )
+    assert [r[1] for r in results] == ["addr-1", "addr-2"]
+    last = client._session.calls[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("customeraddresses(addr-2)")
+
+
+def test_batch_update_row_that_fails_alone_raises():
+    client = make_client([
+        EXISTING_ADDRESSES,
+        batch_response((204, None, None), (400, None, "bad value")),
+        FakeResponse(400, {"error": {"message": "bad value"}}),
+    ])
+    with pytest.raises(DataverseHTTPError, match="bad value"):
+        client.bulk_upsert_by_field(
+            "customeraddresses", "ts_externalid", ADDRESSES,
+            batch_size=100, fallback_on_error=False,
+        )
+
+
+def test_bulk_upsert_ts_affiliation_creates_in_one_batch():
+    """ts_affiliation rejects CreateMultiple, so its creates share one $batch."""
+    g1 = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+    g2 = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
     client = make_client([
         FakeResponse(200, {"value": []}),  # lookup existing
-        FakeResponse(200, {"value": []}),  # upsert find
-        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({guid})"}),
+        batch_response((204, g1, None), (204, g2, None)),
     ])
     results = client.bulk_upsert_by_field(
         "ts_affiliations",
         "ts_externalid",
-        [{"ts_externalid": "W1 - W2 - AUT", "ts_name": "link"}],
+        [
+            {"ts_externalid": "W1 - W2 - AUT", "ts_name": "a"},
+            {"ts_externalid": "W1 - W3 - AUT", "ts_name": "b"},
+        ],
         batch_size=100,
         fallback_on_error=False,
     )
-    assert results == [("W1 - W2 - AUT", guid, True)]
-    urls = [c["url"] for c in client._session.calls]
-    assert not any("CreateMultiple" in u for u in urls)
+    assert results == [("W1 - W2 - AUT", g1, True), ("W1 - W3 - AUT", g2, True)]
+    calls = client._session.calls
+    assert len(calls) == 2
+    body = calls[1]["data"].decode()
+    assert body.count("POST https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/ts_affiliations HTTP/1.1") == 2
+    assert not any("CreateMultiple" in c["url"] for c in calls)
+
+
+def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
+    """A $batch of creates is not resent: keep the rows that landed, create the rest."""
+    landed = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+    created = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # lookup existing
+        requests.exceptions.ReadTimeout("read timed out"),  # the $batch
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": landed}]}),
+        FakeResponse(200, {"value": []}),  # upsert_by_field find for B
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({created})"}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [{"ts_externalid": "A"}, {"ts_externalid": "B"}],
+        batch_size=100,
+    )
+    assert results == [("A", landed, True), ("B", created, True)]
+    assert sum(c["url"].endswith("/$batch") for c in client._session.calls) == 1
 
 
 def test_odata_quotes_are_escaped():

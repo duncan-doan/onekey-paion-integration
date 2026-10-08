@@ -53,6 +53,7 @@ class Engine:
     _finish_job = DynamicSyncEngine._finish_job
     _http_snapshot = DynamicSyncEngine._http_snapshot
     _log_http_summary = DynamicSyncEngine._log_http_summary
+    _set_request_hook = DynamicSyncEngine._set_request_hook
 
     def __init__(self, onekey, in_dataverse=()):
         self.onekey = onekey

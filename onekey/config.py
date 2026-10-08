@@ -38,6 +38,9 @@ class OneKeyConfig:
     verify_ssl: bool = True
     # Seconds to wait between successful population packets (rate-limit hygiene).
     packet_delay: float = 1.0
+    # Records per /pop/refreshMyOnekey packet (OneKey accepts 100-2000). Larger
+    # packets mean fewer round trips and fewer packet_delay waits.
+    page_size: int = 1000
 
     def __post_init__(self):
         for field in ("base_url", "username", "password", "connector_id"):
@@ -45,6 +48,8 @@ class OneKeyConfig:
                 raise OneKeyConfigError(f"{field} is required")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
         object.__setattr__(self, "connector_id", str(self.connector_id).strip())
+        if not 100 <= int(self.page_size) <= 2000:
+            raise OneKeyConfigError("page_size must be between 100 and 2000")
 
     def url(self, path, with_connector=True):
         """Build an absolute endpoint URL.
@@ -85,6 +90,7 @@ class OneKeyConfig:
             verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower()
             not in ("0", "false", "no"),
             packet_delay=float(os.environ.get(f"{prefix}PACKET_DELAY", "1.0")),
+            page_size=int(os.environ.get(f"{prefix}PAGE_SIZE", "1000")),
         )
 
     def __repr__(self):

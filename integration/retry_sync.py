@@ -53,8 +53,9 @@ logger = logging.getLogger(__name__)
 _RESOLVE_SCAN_AT = 1000
 
 # A parent job still Running with no heartbeat for this long was killed (timeout,
-# crash) and will never finish. The tracer writes a heartbeat after every phase.
-STALE_JOB_AFTER = timedelta(hours=12)
+# crash) and will never finish. A live job refreshes its heartbeat at least every
+# HEARTBEAT_EVERY_SECONDS (5 min) while it sends requests, so an hour is ample.
+STALE_JOB_AFTER = timedelta(hours=1)
 
 # A row left Retried this long was claimed by a run that stopped (killed,
 # timed out) before recording the outcome; the next run takes it back.
@@ -105,8 +106,16 @@ def pending_filter(
         f" or ts_IntegrationJob/ts_lastheartbeat lt {stale.strftime('%Y-%m-%dT%H:%M:%SZ')})",
     ]
     if codebase:
+        # The OneKey ID carries the country (WDEH…); the job's ts_codebase only
+        # decides for an ID without one, since an older multi-country job
+        # stored "WUK,WDE" or just the first code. Matching a job's codebase
+        # alone would hand WUK the WDE rows of such a job, and those oldest
+        # rows could fill the whole $top page every night.
+        code = escape_odata(codebase.strip().upper())
         parts.append(
-            f"ts_IntegrationJob/ts_codebase eq '{escape_odata(codebase.upper())}'"
+            f"(startswith(ts_sourceid,'{code}')"
+            f" or (ts_IntegrationJob/ts_codebase eq '{code}'"
+            " and not startswith(ts_sourceid,'W')))"
         )
     if job_id:
         parts.append(f"ts_IntegrationJob/ts_jobid eq '{escape_odata(job_id)}'")
@@ -155,7 +164,12 @@ def fetch_pending_failures(
         top=limit,
         max_records=limit,
     )
-    return [_normalize_failure(row) for row in rows if row.get("ts_sourceid")]
+    normalized = [_normalize_failure(row) for row in rows if row.get("ts_sourceid")]
+    if codebase:
+        # A WDE ID under a "WUK" job matches the filter twice; it is WDE's.
+        wanted = codebase.strip().upper()
+        normalized = [row for row in normalized if row["codebase"] == wanted]
+    return normalized
 
 
 def retry_pending_failures(

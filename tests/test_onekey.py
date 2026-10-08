@@ -498,3 +498,33 @@ def test_primary_address_uses_short_label_when_long_missing():
     assert row["county"] == "Gwent"
     assert row["district"] == "CAERLEON"
     assert row["postalCode"] == "NP18 3XQ"
+
+
+def test_iter_population_uses_the_configured_page_size():
+    session = make_session(
+        [FakeResponse(200, search_payload([], isTransactionComplete=True))]
+    )
+    list(OneKeyClient(session).iter_population(cod_base="WDE"))
+    assert session._session.calls[0]["json"]["resultSize"] == 1000
+
+
+def test_page_size_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("ONEKEY_BASE_URL", "https://x")
+    monkeypatch.setenv("ONEKEY_USERNAME", "u")
+    monkeypatch.setenv("ONEKEY_PASSWORD", "p")
+    monkeypatch.setenv("ONEKEY_CONNECTOR_ID", "494")
+    monkeypatch.setenv("ONEKEY_PAGE_SIZE", "2000")
+    assert OneKeyConfig.from_env().page_size == 2000
+    monkeypatch.setenv("ONEKEY_PAGE_SIZE", "5000")
+    with pytest.raises(OneKeyConfigError, match="page_size"):
+        OneKeyConfig.from_env()
+
+
+def test_after_request_hook_runs_after_each_call():
+    session = make_session(
+        [FakeResponse(200, search_payload([], isTransactionComplete=True))]
+    )
+    calls = []
+    session.after_request = lambda: calls.append(1)
+    list(OneKeyClient(session).iter_population(cod_base="WDE"))
+    assert calls == [1]

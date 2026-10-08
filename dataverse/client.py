@@ -1,9 +1,11 @@
 """Dataverse Web API client: create, retrieve, update and upsert records."""
 
+import json
 import logging
 import random
 import re
 import time
+import uuid
 from dataclasses import asdict, dataclass
 
 import requests
@@ -43,6 +45,52 @@ def _log_path(path: str) -> str:
     return _API_BASE.sub("", path.split("?", 1)[0])
 
 
+_BATCH_BOUNDARY = re.compile(r'boundary="?([^";\s]+)"?', re.IGNORECASE)
+_BATCH_STATUS = re.compile(r"^HTTP/1\.1 (\d{3})", re.MULTILINE)
+_ENTITY_ID = re.compile(r"^OData-EntityId:\s*\S*\(([0-9a-fA-F-]{36})\)", re.MULTILINE | re.IGNORECASE)
+
+
+def _parse_batch_response(response) -> list[tuple]:
+    """Split a ``$batch`` response into ``(status, entity_id, error)`` per request."""
+    match = _BATCH_BOUNDARY.search(response.headers.get("Content-Type", ""))
+    if not match:
+        raise DataverseHTTPError(
+            "$batch response has no multipart boundary",
+            status_code=response.status_code,
+            body=response.text[:1000],
+        )
+    delimiter = f"--{match.group(1)}"
+    results = []
+    for part in response.text.split(delimiter)[1:]:
+        if part.startswith("--"):
+            break  # closing delimiter
+        status_match = _BATCH_STATUS.search(part)
+        if not status_match:
+            continue
+        status = int(status_match.group(1))
+        id_match = _ENTITY_ID.search(part)
+        error = None
+        if status >= 400:
+            body = re.split(r"\r?\n\r?\n", part[status_match.end():], maxsplit=1)
+            text = body[1].strip() if len(body) > 1 else ""
+            try:
+                error = json.loads(text).get("error", {}).get("message") or text[:500]
+            except ValueError:
+                error = text[:500] or f"HTTP {status}"
+        results.append((status, id_match.group(1) if id_match else None, error))
+    return results
+
+
+def _call_hook(hook) -> None:
+    """Run an after_request hook; a failing hook never fails the request."""
+    if hook is None:
+        return
+    try:
+        hook()
+    except Exception:  # noqa: BLE001
+        logger.debug("after_request hook failed", exc_info=True)
+
+
 @dataclass
 class RequestStats:
     """Running totals of the requests a client has sent.
@@ -73,7 +121,8 @@ _ENTITY_META = {
     "customeraddresses": ("customeraddress", "customeraddressid"),
 }
 
-# Tables that reject bulk multi-ops in this org — write row-by-row instead.
+# Tables that reject bulk multi-ops in this org. bulk_upsert_by_field sends
+# each batch of their writes as one $batch of single requests instead.
 _NO_UPDATE_MULTIPLE = frozenset({"customeraddresses", "ts_affiliations"})
 _NO_CREATE_MULTIPLE = frozenset({"ts_affiliations"})
 
@@ -124,6 +173,9 @@ class DataverseClient:
         )
         self._session = session or requests.Session()
         self.stats = RequestStats()
+        # Called with no arguments after every request, success or not. The
+        # sync engine uses it to refresh a running job's heartbeat.
+        self.after_request = None
 
     @classmethod
     def connect(cls, environment_url, tenant_id, client_id, client_secret, **kwargs):
@@ -213,6 +265,7 @@ class DataverseClient:
                 self.stats.attempts - attempts_before,
                 elapsed * 1000,
             )
+            _call_hook(self.after_request)
 
     def _send(self, method, path, idempotent, **kwargs):
         """The retry loop behind :meth:`request`."""
@@ -549,6 +602,66 @@ class DataverseClient:
         )
         return None
 
+    def batch_write(self, operations, idempotent):
+        """Send single writes in one ``$batch`` request, outside any change set.
+
+        For tables that reject CreateMultiple/UpdateMultiple: Dataverse still
+        runs the writes one by one, but over one HTTP round trip instead of
+        one each. ``odata.continue-on-error`` keeps a failed write from
+        stopping the rest. Each write still counts toward service protection.
+
+        Args:
+            operations: ``(method, path, body)`` tuples, at most 1,000.
+            idempotent: True when every write may safely run twice (PATCH by
+                id). A batch with creates must pass False, so an unknown
+                outcome raises :class:`DataverseAmbiguousWriteError`.
+
+        Returns:
+            One ``(status, entity_id, error)`` per operation, in order.
+            ``status`` is None when Dataverse returned no response for it.
+        """
+        if not operations:
+            return []
+        boundary = f"batch_{uuid.uuid4().hex}"
+        lines = []
+        for method, path, body in operations:
+            lines.extend(
+                [
+                    f"--{boundary}",
+                    "Content-Type: application/http",
+                    "Content-Transfer-Encoding: binary",
+                    "",
+                    f"{method} {self.config.api_url}/{path.lstrip('/')} HTTP/1.1",
+                    "Content-Type: application/json;type=entry",
+                    "",
+                    json.dumps(body, ensure_ascii=False, default=str),
+                ]
+            )
+        lines.extend([f"--{boundary}--", ""])
+        response = self.request(
+            "POST",
+            "$batch",
+            data="\r\n".join(lines).encode("utf-8"),
+            headers={
+                "Content-Type": f"multipart/mixed;boundary={boundary}",
+                "Prefer": "odata.continue-on-error",
+            },
+            idempotent=idempotent,
+        )
+        results = _parse_batch_response(response)
+        if len(results) != len(operations):
+            logger.warning(
+                "$batch returned %d responses for %d requests; the rest count as failed",
+                len(results),
+                len(operations),
+            )
+        results = results[: len(operations)]
+        results.extend(
+            (None, None, "no response in $batch")
+            for _ in range(len(operations) - len(results))
+        )
+        return results
+
     def bulk_upsert_by_field(
         self,
         entity_set,
@@ -643,20 +756,19 @@ class DataverseClient:
             results[index] = (match_value, record_id, created)
 
         def _create_batch(batch):
-            if entity_set in _NO_CREATE_MULTIPLE:
-                logger.info(
-                    "CreateMultiple not supported for %s, creating one by one: records=%d",
-                    entity_set, len(batch),
-                )
-                for index, match_value, payload in batch:
-                    _create_one(index, match_value, payload)
-                return
-
             payloads = [payload for _, _, payload in batch]
             try:
-                ids = self.create_multiple(entity_set, payloads)
-                for (index, match_value, _), record_id in zip(batch, ids):
-                    results[index] = (match_value, record_id, True)
+                if entity_set in _NO_CREATE_MULTIPLE:
+                    outcomes = self.batch_write(
+                        [("POST", entity_set, payload) for payload in payloads],
+                        idempotent=False,
+                    )
+                    ids = [
+                        record_id if status and status < 400 and record_id else None
+                        for status, record_id, _ in outcomes
+                    ]
+                else:
+                    ids = self.create_multiple(entity_set, payloads)
             except DataverseAmbiguousWriteError as exc:
                 # The batch may have been created: keep what landed and create
                 # only the rest.
@@ -684,6 +796,7 @@ class DataverseClient:
                     raise
                 for index, match_value, payload in missing:
                     _create_one(index, match_value, payload)
+                return
             except DataverseHTTPError as exc:
                 if not fallback_on_error:
                     raise
@@ -694,6 +807,23 @@ class DataverseClient:
                 )
                 for index, match_value, payload in batch:
                     _create_one(index, match_value, payload)
+                return
+
+            # A create rejected inside a $batch is retried alone, which either
+            # succeeds or raises the real error for the caller.
+            rejected = []
+            for (index, match_value, payload), record_id in zip(batch, ids):
+                if record_id:
+                    results[index] = (match_value, record_id, True)
+                else:
+                    rejected.append((index, match_value, payload))
+            if rejected:
+                logger.warning(
+                    "$batch rejected %d of %d creates for %s, retrying them one by one",
+                    len(rejected), len(batch), entity_set,
+                )
+            for index, match_value, payload in rejected:
+                _create_one(index, match_value, payload)
 
         def _update_one(index, match_value, payload):
             record_id = payload[primary_id]
@@ -704,20 +834,30 @@ class DataverseClient:
             results[index] = (match_value, record_id, False)
 
         def _update_batch(batch):
-            if entity_set in _NO_UPDATE_MULTIPLE:
-                logger.info(
-                    "UpdateMultiple not supported for %s, updating one by one: records=%d",
-                    entity_set, len(batch),
-                )
-                for index, match_value, payload in batch:
-                    _update_one(index, match_value, payload)
-                return
-
             payloads = [payload for _, _, payload in batch]
+            rejected_at: set[int] = set()
             try:
-                self.update_multiple(entity_set, payloads)
-                for index, match_value, payload in batch:
-                    results[index] = (match_value, payload[primary_id], False)
+                if entity_set in _NO_UPDATE_MULTIPLE:
+                    # PATCH by id sets the same values again, so the $batch
+                    # is safe to resend after an unknown outcome.
+                    outcomes = self.batch_write(
+                        [
+                            (
+                                "PATCH",
+                                f"{entity_set}({payload[primary_id]})",
+                                {k: v for k, v in payload.items() if k != primary_id},
+                            )
+                            for payload in payloads
+                        ],
+                        idempotent=True,
+                    )
+                    rejected_at = {
+                        position
+                        for position, (status, _, _) in enumerate(outcomes)
+                        if not status or status >= 400
+                    }
+                else:
+                    self.update_multiple(entity_set, payloads)
             except DataverseHTTPError as exc:
                 if not fallback_on_error:
                     raise
@@ -728,6 +868,20 @@ class DataverseClient:
                 )
                 for index, match_value, payload in batch:
                     _update_one(index, match_value, payload)
+                return
+
+            for position, (index, match_value, payload) in enumerate(batch):
+                if position not in rejected_at:
+                    results[index] = (match_value, payload[primary_id], False)
+            if rejected_at:
+                logger.warning(
+                    "$batch rejected %d of %d updates for %s, retrying them one by one",
+                    len(rejected_at), len(batch), entity_set,
+                )
+            # Retried alone, a rejected update either succeeds or raises the
+            # real error for the caller.
+            for position in sorted(rejected_at):
+                _update_one(*batch[position])
 
         for batch in chunked(creates, batch_size):
             _create_batch(batch)

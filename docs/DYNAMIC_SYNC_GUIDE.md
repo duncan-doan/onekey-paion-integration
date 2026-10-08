@@ -320,10 +320,12 @@ hierarchy for those HCOs, then activities → contacts. ``run_dynamic_sync.py``
 stores watermarks under ``logs/sync_watermark_{CODEBASE}.json``.
 
 The scheduled jobs (``function_app.py`` timers and ``scripts/run_scheduled_sync.py``)
-use ``ts_integrationjob`` instead: the daily delta runs from the ``ts_startedon``
-of the last Full or Delta job that covered its window (less 15 minutes of
-overlap) up to now. A full sync runs at 00:00 on the 1st of each month and the
-delta runs at 00:00 on every other day.
+use ``ts_integrationjob`` instead: the daily delta runs from where the last Full
+or Delta job of the codebase that covered its window stopped reading (the
+earlier of its ``ts_watermarkto`` and ``ts_startedon``, less 15 minutes of
+overlap) up to now. A full sync runs at 00:00 UTC on the 1st of each month and
+the delta runs at 00:00 UTC on every other day, one queue message per codebase
+(see ``docs/AZURE_FUNCTION_SETUP.md``).
 
 ### CLI
 

@@ -1,9 +1,13 @@
 """Offline tests for Dataverse integration-job tracing."""
 
+from types import SimpleNamespace
+
 from dataverse.exceptions import DataverseAmbiguousWriteError, DataverseHTTPError
+from integration import job_trace
 from integration.dynamic_sync import DynamicSyncEngine
 from integration.job_trace import (
     FAILURES,
+    HEARTBEAT_EVERY_SECONDS,
     JOB_AFFILIATIONS,
     JOB_DELTA,
     JOB_FULL,
@@ -303,3 +307,78 @@ def test_uncertain_failure_batch_writes_only_the_missing_rows():
     written_one_by_one = [data for entity_set, data in dataverse.created if entity_set == FAILURES]
     assert [row["ts_sourceid"] for row in written_one_by_one] == ["WUKE00000002"]
     assert tracer.written_failures == 2
+
+
+# -- heartbeat -------------------------------------------------------------------
+
+
+class HookedDataverse(FakeDataverse):
+    """Runs after_request after each write, as DataverseClient.request does."""
+
+    def __init__(self):
+        super().__init__()
+        self.after_request = None
+
+    def update(self, entity_set, record_id, data):
+        super().update(entity_set, record_id, data)
+        if self.after_request:
+            self.after_request()
+        return record_id
+
+
+def heartbeats(dataverse):
+    return [u for u in dataverse.updated if set(u[2]) == {"ts_lastheartbeat"}]
+
+
+def test_beat_refreshes_the_heartbeat_at_most_every_interval(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(job_trace.time, "monotonic", lambda: clock[0])
+    dataverse = HookedDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    clock[0] += HEARTBEAT_EVERY_SECONDS - 1
+    tracer.beat()
+    assert heartbeats(dataverse) == []
+    clock[0] += 1
+    # The heartbeat write runs after_request again; it must not recurse.
+    dataverse.after_request = tracer.beat
+    tracer.beat()
+    assert len(heartbeats(dataverse)) == 1
+    tracer.beat()
+    assert len(heartbeats(dataverse)) == 1
+
+
+def test_beat_does_nothing_once_the_job_finished(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(job_trace.time, "monotonic", lambda: clock[0])
+    dataverse = HookedDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    tracer.finish({"success": True})
+    clock[0] += HEARTBEAT_EVERY_SECONDS * 10
+    tracer.beat()
+    assert heartbeats(dataverse) == []
+
+
+class HookEngine:
+    _begin_job = DynamicSyncEngine._begin_job
+    _finish_job = DynamicSyncEngine._finish_job
+    _http_snapshot = DynamicSyncEngine._http_snapshot
+    _log_http_summary = DynamicSyncEngine._log_http_summary
+    _set_request_hook = DynamicSyncEngine._set_request_hook
+
+    def __init__(self):
+        self.dataverse = HookedDataverse()
+        self.onekey = SimpleNamespace(session=SimpleNamespace(after_request=None))
+        self.tracer = JobTracer(self.dataverse)
+        self.sync_logger = SyncLogger()
+
+
+def test_engine_hooks_both_clients_to_the_tracer_while_a_job_runs():
+    engine = HookEngine()
+    engine._begin_job(JOB_FULL, ["WUK"], dry_run=False)
+    assert engine.dataverse.after_request == engine.tracer.beat
+    assert engine.onekey.session.after_request == engine.tracer.beat
+    engine._finish_job({"success": True})
+    assert engine.dataverse.after_request is None
+    assert engine.onekey.session.after_request is None

@@ -213,6 +213,7 @@ class Engine:
     _finish_job = DynamicSyncEngine._finish_job
     _http_snapshot = DynamicSyncEngine._http_snapshot
     _log_http_summary = DynamicSyncEngine._log_http_summary
+    _set_request_hook = DynamicSyncEngine._set_request_hook
     _phase = DynamicSyncEngine._phase
 
     def __init__(self):
@@ -224,6 +225,7 @@ class Engine:
             begin=lambda **kwargs: setattr(self.tracer, "job_id", "job-7"),
             finish=lambda results, aborted=False: None,
             flush=lambda heartbeat=False: None,
+            beat=lambda: None,
         )
 
 

@@ -382,8 +382,9 @@ class DataverseValidator:
     def validate_entity_exists(self, entity_set: str) -> bool:
         """Check if an entity set exists in Dataverse."""
         try:
-            # Try to query with $top=0 - fails if entity doesn't exist
-            self.client.retrieve_multiple(entity_set, top=0)
+            # One row is enough to prove the set exists. top=0 is falsy, so
+            # retrieve_multiple sent no $top and paged through the whole table.
+            self.client.retrieve_multiple(entity_set, top=1, max_records=1)
             logger.debug("Entity %s exists in Dataverse", entity_set)
             return True
         except Exception as e:

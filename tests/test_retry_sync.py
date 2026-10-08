@@ -82,6 +82,7 @@ class Engine:
     _finish_job = DynamicSyncEngine._finish_job
     _http_snapshot = DynamicSyncEngine._http_snapshot
     _log_http_summary = DynamicSyncEngine._log_http_summary
+    _set_request_hook = DynamicSyncEngine._set_request_hook
 
     def _sync_hcos(self, codebase, flattened=None, **kwargs):
         self.calls.append(("accounts", codebase, [row.get("workplaceEid") for row in flattened]))
@@ -607,7 +608,7 @@ def test_pending_filter_retries_failures_of_a_stale_running_job():
     text = pending_filter(now=now)
     assert (
         f"(ts_IntegrationJob/ts_status ne {STATUS_RUNNING}"
-        " or ts_IntegrationJob/ts_lastheartbeat lt 2026-10-03T00:00:00Z)"
+        " or ts_IntegrationJob/ts_lastheartbeat lt 2026-10-03T11:00:00Z)"
     ) in text
 
 
@@ -744,3 +745,27 @@ def test_two_parent_jobs_open_two_retry_jobs():
     assert len(dataverse.created) == 2
     assert {payload["ts_codebase"] for _entity, payload in dataverse.created} == {"WUK", "WFR"}
     assert JOB_FULL not in {payload["ts_jobtype"] for _entity, payload in dataverse.created}
+
+
+def test_pending_filter_scopes_by_id_prefix_or_job_codebase():
+    text = pending_filter(codebase="wde")
+    assert (
+        "(startswith(ts_sourceid,'WDE') or (ts_IntegrationJob/ts_codebase eq 'WDE'"
+        " and not startswith(ts_sourceid,'W')))"
+    ) in text
+
+
+def test_fetch_keeps_only_rows_of_the_requested_codebase():
+    old_job = {"ts_jobid": "job-1", "ts_codebase": "WUK"}
+    dataverse = FakeDataverse(
+        rows=[
+            # A WDE ID under an older multi-country job stored as "WUK".
+            {"ts_integrationfailureid": "f1", "ts_sourceid": "WDEH00000001", "ts_IntegrationJob": old_job},
+            {"ts_integrationfailureid": "f2", "ts_sourceid": "WUKE00000002", "ts_IntegrationJob": old_job},
+            # No codebase in the ID: the job's codebase decides.
+            {"ts_integrationfailureid": "f3", "ts_sourceid": "addr-3", "ts_IntegrationJob": old_job},
+        ]
+    )
+    assert [row["id"] for row in fetch_pending_failures(dataverse, codebase="WUK")] == ["f2", "f3"]
+    assert [row["id"] for row in fetch_pending_failures(dataverse, codebase="wde")] == ["f1"]
+    assert len(fetch_pending_failures(dataverse)) == 3

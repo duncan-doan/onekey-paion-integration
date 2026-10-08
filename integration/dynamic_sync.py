@@ -162,13 +162,27 @@ class DynamicSyncEngine:
         )
         self.sync_logger.job_id = self.tracer.job_id
         self._http_baseline = self._http_snapshot()
+        self._set_request_hook(self.tracer.beat)
 
     def _checkpoint(self, results: dict | None) -> None:
         self.tracer.checkpoint(results)
 
     def _finish_job(self, results: dict | None, aborted: bool = False) -> None:
+        self._set_request_hook(None)
         self.tracer.finish(results, aborted=aborted)
         self._log_http_summary()
+
+    def _set_request_hook(self, hook) -> None:
+        """Point both clients' after_request at ``hook`` (None clears it).
+
+        While a job runs, each OneKey or Dataverse request gives the tracer a
+        chance to refresh the heartbeat, so long phases still look alive to
+        the queue worker's busy check.
+        """
+        clients = (getattr(self.onekey, "session", None), self.dataverse)
+        for client in clients:
+            if client is not None and hasattr(client, "after_request"):
+                client.after_request = hook
 
     def _http_snapshot(self) -> dict[str, dict]:
         """Request totals of the OneKey and Dataverse clients, by service."""
@@ -264,6 +278,7 @@ class DynamicSyncEngine:
         self,
         dry_run: bool = False,
         codebases: list[str] | None = None,
+        choices: bool = True,
     ) -> list[dict]:
         """Phase 0: choice options, then code-list lookup tables.
 
@@ -271,10 +286,15 @@ class DynamicSyncEngine:
         in lookup tables (specialty, HCO type, title, …) are loaded from
         OneKey ``/ok/code``. Their ``ts_externalid`` is the template in
         ``lookup_table_mapping.csv`` (``WUK.TET.HOS``).
+
+        ``choices=False`` skips the choice options: they do not depend on the
+        codebase, so the scheduled timer syncs them once for every country.
         """
         with self._phase(PHASE_PICKLISTS, "picklists") as phase:
             picklists: list[dict] = []
-            if hasattr(self.dataverse, "request"):
+            if not choices:
+                logger.info(msg("Choice picklists skipped, already synced for this run", _ctx(self)))
+            elif hasattr(self.dataverse, "request"):
                 picklists.extend(
                     sync_picklists_from_config(
                         self.dataverse, self.config, dry_run=dry_run
@@ -309,6 +329,7 @@ class DynamicSyncEngine:
         sync_hco_relations: bool = True,
         sync_activity_affiliations: bool = True,
         sync_picklists: bool = True,
+        sync_choices: bool = True,
     ) -> dict:
         """Run full migration in canonical phase order (see class docstring).
 
@@ -364,7 +385,7 @@ class DynamicSyncEngine:
                 self._trace_phase = PHASE_PICKLISTS
                 try:
                     results["picklists"] = self.sync_picklists(
-                        dry_run=dry_run, codebases=codebases
+                        dry_run=dry_run, codebases=codebases, choices=sync_choices
                     )
                 except Exception as e:
                     # Missing option sets on a fresh env must not block HCO/HCP load.
@@ -629,6 +650,7 @@ class DynamicSyncEngine:
         sync_hco_relations: bool = True,
         sync_activity_affiliations: bool = True,
         sync_picklists: bool = True,
+        sync_choices: bool = True,
     ) -> dict:
         """Run CDC delta with the same canonical phase order as full sync."""
         results = {
@@ -675,7 +697,7 @@ class DynamicSyncEngine:
                 self._trace_phase = PHASE_PICKLISTS
                 try:
                     results["picklists"] = self.sync_picklists(
-                        dry_run=dry_run, codebases=codebases
+                        dry_run=dry_run, codebases=codebases, choices=sync_choices
                     )
                 except Exception as e:
                     logger.exception(

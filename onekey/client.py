@@ -342,7 +342,7 @@ class OneKeyClient:
         iso_cod2=None,
         date_from=None,
         date_to=None,
-        page_size=200,
+        page_size=None,
         max_records=None,
     ):
         """Yield every entity in this connector's population, packet by packet.
@@ -362,7 +362,9 @@ class OneKeyClient:
             iso_cod2: ISO alpha-2 country, as an alternative to ``cod_base``.
             date_from: ISO-8601 start, e.g. ``2026-01-01T00:00:00Z``.
             date_to: ISO-8601 end.
-            page_size: Records per packet. OneKey accepts 100-2000.
+            page_size: Records per packet. OneKey accepts 100-2000. Defaults
+                to the session config's ``page_size`` (``ONEKEY_PAGE_SIZE``,
+                1000), or 200 without one.
             max_records: Stop after roughly this many records. Useful for
                 smoke tests; leave None to walk the whole population.
 
@@ -373,6 +375,8 @@ class OneKeyClient:
         """
         if not cod_base and not iso_cod2:
             raise ValueError("One of cod_base or iso_cod2 is required.")
+        if page_size is None:
+            page_size = getattr(getattr(self.session, "config", None), "page_size", None) or 200
         if not 100 <= page_size <= 2000:
             raise ValueError("page_size must be between 100 and 2000.")
 

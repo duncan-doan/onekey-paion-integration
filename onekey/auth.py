@@ -80,6 +80,9 @@ class OneKeySession:
         self.config = config
         self._session = session or requests.Session()
         self.stats = RequestStats()
+        # Called with no arguments after every request, success or not. The
+        # sync engine uses it to refresh a running job's heartbeat.
+        self.after_request = None
         self._apply_default_headers()
 
     def _apply_default_headers(self) -> None:
@@ -167,6 +170,12 @@ class OneKeySession:
                 self.stats.attempts - attempts_before,
                 elapsed * 1000,
             )
+            hook = self.after_request
+            if hook is not None:
+                try:
+                    hook()
+                except Exception:  # noqa: BLE001
+                    logger.debug("after_request hook failed", exc_info=True)
 
     def _send(self, method, url, path, **kwargs):
         """The retry loop behind :meth:`request`."""

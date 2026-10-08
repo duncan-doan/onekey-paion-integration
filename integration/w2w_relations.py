@@ -56,7 +56,12 @@ def normalize_hco_hco_edge(
     if workplace_eid == related:
         return None
 
-    if relation.get("isParent"):
+    is_parent = relation.get("isParent")
+    if not isinstance(is_parent, bool):
+        # Missing, or a string such as "false" that is truthy: the direction
+        # is unknown, and guessing it could invert the hierarchy.
+        return None
+    if is_parent:
         child, parent = workplace_eid, related
     else:
         child, parent = related, workplace_eid

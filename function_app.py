@@ -4,10 +4,12 @@ sample_ok_to_dv upserts a few OneKey HCOs and their related data to Dataverse,
 through the same engine phases as the full sync. It is a small end-to-end
 check: a failure there is a connectivity, configuration or mapping problem.
 
-scheduled_onekey_delta (daily) and scheduled_onekey_full (monthly) enqueue
-one work item per codebase. scheduled_onekey_worker runs the real sync and
-lets Azure retry failures before moving them to onekey-queue-poison. Sync
-runs are traced to ts_integrationjob / ts_integrationfailure.
+scheduled_onekey_delta (daily) and scheduled_onekey_full (monthly) sync the
+choice options once, then enqueue one work item per codebase.
+scheduled_onekey_worker runs the real sync for one codebase and lets Azure
+retry failures before moving them to onekey-queue-poison. Sync runs are
+traced to ts_integrationjob / ts_integrationfailure. See
+integration.queue_sync for what each delivery does.
 
 App Settings required (the same names the CLI scripts read from .env):
     ONEKEY_ENV or ONEKEY_BASE_URL, ONEKEY_USERNAME, ONEKEY_PASSWORD,
@@ -25,7 +27,6 @@ Optional:
 
 import logging
 import os
-from datetime import datetime, timezone
 
 import azure.functions as func
 
@@ -55,19 +56,22 @@ def _stats(result: dict, key: str) -> str:
     )
 
 
-@app.timer_trigger(schedule="0 0 0 1 * *", arg_name="timer", run_on_startup=False)
+# Noon on the 1st, not midnight: the monthly full syncs are enqueued at 00:00
+# and the sample would otherwise start in the same second, on the same records.
+@app.timer_trigger(schedule="0 0 12 1 * *", arg_name="timer", run_on_startup=False)
 def sample_ok_to_dv(timer: func.TimerRequest) -> None:
-    """Every six hours: upsert a few OneKey HCOs and their related data.
+    """Monthly (or on demand from Test/Run): upsert a few OneKey HCOs and their related data.
 
     Per HCO: account, addresses, parent link, HCO-HCO affiliations, and the
     HCPs whose main activity is there with their HCP-HCO affiliations. See
-    integration.sample_sync.sync_sample.
+    integration.sample_sync.sync_sample. Skipped while a sync of the same
+    codebase is running.
     """
     if timer.past_due:
         logging.warning("sample_ok_to_dv_timer_past_due")
 
     from integration.sample_sync import sync_sample
-    from integration.scheduled_sync import engine_from_env
+    from integration.scheduled_sync import active_job, engine_from_env
 
     cod_base = os.environ.get("ONEKEY_CODBASE", "WUK").split(",")[0].strip().upper()
     limit = int(os.environ.get("ONEKEY_SAMPLE", "5"))
@@ -75,6 +79,14 @@ def sample_ok_to_dv(timer: func.TimerRequest) -> None:
 
     try:
         with engine_from_env() as engine:
+            running = active_job(engine.dataverse, [cod_base])
+            if running:
+                logging.warning(
+                    "sample_ok_to_dv_skipped codbase=%s busy_job=%s",
+                    cod_base,
+                    running.get("ts_jobid"),
+                )
+                return
             # Verify the OneKey credentials up front so bad secrets surface as
             # an auth error rather than as an empty search.
             engine.onekey.session.test_connection()
@@ -112,16 +124,37 @@ def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None
         return None
     if timer.past_due:
         logging.warning("scheduled_%s_timer_past_due", job)
-    return [
-        part.strip().upper()
-        for part in os.environ.get("ONEKEY_CODBASE", "WUK").split(",")
-        if part.strip()
-    ]
+    # A codebase listed twice would run twice in parallel on the same records.
+    return list(
+        dict.fromkeys(
+            part.strip().upper()
+            for part in os.environ.get("ONEKEY_CODBASE", "WUK").split(",")
+            if part.strip()
+        )
+    )
 
 
-# Schedules are NCRONTAB in UTC unless the app sets WEBSITE_TIME_ZONE (Windows)
-# or TZ (Linux). The delta skips the 1st so it never overlaps the full sync,
-# and the delta on the 2nd starts from the full sync's ts_startedon.
+def _enqueue(job: str, codebases: list[str], work: func.Out[list[str]]) -> None:
+    """Sync the choice options once, then put one message per codebase on the queue."""
+    from integration.queue_sync import scheduled_messages
+    from integration.scheduled_sync import sync_choice_picklists
+
+    choices_synced = sync_choice_picklists()
+    messages = scheduled_messages(job, codebases, choices=not choices_synced)
+    work.set(messages)
+    logging.info(
+        "scheduled_%s_enqueued codebases=%s messages=%d choices_synced=%s",
+        job,
+        ",".join(codebases),
+        len(messages),
+        choices_synced,
+    )
+
+
+# Schedules are NCRONTAB in UTC. Flex Consumption does not support the
+# WEBSITE_TIME_ZONE or TZ settings, so 00:00 is always midnight UTC. The delta
+# skips the 1st so it never overlaps the full sync, and the delta on the 2nd
+# starts from the full sync's ts_startedon.
 
 
 @app.queue_output(
@@ -135,25 +168,14 @@ def scheduled_onekey_delta(
 ) -> None:
     """Daily at midnight, except the 1st: enqueue retry-and-delta work.
 
-    The delta window runs from ts_startedon of the last Full or Delta
-    ts_integrationjob that covered its window, up to now. Stays idle unless
-    App Setting SYNC_SCHEDULE is true.
+    Each worker's window runs from where the last covering Full or Delta
+    ts_integrationjob of its codebase stopped reading, up to the moment the
+    worker runs. Stays idle unless App Setting SYNC_SCHEDULE is true.
     """
     codebases = _scheduled_codebases("delta", timer)
     if codebases is None:
         return
-
-    from integration.queue_sync import scheduled_messages
-
-    date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    messages = scheduled_messages("delta", codebases, date_to=date_to)
-    work.set(messages)
-    logging.info(
-        "scheduled_delta_enqueued codebases=%s messages=%d date_to=%s",
-        ",".join(codebases),
-        len(messages),
-        date_to,
-    )
+    _enqueue("delta", codebases, work)
 
 
 @app.queue_output(
@@ -172,42 +194,54 @@ def scheduled_onekey_full(
     codebases = _scheduled_codebases("full", timer)
     if codebases is None:
         return
-
-    from integration.queue_sync import scheduled_messages
-
-    messages = scheduled_messages("full", codebases)
-    work.set(messages)
-    logging.info(
-        "scheduled_full_enqueued codebases=%s messages=%d",
-        ",".join(codebases),
-        len(messages),
-    )
+    _enqueue("full", codebases, work)
 
 
+@app.queue_output(
+    arg_name="poison",
+    queue_name="onekey-queue-poison",
+    connection="AzureWebJobsStorage",
+)
 @app.queue_trigger(
     arg_name="message",
     queue_name="onekey-queue",
     connection="AzureWebJobsStorage",
 )
-def scheduled_onekey_worker(message: func.QueueMessage) -> None:
-    """Process one codebase; an exception lets Azure retry then poison it."""
-    from integration.queue_sync import SyncQueueMessage, dispatch
+def scheduled_onekey_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
+    """Process one codebase; an exception lets Azure retry then poison it.
 
-    item = SyncQueueMessage.decode(message.get_body())
+    Work that retrying cannot fix (a malformed message, a full sync that
+    already failed FULL_MAX_DELIVERIES times) goes to onekey-queue-poison
+    straight away.
+    """
+    from integration.queue_sync import OUTCOME_POISON, OUTCOME_SKIPPED, handle_message
+
+    body = message.get_body()
     logging.info(
-        "scheduled_queue_start id=%s dequeue_count=%s mode=%s codebase=%s",
+        "scheduled_queue_start id=%s dequeue_count=%s",
         message.id,
         message.dequeue_count,
-        item.mode,
-        item.codebase,
     )
-    result = dispatch(item)
-    detail = result.get(item.mode) or {}
+    outcome = handle_message(body, int(message.dequeue_count or 1))
+    item = outcome.item
+    if outcome.status == OUTCOME_POISON:
+        poison.set(body.decode("utf-8", errors="replace"))
+        logging.error(
+            "scheduled_queue_poisoned id=%s mode=%s codebase=%s reason=%s",
+            message.id,
+            item.mode if item else None,
+            item.codebase if item else None,
+            outcome.reason,
+        )
+        return
+    detail = (outcome.result or {}).get(item.mode) or {}
     logging.info(
-        "scheduled_queue_complete id=%s mode=%s codebase=%s job=%s status=%s",
+        "scheduled_queue_%s id=%s mode=%s codebase=%s job=%s status=%s busy_job=%s",
+        "skipped" if outcome.status == OUTCOME_SKIPPED else "complete",
         message.id,
         item.mode,
         item.codebase,
         detail.get("job_id"),
         detail.get("trace_status"),
+        (outcome.result or {}).get("busy_job"),
     )
