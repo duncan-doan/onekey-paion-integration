@@ -27,6 +27,7 @@ Optional:
 
 import logging
 import os
+import typing
 
 import azure.functions as func
 
@@ -34,6 +35,10 @@ from integration import load_env
 from onekey import OneKeyError
 
 app = func.FunctionApp()
+
+# Binding annotations must use typing generics: the Python worker rejects a
+# built-in generic such as func.Out[list[str]] ("invalid non-type annotation"),
+# and one function it cannot load stops every function from loading.
 
 # In Azure the credentials arrive as App Settings, already in os.environ.
 # load_env() returns {} when there is no .env file, and never overwrites a
@@ -134,7 +139,7 @@ def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None
     )
 
 
-def _enqueue(job: str, codebases: list[str], work: func.Out[list[str]]) -> None:
+def _enqueue(job: str, codebases: list[str], work: func.Out[typing.List[str]]) -> None:
     """Sync the choice options once, then put one message per codebase on the queue."""
     from integration.queue_sync import scheduled_messages
     from integration.scheduled_sync import sync_choice_picklists
@@ -164,7 +169,7 @@ def _enqueue(job: str, codebases: list[str], work: func.Out[list[str]]) -> None:
 )
 @app.timer_trigger(schedule="0 0 0 2-31 * *", arg_name="timer", run_on_startup=False)
 def scheduled_onekey_delta(
-    timer: func.TimerRequest, work: func.Out[list[str]]
+    timer: func.TimerRequest, work: func.Out[typing.List[str]]
 ) -> None:
     """Daily at midnight, except the 1st: enqueue retry-and-delta work.
 
@@ -185,7 +190,7 @@ def scheduled_onekey_delta(
 )
 @app.timer_trigger(schedule="0 0 0 1 * *", arg_name="timer", run_on_startup=False)
 def scheduled_onekey_full(
-    timer: func.TimerRequest, work: func.Out[list[str]]
+    timer: func.TimerRequest, work: func.Out[typing.List[str]]
 ) -> None:
     """Midnight on the 1st: enqueue one full-sync item per codebase.
 
