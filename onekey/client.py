@@ -287,19 +287,42 @@ class OneKeyClient:
         )
 
     def get_code_list(self, cod_base, list_external_id, iso_language="en"):
-        """Return one OneKey code list (``/ok/code``).
+        """Return the codes of one OneKey code list (``/ok/searchCodeList``).
 
-        ``list_external_id`` is the list code (``TET``, ``SP``, ``TIT``, …).
-        Each code's ``uid`` is ``{codBase}.{list}.{externalId}`` (for example
-        ``WUK.TET.HOS``). The integration writes that value from
-        ``lookup_table_mapping.csv``, not from ``uid`` itself.
+        ``list_external_id`` is the list code (``TET``, ``SP``, ``TIT``, …),
+        matched exactly on ``list.externalId``. OneKey returns every code
+        without a ``resultSize`` (456 for ``WUK.TIH``).
+
+        The response keys lists by uid (``WUK.TIT``) and, inside each, codes
+        by uid (``WUK.TIT.02``). Each code dict carries ``externalId``,
+        ``longLabel``, ``shortLabel``, ``isValid`` and ``uid``; the
+        integration builds its own external id from ``lookup_table_mapping.csv``
+        rather than using ``uid``.
+
+        Returns:
+            list[dict]: the codes, invalid ones included, so records that
+            still reference an old code keep resolving their lookup.
         """
         payload = {
             "codBase": cod_base,
-            "listExternalId": list_external_id,
             "isoLanguage": iso_language or "en",
+            "fields": [search_field("list.externalId", [list_external_id], EXACT)],
         }
-        return self.session.post_json("/ok/code", payload)
+        envelope = self.session.post_json("/ok/searchCodeList", payload)
+        lists = envelope.get("results") or {}
+        if isinstance(lists, dict):
+            lists = list(lists.values())
+        codes = []
+        for code_list in lists:
+            if not isinstance(code_list, dict):
+                continue
+            if code_list.get("externalId") not in (None, list_external_id):
+                continue
+            entries = code_list.get("codes") or {}
+            if isinstance(entries, dict):
+                entries = list(entries.values())
+            codes.extend(code for code in entries if isinstance(code, dict))
+        return codes
 
     # -- retrieval by OneKey id -------------------------------------------
 

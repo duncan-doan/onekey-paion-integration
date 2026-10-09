@@ -284,7 +284,7 @@ class DynamicSyncEngine:
 
         Choice options still come from ``value_mapping.csv``. Lists that live
         in lookup tables (specialty, HCO type, title, …) are loaded from
-        OneKey ``/ok/code``. Their ``ts_externalid`` is the template in
+        OneKey ``/ok/searchCodeList``. Their ``ts_externalid`` is the template in
         ``lookup_table_mapping.csv`` (``WUK.TET.HOS``).
 
         ``choices=False`` skips the choice options: they do not depend on the

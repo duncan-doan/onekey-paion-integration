@@ -528,3 +528,38 @@ def test_after_request_hook_runs_after_each_call():
     session.after_request = lambda: calls.append(1)
     list(OneKeyClient(session).iter_population(cod_base="WDE"))
     assert calls == [1]
+
+
+def test_get_code_list_searches_the_list_and_flattens_its_codes():
+    body = {
+        "status": "SUCCESS",
+        "success": True,
+        "resultSize": 2,
+        "results": {
+            "WUK.TIT": {
+                "uid": "WUK.TIT",
+                "externalId": "TIT",
+                "codBase": "WUK",
+                "codes": {
+                    "WUK.TIT.02": {"uid": "WUK.TIT.02", "externalId": "02", "longLabel": "Mx", "isValid": True},
+                    "WUK.TIT.03": {"uid": "WUK.TIT.03", "externalId": "03", "longLabel": "Old", "isValid": False},
+                },
+            }
+        },
+    }
+    session = make_session([FakeResponse(200, {"response": body})])
+    codes = OneKeyClient(session).get_code_list("WUK", "TIT", iso_language="en")
+
+    assert [code["externalId"] for code in codes] == ["02", "03"]  # invalid codes kept
+    call = session._session.calls[0]
+    assert call["url"].endswith("/ok/searchCodeList/494")
+    assert call["json"] == {
+        "codBase": "WUK",
+        "isoLanguage": "en",
+        "fields": [{"name": "list.externalId", "method": "EXACT", "values": ["TIT"]}],
+    }
+
+
+def test_get_code_list_without_results_is_empty():
+    session = make_session([FakeResponse(200, {"response": {"status": "SUCCESS", "results": {}}})])
+    assert OneKeyClient(session).get_code_list("WUK", "XYZ") == []

@@ -3,7 +3,7 @@
 
 Choice options come from ``config/value_mapping.csv`` and
 ``config/picklist_targets.csv``. Lists stored as tables (specialty, HCO type,
-title, …) come from OneKey ``/ok/code``. Their ``ts_externalid`` is the
+title, …) come from OneKey ``/ok/searchCodeList``. Their ``ts_externalid`` is the
 template in ``config/lookup_table_mapping.csv`` (for example ``WUK.TET.HOS``).
 
 Usage:

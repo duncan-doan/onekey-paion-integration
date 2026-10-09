@@ -63,15 +63,13 @@ def test_sync_dry_run_uses_template_counts():
         def get_code_list(self, cod_base, list_external_id, iso_language="en"):
             assert list_external_id == "TIT"
             assert cod_base == "WUK"
-            return {
-                "codes": [
-                    {
-                        "uid": "NOT-USED",
-                        "externalId": "DR",
-                        "longLabel": "Doctor",
-                    }
-                ]
-            }
+            return [
+                {
+                    "uid": "NOT-USED",
+                    "externalId": "DR",
+                    "longLabel": "Doctor",
+                }
+            ]
 
     summaries = sync_lookup_tables(
         None,

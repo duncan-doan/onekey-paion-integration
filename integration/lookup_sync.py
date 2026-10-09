@@ -87,15 +87,12 @@ def _codes_for(
     cod_base: str,
     table: "LookupTableMapping",
 ) -> list[dict]:
-    envelope = onekey.get_code_list(
+    codes = onekey.get_code_list(
         cod_base,
         table.list_code,
         iso_language=table.iso_language,
     )
-    codes = envelope.get("codes") if isinstance(envelope, dict) else None
-    if not isinstance(codes, list):
-        return []
-    return [code for code in codes if isinstance(code, dict)]
+    return [code for code in codes or [] if isinstance(code, dict)]
 
 
 def sync_lookup_tables(
@@ -110,7 +107,7 @@ def sync_lookup_tables(
     """Upsert code-list rows for each configured lookup table.
 
     ``codebases`` supplies ``{codBase}`` (for example ``WUK``). One OneKey
-    code call is made per codebase and list.
+    ``/ok/searchCodeList`` call is made per codebase and list.
     """
     selected = {
         item.strip().lower()
