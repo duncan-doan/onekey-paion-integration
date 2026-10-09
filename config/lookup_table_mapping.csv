@@ -3,13 +3,18 @@ lookup_id,list_code,lookup_entity,entity_set,key_field,name_field,name_max_lengt
 # Lookup tables that replace large OneKey choice lists.,,,,,,,,,,
 # external_id_template placeholders: {codBase} {list} {code},,,,,,,,,,
 # {list} is list_code on this row. {code} is the OneKey code externalId. {codBase} is the country being loaded.,,,,,,,,,,
-# Example: WUK + TET + HOS → WUK.TET.HOS written to key_field (ts_externalid).,,,,,,,,,
-# Change the template here; do not hardcode the pattern in Python.,,,,,,,,,,
-# entity_set / key_field / name_field must match the Dataverse table.,,,,,,,,,,
+# Example: WDE + SP + 01 → WDE.SP.01 written to key_field (ts_externalid).,,,,,,,,,
+# The loader requests the country language (WDE=de, WUK=en). iso_language is only the fallback.,,,,,,,,,,
+# Every OneKey code field is written: ts_longlabel, ts_longlocalizedlabel, short labels,,
+# ts_codbase, ts_isolanguage, ts_localeeid, ts_micode, and the corporate parent fields.,,
+# ts_longlabel is the primary name (longLabel). ts_longlocalizedlabel is the country language.,,
+# name_field must be ts_longlabel. ts_name does not exist on these tables.,,
+# Change the template here; do not hardcode the pattern in Python.,,
+# entity_set / key_field / name_field must match the Dataverse table.,,
 # ============================================================================================================,,,,,,,,,,
-LK-TET,TET,ts_hcotype_ref,ts_hcotype_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,HCO type; workplace.typeCode
-LK-SP,SP,ts_specialty_ref,ts_specialty_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Specialty; workplace/individual ada SP_1..SP_5
-LK-LEX,LEX,ts_hcocategory_ref,ts_hcocategory_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Category; workplace.activityLocationCode
-LK-CAJ,CAJ,ts_hcolegalcategory_ref,ts_hcolegalcategory_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Legal category; workplace ada CAJ_1
-LK-TIT,TIT,ts_title_ref,ts_title_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Title; individual.titleCode
-LK-TIH,TIH,ts_role_ref,ts_role_refs,ts_externalid,ts_name,100,{codBase}.{list}.{code},longLabel,en,Activity role; activity ada TIH_1..TIH_10
+LK-TET,TET,ts_hcotype_ref,ts_hcotype_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,HCO type; workplace.typeCode; German text in ts_longlocalizedlabel
+LK-SP,SP,ts_specialty_ref,ts_specialty_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,Specialty; German text in ts_longlocalizedlabel
+LK-LEX,LEX,ts_hcocategory_ref,ts_hcocategory_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,Category; German text in ts_longlocalizedlabel
+LK-CAJ,CAJ,ts_hcolegalcategory_ref,ts_hcolegalcategory_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,Legal category; German text in ts_longlocalizedlabel
+LK-TIT,TIT,ts_title_ref,ts_title_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,Title; German text in ts_longlocalizedlabel
+LK-TIH,TIH,ts_role_ref,ts_role_refs,ts_externalid,ts_longlabel,200,{codBase}.{list}.{code},longLabel,en,Activity role; German text in ts_longlocalizedlabel

@@ -21,7 +21,7 @@ from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
-from .lookup_sync import sync_lookup_tables
+from .lookup_sync import CatalogResolver, sync_lookup_tables
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
@@ -103,6 +103,8 @@ class DynamicSyncEngine:
         self.dataverse = dataverse_client
         self.config = config or load_mapping_config()
         self.transformer = TransformEngine(self.config)
+        self.catalogs = CatalogResolver(dataverse_client)
+        self.transformer.catalog_resolver = self.catalogs.ensure
         self.mapping_validator = MappingValidator(self.config)
         self.dataverse_validator = DataverseValidator(dataverse_client)
         self.sync_logger = sync_logger or SyncLogger()
@@ -314,6 +316,9 @@ class DynamicSyncEngine:
                         dry_run=dry_run,
                     )
                 )
+            self.catalogs.dry_run = dry_run
+            if not dry_run:
+                self.catalogs.preload(self.config.lookup_tables)
             phase["stats"] = {"types": len(picklists)}
             return picklists
 
@@ -395,6 +400,10 @@ class DynamicSyncEngine:
                     results["errors"].append(f"picklists: {e}")
                     results["picklists"] = []
                 self._checkpoint(results)
+            else:
+                self.catalogs.dry_run = dry_run
+                if not dry_run:
+                    self.catalogs.preload(self.config.lookup_tables)
 
             for codebase in codebases:
                 codebase_started = self.sync_logger.phase_started("codebase", codbase=codebase)
@@ -706,6 +715,10 @@ class DynamicSyncEngine:
                     results["errors"].append(f"picklists: {e}")
                     results["picklists"] = []
                 self._checkpoint(results)
+            else:
+                self.catalogs.dry_run = dry_run
+                if not dry_run:
+                    self.catalogs.preload(self.config.lookup_tables)
 
             for codebase in codebases:
                 codebase_started = self.sync_logger.phase_started(

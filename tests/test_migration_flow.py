@@ -4,7 +4,7 @@ from pathlib import Path
 
 from integration.dynamic_mapping import load_mapping_config
 from integration.hierarchy import edges_from_hcos
-from integration.transform import create_transform_engine
+from integration.transform import CATALOG_NAVIGATION, create_transform_engine
 
 
 def test_lookup_without_codbase_records_gap(tmp_path: Path):
@@ -47,23 +47,33 @@ def test_lookup_hcotype_binds_full_external_id():
         }
     )
     assert (
-        payload["ts_type_ref@odata.bind"]
+        payload["ts_Type_ref@odata.bind"]
         == "/ts_hcotype_refs(ts_externalid='WUK.TET.HOS')"
     )
     assert (
-        payload["ts_specialty1_ref@odata.bind"]
+        payload["ts_Specialty1_ref@odata.bind"]
         == "/ts_specialty_refs(ts_externalid='WUK.SP.01')"
     )
     assert (
-        payload["ts_category_ref@odata.bind"]
+        payload["ts_Category_ref@odata.bind"]
         == "/ts_hcocategory_refs(ts_externalid='WUK.LEX.H')"
     )
     assert (
-        payload["ts_legalcategory_ref@odata.bind"]
+        payload["ts_LegalCategory_ref@odata.bind"]
         == "/ts_hcolegalcategory_refs(ts_externalid='WUK.CAJ.PRV')"
     )
     assert "ts_type" not in payload
     assert not engine.picklist_gaps.gaps
+
+
+def test_every_catalog_lookup_has_a_navigation_name():
+    config = load_mapping_config()
+    fields = {
+        fm.target_field
+        for fm in config.field_mappings
+        if fm.is_lookup and config.get_lookup_table(fm.lookup_entity)
+    }
+    assert fields == set(CATALOG_NAVIGATION)
 
 
 def test_map_unmapped_gender_omits_and_gaps():

@@ -17,6 +17,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Logical column → Web API navigation property. Mapping keeps the logical
+# name. Dataverse rejects ``{logical}@odata.bind`` when the navigation name
+# differs, which it does for every custom catalog lookup. These names are
+# ReferencingEntityNavigationPropertyName on account, contact, and
+# ts_affiliationrole. Polymorphic lookups already bind the navigation name
+# directly (parentcustomerid_account, parentid_account, ts_FromID_*, ts_ToID).
+CATALOG_NAVIGATION = {
+    "ts_type_ref": "ts_Type_ref",
+    "ts_specialty1_ref": "ts_Specialty1_ref",
+    "ts_specialty2_ref": "ts_Specialty2_ref",
+    "ts_specialty3_ref": "ts_Specialty3_ref",
+    "ts_specialty4_ref": "ts_Specialty4_ref",
+    "ts_specialty5_ref": "ts_Specialty5_ref",
+    "ts_category_ref": "ts_Category_ref",
+    "ts_legalcategory_ref": "ts_LegalCategory_ref",
+    "ts_title_ref": "ts_Title_ref",
+    "ts_role": "ts_Role",
+}
+
+
+def catalog_bind_name(logical_name: str) -> str:
+    """Return the ``@odata.bind`` property for a catalog lookup column."""
+    return CATALOG_NAVIGATION.get(logical_name, logical_name)
+
 
 class TransformEngine:
     """Transforms OneKey records to Dataverse payloads using mapping config."""
@@ -24,6 +48,7 @@ class TransformEngine:
     def __init__(self, config: "MappingConfig"):
         self.config = config
         self.picklist_gaps = PicklistGapCollector()
+        self.catalog_resolver = None
         self._current_entity: str = ""
         self._current_eid: str = ""
     
@@ -574,8 +599,17 @@ class TransformEngine:
             )
             return {}
 
-        bind = odata_lookup_bind(table.entity_set, table.key_field, external)
-        return {f"{mapping.target_field}@odata.bind": bind}
+        if self.catalog_resolver is not None:
+            bind = self.catalog_resolver(
+                table,
+                external,
+                code,
+                str(cod_base).strip(),
+                source,
+            )
+        else:
+            bind = odata_lookup_bind(table.entity_set, table.key_field, external)
+        return {f"{catalog_bind_name(mapping.target_field)}@odata.bind": bind}
 
     def _extract_value(self, source: dict, field_name: str) -> Any:
         """Extract value from source record.

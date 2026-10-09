@@ -1,7 +1,14 @@
 """Lookup-table external ids come from lookup_table_mapping.csv."""
 
+import json
+
 from integration.dynamic_mapping import LookupTableMapping, load_mapping_config
-from integration.lookup_sync import lookup_row, render_external_id, sync_lookup_tables
+from integration.lookup_sync import (
+    CatalogResolver,
+    lookup_row,
+    render_external_id,
+    sync_lookup_tables,
+)
 from integration.transform import create_transform_engine
 from onekey.parse import flatten_hco
 
@@ -38,7 +45,10 @@ def test_lookup_row_ignores_onekey_uid():
         },
         "WUK",
     )
-    assert row == {"ts_externalid": "HOS|TET|WUK", "ts_name": "Hospital"}
+    assert row["ts_externalid"] == "HOS|TET|WUK"
+    assert row["ts_longlabel"] == "Hospital"
+    assert row["ts_codbase"] == "WUK"
+    assert "ts_name" not in row
 
 
 def test_configured_template_is_codbase_list_code():
@@ -56,6 +66,139 @@ def test_configured_template_is_codbase_list_code():
         )
         == "WDE.SP.01"
     )
+
+
+def test_wde_row_stores_german_label_and_country_key():
+    config = load_mapping_config()
+    table = config.get_lookup_table("ts_specialty_ref")
+    row = lookup_row(
+        table,
+        {
+            "uid": "WDE.SP.01",
+            "externalId": "01",
+            "longLabel": "General Medicine",
+            "longLocalizedLabel": "Allgemeinmedizin",
+        },
+        "WDE",
+    )
+    assert row["ts_externalid"] == "WDE.SP.01"
+    assert row["ts_longlabel"] == "General Medicine"
+    assert row["ts_longlocalizedlabel"] == "Allgemeinmedizin"
+    assert row["ts_codbase"] == "WDE"
+
+
+def test_wde_sync_requests_german():
+    class FakeOneKey:
+        def get_code_list(self, cod_base, list_external_id, iso_language="en"):
+            assert cod_base == "WDE"
+            assert list_external_id == "TET"
+            assert iso_language == "de"
+            return [
+                {
+                    "externalId": "ABT",
+                    "longLabel": "Department",
+                    "longLocalizedLabel": "Abteilung",
+                }
+            ]
+
+    summaries = sync_lookup_tables(
+        None,
+        FakeOneKey(),
+        load_mapping_config(),
+        ["WDE"],
+        dry_run=True,
+        tables=["LK-TET"],
+    )
+    assert summaries[0]["errors"] == 0
+    assert summaries[0]["csv"] == 1
+    assert summaries[0]["insert"] == 1
+
+
+def test_requested_lists_bundle_supplies_german_codes(tmp_path, monkeypatch):
+    from onekey.exceptions import OneKeyNotFoundError
+
+    bundle = {
+        "codBase": "WDE",
+        "isoLanguage": "de",
+        "lists": {
+            "SP": {
+                "codes": [
+                    {
+                        "externalId": "01",
+                        "longLabel": "General Medicine",
+                        "longLocalizedLabel": "Allgemeinmedizin",
+                    }
+                ]
+            }
+        },
+    }
+    (tmp_path / "WDE_requested_lists.json").write_text(
+        json.dumps(bundle), encoding="utf-8"
+    )
+    monkeypatch.setenv("ONEKEY_CODE_DIR", str(tmp_path))
+
+    class MissingApi:
+        def get_code_list(self, cod_base, list_external_id, iso_language="en"):
+            raise OneKeyNotFoundError("missing", status_code=404)
+
+    from integration.lookup_sync import lookup_row as build_row
+    from integration.lookup_sync import sync_lookup_tables as sync_tables
+
+    summaries = sync_tables(
+        None,
+        MissingApi(),
+        load_mapping_config(),
+        ["WDE"],
+        dry_run=True,
+        tables=["LK-SP"],
+    )
+    assert summaries[0]["errors"] == 0
+    assert summaries[0]["csv"] == 1
+    table = load_mapping_config().get_lookup_table("ts_specialty_ref")
+    row = build_row(
+        table,
+        bundle["lists"]["SP"]["codes"][0],
+        "WDE",
+    )
+    assert row["ts_longlabel"] == "General Medicine"
+    assert row["ts_longlocalizedlabel"] == "Allgemeinmedizin"
+    assert row["ts_externalid"] == "WDE.SP.01"
+
+
+def test_missing_code_api_uses_export(tmp_path, monkeypatch):
+    from onekey.exceptions import OneKeyNotFoundError
+
+    export = tmp_path / "WDE_TIT.json"
+    export.write_text(
+        json.dumps(
+            {
+                "codes": [
+                    {
+                        "externalId": "03",
+                        "longLabel": "Dr. med.",
+                        "longLocalizedLabel": "Dr. med.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ONEKEY_CODE_DIR", str(tmp_path))
+
+    class MissingApi:
+        def get_code_list(self, cod_base, list_external_id, iso_language="en"):
+            raise OneKeyNotFoundError("missing", status_code=404)
+
+    summaries = sync_lookup_tables(
+        None,
+        MissingApi(),
+        load_mapping_config(),
+        ["WDE"],
+        dry_run=True,
+        tables=["LK-TIT"],
+    )
+    assert summaries[0]["errors"] == 0
+    assert summaries[0]["csv"] == 1
 
 
 def test_sync_dry_run_uses_template_counts():
@@ -97,7 +240,7 @@ def test_contact_title_bind():
         }
     )
     assert (
-        payload["ts_title_ref@odata.bind"]
+        payload["ts_Title_ref@odata.bind"]
         == "/ts_title_refs(ts_externalid='WUK.TIT.DR')"
     )
 
@@ -115,3 +258,52 @@ def test_flatten_hco_legal_category():
     )
     assert row["legalCategoryCode"] == "PRV"
     assert row["codBase"] == "WUK"
+
+
+def test_missing_code_is_inserted_then_bound():
+    class FakeDataverse:
+        def __init__(self):
+            self.written = []
+
+        def retrieve_multiple(self, entity_set, select=None, **kwargs):
+            return [
+                {
+                    "ts_externalid": "WDE.TET.ABT",
+                    "ts_hcotype_refid": "existing-guid",
+                }
+            ]
+
+        def upsert_by_field(self, entity_set, match_field, match_value, data):
+            self.written.append(data)
+            return "new-guid", True
+
+    dv = FakeDataverse()
+    resolver = CatalogResolver(dv)
+    resolver.preload(load_mapping_config().lookup_tables)
+    engine = create_transform_engine(load_mapping_config())
+    engine.catalog_resolver = resolver.ensure
+
+    known = engine.transform_hco(
+        {
+            "workplaceEid": "WDEH1",
+            "officialName": "Klinik",
+            "codBase": "WDE",
+            "typeCode": "ABT",
+        }
+    )
+    assert known["ts_Type_ref@odata.bind"] == "/ts_hcotype_refs(existing-guid)"
+    assert dv.written == []
+
+    created = engine.transform_hco(
+        {
+            "workplaceEid": "WDEH2",
+            "officialName": "Praxis",
+            "codBase": "WDE",
+            "typeCode": "ZZZ",
+        }
+    )
+    assert created["ts_Type_ref@odata.bind"] == "/ts_hcotype_refs(new-guid)"
+    assert dv.written[0]["ts_externalid"] == "WDE.TET.ZZZ"
+    assert dv.written[0]["ts_longlabel"] == "ZZZ"
+    assert dv.written[0]["ts_codbase"] == "WDE"
+    assert "ts_name" not in dv.written[0]

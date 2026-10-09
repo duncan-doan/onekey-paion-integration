@@ -10,14 +10,20 @@ before expiry, so a long-running sync does not fail halfway through.
 """
 
 import logging
+import socket
 import threading
 import time
 
 import requests
+import urllib3.util.connection as urllib3_connection
 
 from .exceptions import DataverseAuthError, DataverseConfigError
 
 logger = logging.getLogger(__name__)
+
+# Entra and Dataverse often resolve to IPv6 on this network, and those
+# handshakes never finish, so the request timeout never fires. IPv4 does.
+urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
 
 AUTHORITY = "https://login.microsoftonline.com"
 

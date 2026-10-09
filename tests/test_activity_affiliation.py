@@ -90,5 +90,5 @@ def test_role_lookup_uses_full_external_id():
     engine.begin_record("ts_affiliation_role", "WUKM0000000101")
     payload = engine._catalog_payload(role, {"role": "28", "codBase": "WUK"})
     assert payload == {
-        "ts_role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')"
+        "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')"
     }
