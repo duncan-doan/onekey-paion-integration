@@ -178,3 +178,35 @@ def test_skipped_and_done_outcomes(monkeypatch):
     outcome = handle_message('{"mode":"delta","codebase":"WUK"}', 1)
     assert outcome.status == OUTCOME_DONE
     assert outcome.result == {"success": True, "delta": {}}
+
+
+# -- delta messages that ran as a full sync --------------------------------------
+
+
+def test_a_promoted_full_sync_that_fails_is_reported_as_full(monkeypatch):
+    fake_runner(
+        monkeypatch,
+        {"success": False, "promoted_to_full": True,
+         "full": {"job_id": "job-9", "errors": ["WNL: HTTP 400"]}},
+    )
+    with pytest.raises(QueueWorkFailed, match="full sync failed for codebase WNL: job=job-9") as caught:
+        dispatch(SyncQueueMessage(mode="delta", codebase="WNL"))
+    assert caught.value.full_sync is True
+
+
+def test_a_promoted_full_sync_gets_the_full_sync_delivery_limit(monkeypatch):
+    def promoted_failure(item):
+        raise QueueWorkFailed("full sync failed for codebase WNL", full_sync=True)
+
+    monkeypatch.setattr(queue_sync, "dispatch", promoted_failure)
+    body = '{"mode":"delta","codebase":"WNL"}'
+    with pytest.raises(QueueWorkFailed):
+        handle_message(body, 1)
+    assert handle_message(body, FULL_MAX_DELIVERIES).status == OUTCOME_POISON
+
+
+def test_ran_mode():
+    delta = SyncQueueMessage(mode="delta", codebase="WNL")
+    assert queue_sync.ran_mode(delta, {"promoted_to_full": True}) == "full"
+    assert queue_sync.ran_mode(delta, {"success": True}) == "delta"
+    assert queue_sync.ran_mode(delta, None) == "delta"

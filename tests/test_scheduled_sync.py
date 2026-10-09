@@ -231,3 +231,115 @@ def test_choice_picklist_errors_leave_it_to_the_workers(monkeypatch):
     assert sync_choice_picklists() is False
     choice_engine(monkeypatch, error=RuntimeError("metadata denied"))
     assert sync_choice_picklists() is False
+
+
+# -- SYNC_DELTA_FROM -------------------------------------------------------------
+
+
+@pytest.fixture
+def no_delta_setting(monkeypatch):
+    monkeypatch.delenv(scheduled_sync.DELTA_FROM_SETTING, raising=False)
+    return monkeypatch
+
+
+def delta_start(fake_engine):
+    kind, kwargs = fake_engine.ran[-1]
+    assert kind == "delta"
+    return kwargs["date_from"]
+
+
+def test_delta_start_comes_from_the_setting(fake_engine, no_delta_setting):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", "2026-08-01T06:30:00Z")
+    run_from_env(codebases=["WUK"])
+    assert delta_start(fake_engine) == "2026-08-01T06:30:00Z"
+
+
+def test_a_bare_date_starts_at_midnight_utc(fake_engine, no_delta_setting):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", "2026-08-01")
+    run_from_env(codebases=["WUK"])
+    assert delta_start(fake_engine) == "2026-08-01T00:00:00Z"
+
+
+def test_without_the_setting_the_window_is_worked_out_as_before(fake_engine, no_delta_setting):
+    run_from_env(codebases=["WUK"])
+    assert delta_start(fake_engine) is None  # delta_window uses the last covering job
+
+
+def test_an_explicit_date_from_beats_the_setting(fake_engine, no_delta_setting):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", "2026-08-01")
+    run_from_env(codebases=["WUK"], date_from="2026-09-15")
+    assert delta_start(fake_engine) == "2026-09-15"
+
+
+@pytest.mark.parametrize("value", ["not a date", "2999-01-01"])
+def test_an_unusable_setting_is_ignored(fake_engine, no_delta_setting, value, caplog):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", value)
+    run_from_env(codebases=["WUK"])
+    assert delta_start(fake_engine) is None
+    assert "SYNC_DELTA_FROM" in caplog.text
+
+
+def test_a_setting_after_a_fixed_window_end_is_ignored(fake_engine, no_delta_setting):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", "2026-08-10")
+    run_from_env(codebases=["WUK"], date_to="2026-08-05")
+    assert delta_start(fake_engine) is None
+
+
+def test_the_full_sync_ignores_the_setting(fake_engine, no_delta_setting):
+    no_delta_setting.setenv("SYNC_DELTA_FROM", "2026-08-01")
+    run_from_env(codebases=["WUK"], full=True)
+    kind, kwargs = fake_engine.ran[-1]
+    assert kind == "full" and "date_from" not in kwargs
+
+
+# -- first run of a codebase -----------------------------------------------------
+
+
+def promotion_engine(monkeypatch, job_rows):
+    calls = []
+    monkeypatch.setattr(
+        scheduled_sync,
+        "retry_pending_failures",
+        lambda engine, **kwargs: calls.append(("retry", kwargs["codebase"]))
+        or {"success": True, "selected": 0, "jobs": [], "errors": []},
+    )
+    monkeypatch.setattr(scheduled_sync, "resolve_pending_for_ids", lambda *a, **k: 0)
+    engine = SimpleNamespace(
+        tracer=SimpleNamespace(trigger=None, retry_of_job_id=None, job_guid=None),
+        succeeded_ids=set(),
+        dataverse=Jobs(job_rows),
+        sync_full=lambda **kwargs: calls.append(("full", kwargs)) or {"success": True, "job_id": "full-1"},
+        sync_delta=lambda **kwargs: calls.append(("delta", kwargs)) or {"success": True, "job_id": "delta-1"},
+    )
+    return engine, calls
+
+
+def test_a_codebase_without_a_completed_job_gets_a_full_sync(monkeypatch):
+    engine, calls = promotion_engine(monkeypatch, [])
+    result = run_retry_then_delta(engine, codebases=["WNL"], sync_choices=False)
+    assert [name for name, _ in calls] == ["full"]  # no retry, no delta
+    assert calls[0][1] == {"codebases": ["WNL"], "dry_run": False, "sync_choices": False}
+    assert result["promoted_to_full"] is True
+    assert result["full"]["job_id"] == "full-1"
+
+
+def test_a_codebase_with_a_completed_job_gets_its_delta(monkeypatch):
+    engine, calls = promotion_engine(
+        monkeypatch,
+        [{"ts_jobid": "d-1", "ts_startedon": "2026-10-09T00:00:20Z",
+          "ts_watermarkto": "2026-10-09T00:00:10Z", "ts_errorsummary": None}],
+    )
+    result = run_retry_then_delta(engine, codebases=["WNL"])
+    assert [name for name, _ in calls] == ["retry", "delta"]
+    assert calls[1][1]["date_from"] == "2026-10-08T23:45:10Z"
+    assert "promoted_to_full" not in result
+    # One read of the job history, not one for the check and one for the window.
+    assert len(engine.dataverse.queries) == 1
+
+
+def test_an_explicit_start_keeps_the_delta_without_a_job(monkeypatch):
+    engine, calls = promotion_engine(monkeypatch, [])
+    run_retry_then_delta(engine, codebases=["WNL"], date_from="2026-08-08")
+    assert [name for name, _ in calls] == ["retry", "delta"]
+    assert calls[1][1]["date_from"] == "2026-08-08T00:00:00Z"
+    assert engine.dataverse.queries == []

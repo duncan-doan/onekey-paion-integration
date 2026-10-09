@@ -22,6 +22,8 @@ Optional:
     ONEKEY_CODBASE   comma-separated territories (default WUK); the
                      sample uses the first
     ONEKEY_SAMPLE    HCOs in the sample (default 5)
+    SYNC_DELTA_FROM  UTC start for every delta (2026-08-01), instead of where
+                     the last job stopped reading; remove once covered
     SYNC_LOG_DIR     directory for sync log files and reports (default off)
 """
 
@@ -219,7 +221,12 @@ def scheduled_onekey_worker(message: func.QueueMessage, poison: func.Out[str]) -
     already failed FULL_MAX_DELIVERIES times) goes to onekey-queue-poison
     straight away.
     """
-    from integration.queue_sync import OUTCOME_POISON, OUTCOME_SKIPPED, handle_message
+    from integration.queue_sync import (
+        OUTCOME_POISON,
+        OUTCOME_SKIPPED,
+        handle_message,
+        ran_mode,
+    )
 
     body = message.get_body()
     logging.info(
@@ -239,12 +246,14 @@ def scheduled_onekey_worker(message: func.QueueMessage, poison: func.Out[str]) -
             outcome.reason,
         )
         return
-    detail = (outcome.result or {}).get(item.mode) or {}
+    ran = ran_mode(item, outcome.result)
+    detail = (outcome.result or {}).get(ran) or {}
     logging.info(
-        "scheduled_queue_%s id=%s mode=%s codebase=%s job=%s status=%s busy_job=%s",
+        "scheduled_queue_%s id=%s mode=%s ran=%s codebase=%s job=%s status=%s busy_job=%s",
         "skipped" if outcome.status == OUTCOME_SKIPPED else "complete",
         message.id,
         item.mode,
+        ran,
         item.codebase,
         detail.get("job_id"),
         detail.get("trace_status"),

@@ -40,7 +40,8 @@ def parse_args():
     )
     parser.add_argument(
         "--date-from",
-        help="Delta start (YYYY-MM-DD). Defaults to the last integration job's start.",
+        help="Delta start (YYYY-MM-DD). Defaults to SYNC_DELTA_FROM when set, "
+        "else to where the last integration job stopped reading.",
     )
     parser.add_argument("--date-to", help="Delta end (YYYY-MM-DD). Defaults to today.")
     parser.add_argument("--retry-limit", type=int, default=100, help="Pending failures per run")

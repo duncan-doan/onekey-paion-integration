@@ -51,6 +51,22 @@ in the queue, or failed and came back, therefore leaves no gap: the next delta
 starts from the end it actually read, not from when it ran. A manual replay of
 an old window does not move the next window either.
 
+A country with no such job yet (newly added to `ONEKEY_CODBASE`, or whose
+earlier runs all failed) gets a **full sync instead of its delta**, so its
+first run loads the whole population rather than only recent changes. The log
+says `running a full sync instead of a delta`, the job row is typed Full, and
+the worker logs `mode=delta ran=full`. Like any full sync it gets two
+deliveries before the poison queue. Setting `SYNC_DELTA_FROM` (below) skips
+this and runs the delta from that date.
+
+To start from a fixed moment instead, set App Setting `SYNC_DELTA_FROM` (UTC,
+`2026-08-01` or `2026-08-01T00:00:00Z`). Every delta, for every country, then
+reads from that moment to now, and logs a warning that it did. Remove the
+setting once that window has been read, or each night re-reads everything since
+then. A value that is not a date, or that lies in the future, is logged as an
+error and ignored. Changing an App Setting restarts the app, which stops any
+sync that is running.
+
 ## What one job runs
 
 `scheduled_onekey_worker` calls the same engine as the CLI. One message is one
@@ -226,6 +242,7 @@ az functionapp config appsettings set \
 | `SYNC_SCHEDULE` | for scheduled sync | `true` enables the delta and full timers. |
 | `ONEKEY_CODBASE` | no | Comma-separated territories. Default `WUK`. The sample uses the first. |
 | `ONEKEY_SAMPLE` | no | HCOs in `sample_ok_to_dv`. Default `5`. |
+| `SYNC_DELTA_FROM` | no | UTC start for every delta, e.g. `2026-08-01`. Unset: start where the last job stopped reading. See [The delta window](#the-delta-window). |
 | `SYNC_LOG_DIR` | no | Leave unset. The app forces `off` because the package folder is read-only. |
 
 Optional OneKey and Dataverse tunables (`ONEKEY_TIMEOUT`, `ONEKEY_PACKET_DELAY`,

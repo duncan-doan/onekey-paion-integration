@@ -41,7 +41,15 @@ class QueueMessageError(ValueError):
 
 
 class QueueWorkFailed(RuntimeError):
-    """A sync returned an unsuccessful result and should be retried."""
+    """A sync returned an unsuccessful result and should be retried.
+
+    ``full_sync`` is True when a full sync ran, including a delta message
+    whose codebase had no completed job yet and was synced in full.
+    """
+
+    def __init__(self, message: str, *, full_sync: bool = False):
+        super().__init__(message)
+        self.full_sync = full_sync
 
 
 @dataclass(frozen=True)
@@ -135,7 +143,8 @@ def dispatch(message: SyncQueueMessage) -> dict:
 
     A delta whose codebase is busy is skipped: the next delta starts from the
     last window that was covered, so nothing is lost. A busy full sync raises
-    SyncBusy and is retried later.
+    SyncBusy and is retried later. A delta for a codebase with no completed
+    job runs as a full sync (``promoted_to_full`` in the result).
     """
     from integration.scheduled_sync import IF_BUSY_RAISE, IF_BUSY_SKIP, run_from_env
 
@@ -150,13 +159,20 @@ def dispatch(message: SyncQueueMessage) -> dict:
     if result.get("skipped"):
         return result
     if not result.get("success"):
-        detail = result.get(message.mode) or {}
+        ran = ran_mode(message, result)
+        detail = result.get(ran) or {}
         errors = "; ".join(str(error) for error in detail.get("errors") or [])
         raise QueueWorkFailed(
-            f"{message.mode} sync failed for codebase {message.codebase}: "
-            f"job={detail.get('job_id')} errors={errors[:500] or 'none recorded'}"
+            f"{ran} sync failed for codebase {message.codebase}: "
+            f"job={detail.get('job_id')} errors={errors[:500] or 'none recorded'}",
+            full_sync=ran == "full",
         )
     return result
+
+
+def ran_mode(message: SyncQueueMessage, result: dict | None) -> str:
+    """The sync that actually ran: the message mode, or full when promoted."""
+    return "full" if (result or {}).get("promoted_to_full") else message.mode
 
 
 def handle_message(body: str | bytes, dequeue_count: int) -> WorkOutcome:
@@ -184,7 +200,8 @@ def handle_message(body: str | bytes, dequeue_count: int) -> WorkOutcome:
         logger.warning("Queue work deferred: %s", exc)
         raise
     except Exception as exc:
-        if item.mode == "full" and dequeue_count >= FULL_MAX_DELIVERIES:
+        full_sync = item.mode == "full" or getattr(exc, "full_sync", False)
+        if full_sync and dequeue_count >= FULL_MAX_DELIVERIES:
             logger.exception(
                 "Full sync for %s failed on delivery %d; not retrying",
                 item.codebase,
