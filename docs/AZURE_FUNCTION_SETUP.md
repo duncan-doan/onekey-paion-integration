@@ -47,6 +47,9 @@ A scheduled retry message looks like:
 | `date_to` | Leave `null`. The delta reads changes up to the moment it runs. Set it only to replay an old window by hand (delta only). |
 | `retry_limit` | Pending failures one retry replays. |
 | `choices` | `false` when the timer already synced the choice options. Defaults to `true`. The retry passes it on to the delta it queues. |
+| `run_id`, `enqueued_at` | Set by the timer: the run the message belongs to (e.g. `delta-20261012T000001Z-7`, ending in the number of countries queued) and when it was queued (UTC). The retry passes them on to its delta. Leave them out of manual messages. `scripts/sync_run_report.py` uses them to report how long a run took (see [QUEUE_ARCHITECTURE.md](QUEUE_ARCHITECTURE.md#how-long-a-run-took)). |
+
+Any other field is logged as unknown and ignored.
 
 ### The delta window
 

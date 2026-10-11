@@ -198,6 +198,11 @@ def as_dataverse_datetime(value: str | None) -> str | None:
     return text + "Z"
 
 
+def run_marker(run_id: str) -> str:
+    """The text a job's ts_name carries for the scheduled run it belongs to."""
+    return f"run={run_id}"
+
+
 def job_codebase(codebases: list[str]) -> str:
     """Return the ts_codebase value stored for a job over these codebases."""
     codes = [c.strip().upper() for c in codebases if c and str(c).strip()]
@@ -383,6 +388,9 @@ class JobTracer:
         self.dataverse = dataverse
         self.trigger = trigger
         self.retry_of_job_id = retry_of_job_id
+        # Scheduled run the jobs belong to. ts_name carries it (run_marker), so
+        # all the countries' jobs of one timer run can be read back together.
+        self.run_id: str | None = None
         self.batch_size = max(1, int(batch_size or 100))
         self._can_trace = dataverse is not None and hasattr(dataverse, "create")
         self.enabled = self._can_trace
@@ -809,10 +817,11 @@ class JobTracer:
         codebase = job_codebase(codebases)
         label = JOB_LABELS.get(job_type, "Sync")
         started = self._started_at or datetime.now(timezone.utc)
+        name = f"{joined} {label} {started.strftime('%Y-%m-%d %H:%M')}"
+        if self.run_id:
+            name = f"{name} {run_marker(self.run_id)}"
         payload = {
-            "ts_name": clip(
-                f"{joined} {label} {started.strftime('%Y-%m-%d %H:%M')}", 200
-            ),
+            "ts_name": clip(name, 200),
             "ts_jobid": self.job_id,
             "ts_jobtype": int(job_type),
             "ts_codebase": codebase,

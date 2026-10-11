@@ -24,7 +24,12 @@ its window again. A failed ID that OneKey does not change again will not
 appear in a later delta, so step 1 is what retries it.
 
 Queue workers run one codebase at a time and check active_job first. This is
-a best-effort busy check; simultaneous starts still need an atomic lease.
+a best-effort busy check; simultaneous starts still need an atomic lease. A
+scheduled run does not wait for its own retry jobs: a codebase's retry ends
+before its delta is queued, so a retry job of the same run still Running was
+left by a killed delivery. A killed delta or full sync still blocks its own
+redelivery: one stopped by the 60-minute scale-in limit would only be stopped
+again.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from integration.job_trace import (
     STATUS_SUCCEEDED,
     TRIGGER_TIMER,
     job_codebase,
+    run_marker,
 )
 from integration.retry_sync import resolve_pending_for_ids, retry_pending_failures
 
@@ -206,14 +212,23 @@ def active_job(
     codebases: list[str],
     *,
     now: datetime | None = None,
+    own_run: str | None = None,
 ) -> dict | None:
     """Return a live Running job for any of these codebases, or None.
 
     Live means its heartbeat is newer than ACTIVE_JOB_HEARTBEAT. A job killed
     by a timeout or a platform restart stays Running, but its heartbeat
-    stops, so it no longer blocks the next run.
+    stops, so it no longer blocks the next run. Retry jobs of ``own_run`` are
+    ignored (see the module docstring), so a killed retry blocks neither its
+    redelivery nor the delta queued after it.
     """
     fresh = (now or datetime.now(timezone.utc)) - ACTIVE_JOB_HEARTBEAT
+    own_retries = (
+        f" and not (contains(ts_name, '{escape_odata(run_marker(own_run))}')"
+        " and _ts_retryofjob_value ne null)"
+        if own_run
+        else ""
+    )
     for codebase in codebases:
         rows = dataverse.retrieve_multiple(
             JOBS,
@@ -222,6 +237,7 @@ def active_job(
                 f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
                 f" and ts_status eq {STATUS_RUNNING}"
                 f" and ts_lastheartbeat ge {_iso(fresh)}"
+                f"{own_retries}"
             ),
             order_by="ts_lastheartbeat desc",
             top=1,
@@ -519,15 +535,22 @@ def delta_from_setting(date_to: str | None = None) -> str | None:
     return _iso(start)
 
 
-def _busy(engine, codebases: list[str], if_busy: str | None, job: str) -> dict | None:
+def _busy(
+    engine,
+    codebases: list[str],
+    if_busy: str | None,
+    job: str,
+    run_id: str | None = None,
+) -> dict | None:
     """Apply ``if_busy`` when a live job is syncing one of the codebases.
 
     Returns the skipped result for ``"skip"``, raises SyncBusy for ``"raise"``,
-    and returns None when nothing is running or ``if_busy`` is None.
+    and returns None when nothing is running or ``if_busy`` is None. Retry
+    jobs of the same scheduled run (``run_id``) do not count.
     """
     if not if_busy:
         return None
-    running = active_job(engine.dataverse, codebases)
+    running = active_job(engine.dataverse, codebases, own_run=run_id)
     if not running:
         return None
     if if_busy == IF_BUSY_SKIP:
@@ -556,6 +579,7 @@ def run_from_env(
     bulk_batch_size: int | None = None,
     if_busy: str | None = None,
     sync_choices: bool = True,
+    run_id: str | None = None,
 ) -> dict:
     """Build the OneKey and Dataverse clients from the environment and run the job.
 
@@ -571,11 +595,15 @@ def run_from_env(
     the codebases: ``"skip"`` returns ``{"success": True, "skipped": True}``
     without running, ``"raise"`` raises :class:`SyncBusy`, and None (the
     default, for the CLI) does not check.
+
+    ``run_id`` names the scheduled run in each job's ts_name (see run_report).
     """
     selected = codebases or ["WUK"]
     with engine_from_env(config_dir, bulk_batch_size) as engine:
+        if run_id:
+            engine.tracer.run_id = run_id
         if not dry_run:
-            skipped = _busy(engine, selected, if_busy, "full" if full else "delta")
+            skipped = _busy(engine, selected, if_busy, "full" if full else "delta", run_id)
             if skipped:
                 return skipped
         if full:
@@ -617,16 +645,19 @@ def retry_from_env(
     config_dir: str | None = None,
     bulk_batch_size: int | None = None,
     if_busy: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Build the clients from the environment and replay pending failures only.
 
-    ``if_busy`` works as in run_from_env. The retry queue skips a busy
-    codebase: its failure rows stay Pending for the next run.
+    ``if_busy`` and ``run_id`` work as in run_from_env. The retry queue skips a
+    busy codebase: its failure rows stay Pending for the next run.
     """
     selected = codebases or ["WUK"]
     with engine_from_env(config_dir, bulk_batch_size) as engine:
+        if run_id:
+            engine.tracer.run_id = run_id
         if not dry_run:
-            skipped = _busy(engine, selected, if_busy, "retry")
+            skipped = _busy(engine, selected, if_busy, "retry", run_id)
             if skipped:
                 return skipped
         return run_retry(

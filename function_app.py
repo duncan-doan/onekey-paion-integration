@@ -33,6 +33,7 @@ Optional:
 import logging
 import os
 import typing
+from datetime import datetime, timezone
 
 import azure.functions as func
 
@@ -147,16 +148,28 @@ def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None
 def _enqueue(
     job: str, mode: str, codebases: list[str], work: func.Out[typing.List[str]]
 ) -> None:
-    """Sync the choice options once, then put one message per codebase on the mode's queue."""
-    from integration.queue_sync import QUEUES, scheduled_messages
+    """Sync the choice options once, then put one message per codebase on the mode's queue.
+
+    The messages share a run_id and the moment they were queued, so each
+    worker can report how long the whole run has taken.
+    """
+    from integration.queue_sync import QUEUES, new_run, scheduled_messages
     from integration.scheduled_sync import sync_choice_picklists
 
     choices_synced = sync_choice_picklists()
-    messages = scheduled_messages(mode, codebases, choices=not choices_synced)
+    run_id, enqueued_at = new_run(job, len(codebases))
+    messages = scheduled_messages(
+        mode,
+        codebases,
+        choices=not choices_synced,
+        run_id=run_id,
+        enqueued_at=enqueued_at,
+    )
     work.set(messages)
     logging.info(
-        "scheduled_%s_enqueued queue=%s codebases=%s messages=%d choices_synced=%s",
+        "scheduled_%s_enqueued run=%s queue=%s codebases=%s messages=%d choices_synced=%s",
         job,
+        run_id,
         QUEUES[mode],
         ",".join(codebases),
         len(messages),
@@ -236,6 +249,7 @@ def _work(
         handle_message,
         job_ids,
         ran_mode,
+        run_progress,
     )
 
     queue = QUEUES[mode]
@@ -246,8 +260,23 @@ def _work(
         message.id,
         message.dequeue_count,
     )
+    started = datetime.now(timezone.utc)
     outcome = handle_message(body, int(message.dequeue_count or 1), mode=mode)
     item = outcome.item
+    progress = run_progress(item, started, datetime.now(timezone.utc)) if item else None
+    if progress:
+        # The largest elapsed_s of a run is its total time; see run_report.
+        logging.info(
+            "scheduled_run_progress run=%s queue=%s mode=%s codebase=%s outcome=%s "
+            "duration_s=%d elapsed_s=%s",
+            progress["run_id"],
+            queue,
+            item.mode,
+            item.codebase,
+            outcome.status,
+            progress["duration_s"],
+            progress["elapsed_s"],
+        )
     if outcome.next_delta:
         delta.set(outcome.next_delta)
         logging.info(

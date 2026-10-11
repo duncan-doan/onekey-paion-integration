@@ -227,7 +227,7 @@ so to each worker; the timers only ever need one instance.
 | Same message | Hidden while one instance runs it |
 | Different countries | Nothing shared: accounts and contacts are keyed by OneKey ID, which carries the country (`WUKE…`, `WDEH…`); lookup rows by `{codBase}.{list}.{code}`; each retry replays only its own country's failures; choice options are synced once by the timer before enqueueing |
 | Retry and delta of one country | Chained, never queued together: the retry worker queues the delta when the retry is over |
-| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred |
+| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred. Retry jobs of the message's own run do not count: a country's retry ends before its delta is queued, so such a job was left by a killed delivery. A killed delta or full sync still blocks its own redelivery, since one stopped by the 60-minute scale-in limit would only be stopped again |
 | Remaining gap | Two messages for one country starting within about a second can both pass the check. The timer removes duplicate codes, and upserts on `ts_externalid` keep records from duplicating. The CLI (`scripts/run_scheduled_sync.py`) does not run the busy check |
 
 ### Heartbeat
@@ -247,8 +247,8 @@ only the heartbeat age tells a live job from a dead one.
 | Busy check | Running and heartbeat under 20 min (4 missed beats): alive |
 | Retry step | Running and heartbeat over 1 hour: dead, its failures may be retried |
 
-A killed job therefore blocks its country for at most 20 minutes, and its row
-needs no clean-up.
+A killed job therefore blocks its country for at most 20 minutes; a killed
+retry does not block its own run at all. Its row needs no clean-up.
 
 ## What the workers run
 
@@ -332,6 +332,58 @@ traces
 | order by timestamp desc
 ```
 
+### How long a run took
+
+Each timer run gets a `run_id` such as `delta-20261012T000001Z-7`: the kind
+of run, when the timer queued it, and how many countries it queued. Its
+messages carry the id and the queue time, and a retry passes both on to its
+delta, so the daily run covers each country's retry and delta. Every job the
+run starts has `run=<run_id>` at the end of its `ts_integrationjob` name.
+Manual messages have no run.
+
+- **Total time**: from when the timer queued the run until its last job
+  ended, once every country is done. This is the number to compare when
+  changing the instance cap.
+- **Work time**: all the run's job times added up, roughly what it would take
+  on one instance.
+
+From Dataverse, the reliable record:
+
+```bash
+python scripts/sync_run_report.py               # newest run
+python scripts/sync_run_report.py --last full   # newest monthly full sync
+python scripts/sync_run_report.py --run delta-20261012T000001Z-7
+```
+
+It prints how many countries are finished out of the run's count, the total
+and work time, then each job's type, state, start, end and duration. Retry
+jobs show as `Retry`. A country is finished when its full or delta job
+covered its whole window; a failed job does not count, because Azure retries
+its message. Until every country is finished the total is the time so far,
+including countries still waiting in a queue or for a retry. A job killed
+while Running counts as Stopped, ending at its last heartbeat. A country
+skipped as busy, or whose message went to a poison queue, never finishes the
+run; check the `scheduled_queue_skipped` / `scheduled_queue_poisoned` lines
+for it.
+
+From Application Insights, each finished message logs
+`scheduled_run_progress run=… duration_s=… elapsed_s=…`, where `elapsed_s` is
+the run's time so far. A run's largest `elapsed_s` is its total. Log sampling
+can drop lines, so prefer the script for exact numbers:
+
+```kusto
+traces
+| where message startswith "scheduled_run_progress"
+| extend run = extract(@"run=(\S+)", 1, message),
+         codebase = extract(@"codebase=(\w+)", 1, message),
+         duration_s = toint(extract(@"duration_s=(\d+)", 1, message)),
+         elapsed_s = toint(extract(@"elapsed_s=(\d+)", 1, message))
+| summarize total_min = round(max(elapsed_s) / 60.0, 1),
+            work_min = round(sum(duration_s) / 60.0, 1),
+            countries = dcount(codebase), messages = count() by run
+| order by run desc
+```
+
 ### Moving from `onekey-queue`
 
 Before this layout, one worker read `onekey-queue`. Nothing reads it now. Before
@@ -351,3 +403,7 @@ bindings create the new queues on first use.
   Add `Trace` to `excludedTypes` to keep all of them.
 - Settings changes reach running instances only after they restart, so wait a
   couple of minutes before triggering a run.
+- Message fields a version does not know are logged and ignored from this
+  version on, so rolling back keeps newer messages. Versions before the run
+  fields (`run_id`, `enqueued_at`) reject them and poison the message: drain
+  the queues before rolling back that far.

@@ -614,3 +614,13 @@ def test_engine_hooks_both_clients_to_the_tracer_while_a_job_runs():
     engine._finish_job({"success": True})
     assert engine.dataverse.after_request is None
     assert engine.onekey.session.after_request is None
+
+
+def test_a_scheduled_run_id_goes_into_the_job_name():
+    dataverse = FakeDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.run_id = "delta-20261011T000001Z"
+    tracer.begin(job_type=JOB_FULL, codebases=["WDE"])
+    name = dataverse.created[0][1]["ts_name"]
+    assert name.startswith("WDE Full ")
+    assert name.endswith(" run=delta-20261011T000001Z")

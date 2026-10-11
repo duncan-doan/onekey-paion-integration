@@ -1,6 +1,7 @@
 """Offline tests for scheduled Azure Storage Queue work."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -15,9 +16,12 @@ from integration.queue_sync import (
     QueueMessageError,
     QueueWorkFailed,
     SyncQueueMessage,
+    delta_after,
     dispatch,
     handle_message,
+    new_run,
     poison_queue,
+    run_progress,
     scheduled_messages,
 )
 from integration.scheduled_sync import IF_BUSY_RAISE, IF_BUSY_SKIP, SyncBusy
@@ -75,10 +79,11 @@ def test_message_without_choices_defaults_to_syncing_them():
         '{"mode":"other","codebase":"WUK"}',
         '{"mode":"full","codebase":""}',
         '{"mode":"full","codebase":"WUK","version":2}',
-        '{"mode":"full","codebase":"WUK","unexpected":true}',
         '{"mode":"full","codebase":"WUK","date_to":"2026-10-07"}',
         '{"mode":"retry","codebase":"WUK","date_to":"2026-10-07"}',
         '{"codebase":"WUK"}',
+        '{"mode":"delta","codebase":"WUK","run_id":"has space"}',
+        '{"mode":"delta","codebase":"WUK","enqueued_at":"yesterday"}',
         '{"mode":"delta","codebase":"WUK","choices":"no"}',
     ],
 )
@@ -121,6 +126,7 @@ def test_dispatch_runs_one_codebase_and_skips_a_busy_delta(monkeypatch):
         "date_to": "2026-10-07T08:00:00Z",
         "if_busy": IF_BUSY_SKIP,
         "sync_choices": False,
+        "run_id": None,
     }
 
 
@@ -132,7 +138,13 @@ def test_dispatch_runs_a_retry_alone_and_skips_a_busy_codebase(monkeypatch):
         "integration.scheduled_sync.run_from_env", lambda **kwargs: pytest.fail("ran a sync")
     )
     dispatch(SyncQueueMessage(mode="retry", codebase="WDE", retry_limit=10))
-    assert seen == {"codebases": ["WDE"], "limit": 10, "if_busy": IF_BUSY_SKIP}
+    assert seen == {"codebases": ["WDE"], "limit": 10, "if_busy": IF_BUSY_SKIP, "run_id": None}
+
+
+def test_dispatch_passes_the_run_to_the_job_trace(monkeypatch):
+    seen = fake_runner(monkeypatch, {"success": True, "full": {}})
+    dispatch(SyncQueueMessage(mode="full", codebase="WUK", run_id="full-20261101T000000Z"))
+    assert seen["run_id"] == "full-20261101T000000Z"
 
 
 def test_a_failed_retry_reports_its_jobs(monkeypatch):
@@ -309,3 +321,51 @@ def test_ran_mode():
     assert queue_sync.ran_mode(delta, {"promoted_to_full": True}) == "full"
     assert queue_sync.ran_mode(delta, {"success": True}) == "delta"
     assert queue_sync.ran_mode(delta, None) == "delta"
+
+
+# -- run timing --------------------------------------------------------------------
+
+QUEUED = datetime(2026, 10, 12, 0, 0, 1, tzinfo=timezone.utc)
+
+
+def test_a_run_is_named_after_its_job_queue_time_and_country_count():
+    assert new_run("delta", 7, QUEUED) == ("delta-20261012T000001Z-7", "2026-10-12T00:00:01Z")
+
+
+def test_unknown_fields_are_ignored_so_a_rollback_keeps_newer_messages(caplog):
+    item = SyncQueueMessage.decode('{"mode":"full","codebase":"WUK","added_later":true}')
+    assert item == SyncQueueMessage(mode="full", codebase="WUK")
+    assert "Ignoring unknown queue message fields: added_later" in caplog.text
+
+
+def test_scheduled_messages_share_the_run():
+    run_id, enqueued_at = new_run("full", 2, QUEUED)
+    decoded = [
+        SyncQueueMessage.decode(message)
+        for message in scheduled_messages("full", ["WUK", "WDE"], run_id=run_id, enqueued_at=enqueued_at)
+    ]
+    assert {(item.run_id, item.enqueued_at) for item in decoded} == {(run_id, enqueued_at)}
+
+
+def test_the_delta_stays_in_its_retrys_run():
+    retry = SyncQueueMessage(
+        mode="retry", codebase="WNL", run_id="delta-20261012T000001Z", enqueued_at="2026-10-12T00:00:01Z"
+    )
+    delta = SyncQueueMessage.decode(delta_after(retry))
+    assert (delta.mode, delta.run_id, delta.enqueued_at) == (
+        "delta", "delta-20261012T000001Z", "2026-10-12T00:00:01Z"
+    )
+
+
+def test_run_progress_counts_the_message_and_the_run_so_far():
+    item = SyncQueueMessage(
+        mode="delta", codebase="WNL", run_id="delta-20261012T000001Z", enqueued_at="2026-10-12T00:00:01Z"
+    )
+    started = QUEUED + timedelta(minutes=3)
+    progress = run_progress(item, started, started + timedelta(seconds=95))
+    assert progress == {"run_id": "delta-20261012T000001Z", "duration_s": 95, "elapsed_s": 275}
+
+
+def test_a_manual_message_has_no_run_progress():
+    now = datetime.now(timezone.utc)
+    assert run_progress(SyncQueueMessage(mode="delta", codebase="WNL"), now, now) is None

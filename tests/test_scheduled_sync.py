@@ -116,6 +116,15 @@ def test_active_job_looks_for_a_fresh_running_job_per_codebase():
     assert f"ts_lastheartbeat ge {fresh}" in text
 
 
+def test_active_job_ignores_only_the_retry_jobs_of_the_callers_run():
+    jobs = Jobs()
+    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7")
+    assert jobs.queries[0][1]["filter"].endswith(
+        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
+        " and _ts_retryofjob_value ne null)"
+    )
+
+
 def test_active_job_returns_the_live_job_and_its_codebase():
     jobs = Jobs([{"ts_jobid": "job-1", "ts_lastheartbeat": "2026-10-07T11:58:00Z"}])
     running = active_job(jobs, ["WUK"])
@@ -406,3 +415,21 @@ def test_the_delta_alone_runs_a_full_sync_for_a_new_codebase(monkeypatch):
     result = run_delta(engine, codebases=["WNL"])
     assert [name for name, _ in calls] == ["full"]
     assert result["promoted_to_full"] is True
+
+
+def test_the_run_id_reaches_the_job_tracer(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    run_from_env(codebases=["WUK"], retry=False, run_id="delta-20261012T000001Z")
+    assert fake_engine.tracer.run_id == "delta-20261012T000001Z"
+    fake_engine.tracer.run_id = None
+    retry_from_env(codebases=["WUK"], run_id="delta-20261013T000001Z")
+    assert fake_engine.tracer.run_id == "delta-20261013T000001Z"
+
+
+def test_a_redelivered_message_is_not_blocked_by_its_own_run(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    retry_from_env(codebases=["WDE"], if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
+    run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
+    filters = [kwargs["filter"] for _, kwargs in fake_engine.dataverse.queries]
+    assert len(filters) == 2
+    assert all("not (contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in filters)
