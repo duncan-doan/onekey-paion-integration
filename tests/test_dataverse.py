@@ -734,3 +734,202 @@ def test_bulk_upsert_writes_a_repeated_key_once():
     assert results == [("W1", GUID_1, True), ("W1", GUID_1, False)]
     [target] = client._session.calls[1]["json"]["Targets"]
     assert target["name"] == "New"
+
+
+# -- record_errors: one rejected record does not fail the rest ---------------
+
+GUID_A = "aaaaaaaa-bbbb-cccc-dddd-00000000000a"
+NEW_ACCOUNTS = [{"accountnumber": "A", "name": "a"}, {"accountnumber": "B", "name": "b"}]
+
+
+def _create_one_by_one(second_create):
+    """CreateMultiple rejected, then A created alone and B answered by second_create."""
+    return [
+        FakeResponse(200, {"value": []}),  # lookup existing
+        FakeResponse(400, {"error": {"message": "bad batch"}}),  # CreateMultiple
+        FakeResponse(200, {"value": []}),  # find A
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/accounts({GUID_A})"}),
+        FakeResponse(200, {"value": []}),  # find B
+        *second_create,
+    ]
+
+
+def test_record_errors_keeps_a_rejected_record_out_of_the_way():
+    client = make_client(
+        _create_one_by_one([FakeResponse(400, {"error": {"message": "bad value"}})])
+    )
+    rejected = {}
+    results = client.bulk_upsert_by_field(
+        "accounts", "accountnumber", NEW_ACCOUNTS, record_errors=rejected
+    )
+    assert results == [("A", GUID_A, True), ("B", None, False)]
+    assert list(rejected) == ["B"]
+    assert rejected["B"].status_code == 400
+
+
+def test_without_record_errors_a_rejected_record_still_raises():
+    client = make_client(
+        _create_one_by_one([FakeResponse(400, {"error": {"message": "bad value"}})])
+    )
+    with pytest.raises(DataverseHTTPError, match="bad value"):
+        client.bulk_upsert_by_field("accounts", "accountnumber", NEW_ACCOUNTS)
+
+
+def test_record_errors_raises_when_every_record_of_the_batch_is_rejected():
+    # The same fault on every record is a mapping or schema problem.
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(400, {"error": {"message": "bad batch"}}),
+        FakeResponse(200, {"value": []}),
+        FakeResponse(400, {"error": {"message": "no such column"}}),
+        FakeResponse(200, {"value": []}),
+        FakeResponse(400, {"error": {"message": "no such column"}}),
+    ])
+    with pytest.raises(DataverseHTTPError, match="no such column"):
+        client.bulk_upsert_by_field(
+            "accounts", "accountnumber", NEW_ACCOUNTS, record_errors={}
+        )
+
+
+def test_record_errors_still_raises_a_server_error(monkeypatch):
+    monkeypatch.setattr("dataverse.client.time.sleep", lambda _: None)
+    client = make_client(_create_one_by_one([FakeResponse(500, {"error": {"message": "down"}})] * 3))
+    with pytest.raises(DataverseHTTPError, match="down"):
+        client.bulk_upsert_by_field(
+            "accounts", "accountnumber", NEW_ACCOUNTS, record_errors={}
+        )
+
+
+def test_find_many_by_field_sends_no_top():
+    # With $top, a value stored twice would push another value off the page.
+    client = make_client([FakeResponse(200, {"value": []})])
+    client.find_many_by_field("accounts", "accountnumber", ["A", "B"])
+    assert "$top" not in client._session.calls[0]["params"]
+
+
+# -- skip unchanged --------------------------------------------------------
+
+TYPE_GUID = "aaaaaaaa-0000-0000-0000-000000000001"
+
+
+def account(key, name, type_bind=f"/ts_hcotype_refs({TYPE_GUID})"):
+    return {"ts_externalid": key, "name": name, "ts_Type_ref@odata.bind": type_bind}
+
+
+def stored(key, record_id, name):
+    return {"ts_externalid": key, "accountid": record_id, "name": name,
+            "_ts_type_ref_value": TYPE_GUID}
+
+
+def test_skip_unchanged_leaves_records_that_already_match():
+    client = make_client([
+        FakeResponse(200, {"value": [stored("W1", "acc-1", "Same"), stored("W2", "acc-2", "Old")]}),
+        FakeResponse(204),  # UpdateMultiple
+    ])
+    skipped = set()
+    results = client.bulk_upsert_by_field(
+        "accounts", "ts_externalid", [account("W1", "Same"), account("W2", "New")],
+        fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert results == [("W1", "acc-1", False), ("W2", "acc-2", False)]
+    assert skipped == {"W1"}
+    lookup, update = client._session.calls
+    assert lookup["params"]["$select"] == "ts_externalid,accountid,name,_ts_type_ref_value"
+    targets = update["json"]["Targets"]
+    assert [t["accountid"] for t in targets] == ["acc-2"]
+
+
+def test_a_bind_by_alternate_key_is_always_written():
+    client = make_client([
+        FakeResponse(200, {"value": [stored("W1", "acc-1", "Same")]}),
+        FakeResponse(204),
+    ])
+    skipped = set()
+    client.bulk_upsert_by_field(
+        "accounts", "ts_externalid",
+        [account("W1", "Same", type_bind="/ts_hcotype_refs(ts_externalid='WUK.TET.HOS')")],
+        fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert skipped == set()
+    lookup, update = client._session.calls
+    assert lookup["params"]["$select"] == "ts_externalid,accountid"
+    assert len(update["json"]["Targets"]) == 1
+
+
+def test_an_unreadable_column_turns_the_comparison_off():
+    client = make_client([
+        FakeResponse(400, {"error": {"message": "Could not find a property named 'ts_bogus'"}}),
+        FakeResponse(200, {"value": [{"ts_externalid": "W1", "accountid": "acc-1"}]}),
+        FakeResponse(204),
+    ])
+    skipped = set()
+    results = client.bulk_upsert_by_field(
+        "accounts", "ts_externalid", [{"ts_externalid": "W1", "ts_bogus": "x"}],
+        fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert results == [("W1", "acc-1", False)]
+    assert skipped == set()
+    assert client._session.calls[1]["params"]["$select"] == "ts_externalid,accountid"
+    assert "UpdateMultiple" in client._session.calls[2]["url"]
+
+
+def test_a_customer_lookup_compares_by_its_column():
+    parent = "BBBBBBBB-0000-0000-0000-000000000002"
+    client = make_client([
+        FakeResponse(200, {"value": [{
+            "ts_externalid": "I1", "contactid": "con-1", "lastname": "Doe",
+            "_parentcustomerid_value": parent.lower(),
+        }]}),
+    ])
+    skipped = set()
+    client.bulk_upsert_by_field(
+        "contacts", "ts_externalid",
+        [{"ts_externalid": "I1", "lastname": "Doe",
+          "parentcustomerid_account@odata.bind": f"/accounts({parent})"}],
+        fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert skipped == {"I1"}
+    assert "_parentcustomerid_value" in client._session.calls[0]["params"]["$select"]
+    assert len(client._session.calls) == 1  # nothing written
+
+
+def test_skip_unchanged_is_off_unless_asked():
+    client = make_client([
+        FakeResponse(200, {"value": [stored("W1", "acc-1", "Same")]}),
+        FakeResponse(204),
+    ])
+    client.bulk_upsert_by_field(
+        "accounts", "ts_externalid", [account("W1", "Same")], fallback_on_error=False,
+    )
+    lookup, update = client._session.calls
+    assert lookup["params"]["$select"] == "ts_externalid,accountid"
+    assert len(update["json"]["Targets"]) == 1
+
+
+@pytest.mark.parametrize(
+    "expected, actual, same",
+    [
+        ("Clinic", "Clinic", True),
+        ("Clinic", "clinic", False),
+        ("", None, True),
+        (None, "", True),
+        (None, "x", False),
+        (3, 3.0, True),
+        (126870001, 126870002, False),
+        (True, True, True),
+        (True, 1, False),
+        ("3", 3, True),
+        ("126870001", 126870001, True),
+        ("126870001", 126870002, False),
+        ("3a", 3, False),
+        ("1e3", 1000, False),
+        (3, "3", False),
+        ("2026-08-18T14:44:44", "2026-08-18T14:44:44Z", True),
+        ("2026-08-18T14:44:44Z", "2026-08-18T14:44:45Z", False),
+        ("2026-08-18", "2026-08-18T00:00:00Z", False),
+    ],
+)
+def test_same_value_only_matches_when_certain(expected, actual, same):
+    from dataverse.client import _same_value
+
+    assert _same_value(expected, actual) is same

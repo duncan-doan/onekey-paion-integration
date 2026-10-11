@@ -218,6 +218,7 @@ def summarize_results(results: dict | None) -> dict:
         totals["processed"] += int(stats.get("processed") or 0)
         totals["created"] += int(stats.get("created") or 0)
         totals["updated"] += int(stats.get("updated") or 0)
+        totals["skipped"] += int(stats.get("skipped") or 0)
         totals["failed"] += int(stats.get("failed") or 0)
 
     hierarchy = results.get("hierarchy") or {}
@@ -239,7 +240,7 @@ def phase_counts_json(results: dict | None) -> str | None:
         if key in results and results[key]:
             payload[key] = {
                 name: int((results[key] or {}).get(name) or 0)
-                for name in ("processed", "created", "updated", "failed")
+                for name in ("processed", "created", "updated", "skipped", "failed")
             }
     if results.get("hierarchy"):
         payload["hierarchy"] = {
@@ -333,8 +334,9 @@ def classify_failure(exc: BaseException | None, category: str | None, retryable:
 
 
 # A running job refreshes ts_lastheartbeat at most this often, after any
-# OneKey or Dataverse request (see JobTracer.beat). A Running job whose
-# heartbeat is several intervals old has stopped.
+# OneKey or Dataverse request and before each OneKey retry wait (see
+# JobTracer.beat). A Running job whose heartbeat is several intervals old has
+# stopped.
 HEARTBEAT_EVERY_SECONDS = 300
 
 
@@ -518,8 +520,9 @@ class JobTracer:
     def beat(self) -> None:
         """Refresh ts_lastheartbeat if HEARTBEAT_EVERY_SECONDS have passed.
 
-        Called after every OneKey and Dataverse request while a job runs, so a
-        live job's heartbeat stays fresh inside long phases. The update is a
+        Called after every OneKey and Dataverse request, and before each OneKey
+        retry wait, while a job runs, so a live job's heartbeat stays fresh
+        inside long phases and long throttling backoffs. The update is a
         Dataverse request itself; ``_beating`` stops it from beating again.
         """
         if self._beating or not self.enabled or not self.job_guid or self._finished:

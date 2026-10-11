@@ -115,7 +115,7 @@ def test_entity_counts_lists_touched_entities():
         "accounts": {"processed": 3, "created": 1, "updated": 2, "failed": 0},
         "contacts": {"processed": 0, "created": 0, "updated": 0, "failed": 0},
     }
-    assert entity_counts(results) == {"accounts": "3/1/2/0"}
+    assert entity_counts(results) == {"accounts": "3/1/2/0/0"}
 
 
 # -- SyncLogger ----------------------------------------------------------------
@@ -150,8 +150,8 @@ def test_end_sync_reports_the_engines_counts(caplog):
     )
     assert finish.startswith("==== Delta sync WUK finished in ")
     assert (
-        "(processed/created/updated/failed): success=True "
-        "accounts=3/1/2/0 contacts=5/5/0/1 hierarchy_linked=2"
+        "(processed/created/updated/skipped/failed): success=True "
+        "accounts=3/1/2/0/0 contacts=5/5/0/0/1 hierarchy_linked=2"
     ) in finish
     assert finish.endswith("| job=job-1 ====")
     # The summary JSON used to report zero accounts and contacts.

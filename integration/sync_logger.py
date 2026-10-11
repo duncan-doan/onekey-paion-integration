@@ -134,9 +134,9 @@ def _clip(text, limit: int = 500) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-# Entity results summarized as processed/created/updated/failed.
+# Entity results summarized as processed/created/updated/skipped/failed.
 _ENTITY_KEYS = ("accounts", "addresses", "affiliations", "contacts", "activity_affiliations")
-_COUNT_FIELDS = ("processed", "created", "updated", "failed")
+_COUNT_FIELDS = ("processed", "created", "updated", "skipped", "failed")
 
 
 def entity_counts(results: dict | None) -> dict[str, str]:
@@ -312,7 +312,7 @@ class SyncLogger:
             "==== %s ====",
             msg(
                 f"{self._sync_name()} finished in {stats.duration_seconds:.1f}s"
-                + (" (processed/created/updated/failed)" if self.session.counts else ""),
+                + (" (processed/created/updated/skipped/failed)" if self.session.counts else ""),
                 {"job": self.job},
                 success=success,
                 **self.session.counts,

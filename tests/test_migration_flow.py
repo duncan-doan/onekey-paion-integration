@@ -126,3 +126,27 @@ def test_transform_hco_does_not_include_address1_fields():
         include_address=True,  # deprecated kwarg; must still skip address1_*
     )
     assert not any(k.startswith("address1_") for k in payload)
+
+
+def test_catalog_row_that_cannot_be_created_is_a_gap_not_a_crash():
+    # One new code must not stop every account of the codebase.
+    def failing_resolver(*args):
+        raise RuntimeError("Dataverse rejected the catalog row")
+
+    engine = create_transform_engine(load_mapping_config())
+    engine.picklist_gaps.clear()
+    engine.catalog_resolver = failing_resolver
+    payload = engine.transform_hco(
+        {
+            "workplaceEid": "WUKHCO0001",
+            "officialName": "Hospital",
+            "codBase": "WUK",
+            "typeCode": "HOS",
+        }
+    )
+    assert payload["name"] == "Hospital"
+    assert "ts_Type_ref@odata.bind" not in payload
+    assert any(
+        g.mapping_type == "TET" and g.source_value == "HOS"
+        for g in engine.picklist_gaps.gaps
+    )

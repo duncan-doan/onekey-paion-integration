@@ -563,3 +563,15 @@ def test_get_code_list_searches_the_list_and_flattens_its_codes():
 def test_get_code_list_without_results_is_empty():
     session = make_session([FakeResponse(200, {"response": {"status": "SUCCESS", "results": {}}})])
     assert OneKeyClient(session).get_code_list("WUK", "XYZ") == []
+
+
+def test_after_request_hook_runs_before_each_retry_wait(monkeypatch):
+    # Throttling waits run to minutes; the hook keeps a job's heartbeat fresh.
+    events = []
+    monkeypatch.setattr("onekey.auth.time.sleep", lambda delay: events.append("sleep"))
+    session = make_session(
+        [FakeResponse(503), FakeResponse(429), FakeResponse(200, search_payload([]))]
+    )
+    session.after_request = lambda: events.append("hook")
+    session.post_json("/ok/search", {})
+    assert events == ["hook", "sleep", "hook", "sleep", "hook"]

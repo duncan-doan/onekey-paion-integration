@@ -250,6 +250,11 @@ class TransformEngine:
                     key_parts.append(("base", str(transformed)))
                 continue
 
+            # W2W-002 writes the child EID and W2W-002b appends the parent's.
+            if fm.target_field == "ts_compoundkey":
+                self._set_compound_key(payload, fm, transformed)
+                continue
+
             if fm.max_length and isinstance(transformed, str):
                 transformed = transformed[: fm.max_length]
 
@@ -334,14 +339,7 @@ class TransformEngine:
                 continue
 
             if fm.target_field == "ts_compoundkey":
-                if (fm.transform_rule or "").startswith("append:"):
-                    existing = payload.get("ts_compoundkey")
-                    if existing and transformed:
-                        payload["ts_compoundkey"] = f"{existing} - {transformed}"
-                    elif transformed:
-                        payload["ts_compoundkey"] = str(transformed)
-                else:
-                    payload["ts_compoundkey"] = str(transformed)
+                self._set_compound_key(payload, fm, transformed)
                 continue
 
             if fm.max_length and isinstance(transformed, str):
@@ -542,7 +540,19 @@ class TransformEngine:
         if not workplace_eid or not address_eid:
             return None
         return f"{workplace_eid} - {address_eid}"
-    
+
+    @staticmethod
+    def _set_compound_key(payload: dict, fm: "FieldMapping", value: Any) -> None:
+        """Set ts_compoundkey, or append `` - value`` for an ``append:`` mapping."""
+        if (fm.transform_rule or "").startswith("append:"):
+            existing = payload.get("ts_compoundkey")
+            if existing and value:
+                payload["ts_compoundkey"] = f"{existing} - {value}"
+            elif value:
+                payload["ts_compoundkey"] = str(value)
+        else:
+            payload["ts_compoundkey"] = str(value)
+
     @staticmethod
     def _normalize_boolean(value: Any) -> bool:
         """Coerce config/map output to a Dataverse boolean."""
@@ -600,13 +610,32 @@ class TransformEngine:
             return {}
 
         if self.catalog_resolver is not None:
-            bind = self.catalog_resolver(
-                table,
-                external,
-                code,
-                str(cod_base).strip(),
-                source,
-            )
+            try:
+                bind = self.catalog_resolver(
+                    table,
+                    external,
+                    code,
+                    str(cod_base).strip(),
+                    source,
+                )
+            except Exception as exc:  # noqa: BLE001 — one code must not stop the codebase
+                # Leave the lookup out and report the gap; the record is still
+                # written and keeps whatever value it had.
+                logger.warning(
+                    "Catalog row %s could not be created, lookup %s left out: %s",
+                    external,
+                    mapping.target_field,
+                    exc,
+                )
+                self.picklist_gaps.record(
+                    table.list_code,
+                    code,
+                    target_field=mapping.target_field,
+                    target_entity=self._current_entity or mapping.target_entity,
+                    source_eid=self._current_eid,
+                    transform_rule=table.external_id_template,
+                )
+                return {}
         else:
             bind = odata_lookup_bind(table.entity_set, table.key_field, external)
         return {f"{catalog_bind_name(mapping.target_field)}@odata.bind": bind}

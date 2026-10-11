@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 
 import requests
 from urllib3.exceptions import NewConnectionError
@@ -21,6 +22,9 @@ _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 # The gateway gave up waiting for the backend, which may still have committed.
 _GATEWAY_TIMEOUT_STATUSES = frozenset({502, 504})
+
+# 4xx answers that are about the caller, not the record being written.
+_SERVICE_4XX = frozenset({401, 403, 429})
 
 # POST actions that are safe to repeat: they set the same values again.
 _IDEMPOTENT_ACTIONS = ("UpdateMultiple", "UpsertMultiple")
@@ -79,6 +83,95 @@ def _parse_batch_response(response) -> list[tuple]:
                 error = text[:500] or f"HTTP {status}"
         results.append((status, id_match.group(1) if id_match else None, error))
     return results
+
+
+# Customer lookups: the Web API navigation name carries the target table
+# (parentcustomerid_account), the column read back does not.
+_POLYMORPHIC_NAVIGATION = {
+    "parentcustomerid_account": "parentcustomerid",
+    "parentcustomerid_contact": "parentcustomerid",
+    "customerid_account": "customerid",
+    "customerid_contact": "customerid",
+    "parentid_account": "parentid",
+    "parentid_contact": "parentid",
+}
+_BIND_BY_ID = re.compile(r"^/?\w+\(([0-9a-fA-F-]{36})\)$")
+_ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T")
+_NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _expected_columns(payload, key_fields):
+    """Map a payload to ``{column read back: value it should hold}``.
+
+    A lookup bind compares by the id it points at, read back as
+    ``_<column>_value``. Returns None when a field cannot be compared (a bind
+    by alternate key, another annotation), so the record is always written.
+    """
+    expected = {}
+    for key, value in payload.items():
+        if key in key_fields or key.startswith("@"):
+            continue
+        if key.endswith("@odata.bind"):
+            navigation = key[: -len("@odata.bind")].lower()
+            column = _POLYMORPHIC_NAVIGATION.get(navigation, navigation)
+            bound = _BIND_BY_ID.match(str(value or ""))
+            if not bound:
+                return None
+            expected[f"_{column}_value"] = bound.group(1).lower()
+        elif "@" in key:
+            return None
+        else:
+            expected[key] = value
+    return expected
+
+
+def _instant(text):
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _same_value(expected, actual) -> bool:
+    """True only when the stored value certainly equals the one to write.
+
+    Anything uncertain (other types, unparsed text) counts as different, so
+    the record is written: a needless write is harmless, a missed one is not.
+    """
+    if expected is None or expected == "":
+        return actual is None or actual == ""
+    if actual is None or actual == "":
+        return False
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return type(expected) is type(actual) and expected == actual
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        return float(expected) == float(actual)
+    # Choice and number columns accept "126870001" and return 126870001.
+    if isinstance(expected, str) and isinstance(actual, (int, float)):
+        return bool(_NUMBER.match(expected)) and float(expected) == float(actual)
+    if isinstance(expected, str) and isinstance(actual, str):
+        if expected == actual:
+            return True
+        # Dataverse returns date-times in UTC with a Z.
+        if _ISO_DATETIME.match(expected) and _ISO_DATETIME.match(actual):
+            stored, wanted = _instant(actual), _instant(expected)
+            return stored is not None and stored == wanted
+    return False
+
+
+def _unchanged(expected, row) -> bool:
+    """True when ``row`` already holds every value in ``expected``."""
+    for column, value in expected.items():
+        if column not in row:
+            return False
+        actual = row[column]
+        if column.startswith("_") and column.endswith("_value"):
+            if str(actual or "").lower() != value:
+                return False
+        elif not _same_value(value, actual):
+            return False
+    return True
 
 
 def _call_hook(hook) -> None:
@@ -489,8 +582,11 @@ class DataverseClient:
             filter_expr = " or ".join(
                 f"{match_field} eq '{escape_odata(v)}'" for v in chunk
             )
+            # No $top: a value already stored twice would take a second slot
+            # and push another value's row off the page; that value would then
+            # look missing and be created again.
             rows = self.retrieve_multiple(
-                entity_set, select=columns, filter=filter_expr, top=len(chunk),
+                entity_set, select=columns, filter=filter_expr,
             )
             for row in rows:
                 match_value = row.get(match_field)
@@ -670,6 +766,9 @@ class DataverseClient:
         batch_size=None,
         lookup_chunk_size=DEFAULT_LOOKUP_CHUNK_SIZE,
         fallback_on_error=True,
+        record_errors=None,
+        skip_unchanged=False,
+        skipped=None,
     ):
         """Bulk create/update by matching on a plain column.
 
@@ -685,10 +784,24 @@ class DataverseClient:
                 Defaults to ``config.bulk_batch_size`` (recommended 100–1000).
             lookup_chunk_size: Values per OData filter for existence checks.
             fallback_on_error: Retry failed batches record-by-record.
+            record_errors: A dict to collect records Dataverse rejects on
+                their own. A record whose single write gets a 4xx about the
+                record (not 401/403/429) is stored here as
+                ``{match_value: error}`` and reported with record_id None,
+                and the other records are still written. When every record
+                of a group of several sent one by one is rejected, the fault
+                is not in the records, and the error is raised. Without it,
+                the first rejected record raises.
+            skip_unchanged: Read the payload's columns with the existence
+                lookup and do not update a record that already holds every
+                value. Lookups compare by the bound id; a bind by alternate
+                key, or any value whose equality is uncertain, is written.
+            skipped: A set to collect the match values left unchanged.
 
         Returns:
             list[tuple[str, str, bool]]: ``(match_value, record_id, created)``
-            in the same order as ``records``.
+            in the same order as ``records``. An unchanged record reports its
+            id and ``created=False``, like an update.
 
         Records sharing a match value are written once, later fields overriding
         earlier ones; the repeats report ``created=False``. A CreateMultiple
@@ -728,32 +841,104 @@ class DataverseClient:
                 match_field, entity_set, len(records) - len(prepared),
             )
 
-        existing = self.find_many_by_field(
-            entity_set,
-            match_field,
-            [match for match, _ in prepared],
-            select=[match_field, primary_id],
-            chunk_size=lookup_chunk_size,
-        )
+        # With skip_unchanged, the existence lookup also reads the columns each
+        # payload writes, and a record that already holds them is not sent.
+        compare = {}  # match_value -> {column: expected value}
+        columns = [match_field, primary_id]
+        if skip_unchanged:
+            for match_value, payload in prepared:
+                expected = _expected_columns(payload, {match_field, primary_id})
+                if expected:
+                    compare[match_value] = expected
+                    columns.extend(c for c in expected if c not in columns)
+        keys = [match for match, _ in prepared]
+        try:
+            existing = self.find_many_by_field(
+                entity_set, match_field, keys, select=columns,
+                chunk_size=lookup_chunk_size,
+            )
+        except DataverseHTTPError as exc:
+            # A payload field that is not a readable column (400) only turns
+            # the comparison off; the records are still written.
+            if not compare or exc.status_code != 400:
+                raise
+            logger.warning(
+                "Cannot read %s columns to skip unchanged records, writing all: %s",
+                entity_set, str(exc)[:300],
+            )
+            compare = {}
+            existing = self.find_many_by_field(
+                entity_set, match_field, keys, select=[match_field, primary_id],
+                chunk_size=lookup_chunk_size,
+            )
 
         # Preserve input order in the final result list.
         results = [None] * len(prepared)
         creates = []  # (index, match_value, payload)
         updates = []  # (index, match_value, payload_with_id)
+        unchanged = 0
 
         for index, (match_value, payload) in enumerate(prepared):
             row = existing.get(match_value)
             if row and row.get(primary_id):
+                expected = compare.get(match_value)
+                if expected is not None and _unchanged(expected, row):
+                    results[index] = (match_value, row[primary_id], False)
+                    unchanged += 1
+                    if skipped is not None:
+                        skipped.add(match_value)
+                    continue
                 update_payload = {**payload, primary_id: row[primary_id]}
                 updates.append((index, match_value, update_payload))
             else:
                 creates.append((index, match_value, payload))
+        if skip_unchanged:
+            logger.info(
+                "Unchanged %s skipped: unchanged=%d updates=%d creates=%d",
+                entity_set, unchanged, len(updates), len(creates),
+            )
 
         def _create_one(index, match_value, payload):
             record_id, created = self.upsert_by_field(
                 entity_set, match_field, match_value, payload
             )
             results[index] = (match_value, record_id, created)
+
+        def _rejects_record(exc):
+            """True when record_errors is on and the error is about the record."""
+            status = getattr(exc, "status_code", None)
+            return (
+                record_errors is not None
+                and not isinstance(exc, DataverseAmbiguousWriteError)
+                and status is not None
+                and 400 <= status < 500
+                and status not in _SERVICE_4XX
+            )
+
+        def _one_by_one(writes, write_one, batch_size):
+            """Send ``writes`` singly, keeping rejected records in record_errors.
+
+            ``batch_size`` is the batch they came from: when none of a batch of
+            several could be written, the cause is a mapping or schema fault
+            shared by every record, so the error is raised.
+            """
+            rejected = []
+            for index, match_value, payload in writes:
+                try:
+                    write_one(index, match_value, payload)
+                except DataverseHTTPError as exc:
+                    if not _rejects_record(exc):
+                        raise
+                    rejected.append((index, match_value, exc))
+            if batch_size > 1 and len(rejected) == batch_size:
+                raise rejected[0][2]
+            for index, match_value, exc in rejected:
+                logger.warning(
+                    "Dataverse rejected %s %s=%s: status=%s error=%r",
+                    entity_set, match_field, match_value, exc.status_code, str(exc)[:300],
+                )
+                results[index] = (match_value, None, False)
+                record_errors[match_value] = exc
 
         def _create_batch(batch):
             payloads = [payload for _, _, payload in batch]
@@ -794,8 +979,7 @@ class DataverseClient:
                 )
                 if missing and not fallback_on_error:
                     raise
-                for index, match_value, payload in missing:
-                    _create_one(index, match_value, payload)
+                _one_by_one(missing, _create_one, len(batch))
                 return
             except DataverseHTTPError as exc:
                 if not fallback_on_error:
@@ -805,12 +989,11 @@ class DataverseClient:
                     "records=%d status=%s error=%r",
                     entity_set, len(batch), exc.status_code, str(exc)[:300],
                 )
-                for index, match_value, payload in batch:
-                    _create_one(index, match_value, payload)
+                _one_by_one(batch, _create_one, len(batch))
                 return
 
             # A create rejected inside a $batch is retried alone, which either
-            # succeeds or raises the real error for the caller.
+            # succeeds or gives the real error (raised, or kept in record_errors).
             rejected = []
             for (index, match_value, payload), record_id in zip(batch, ids):
                 if record_id:
@@ -822,8 +1005,7 @@ class DataverseClient:
                     "$batch rejected %d of %d creates for %s, retrying them one by one",
                     len(rejected), len(batch), entity_set,
                 )
-            for index, match_value, payload in rejected:
-                _create_one(index, match_value, payload)
+            _one_by_one(rejected, _create_one, len(batch))
 
         def _update_one(index, match_value, payload):
             record_id = payload[primary_id]
@@ -866,8 +1048,7 @@ class DataverseClient:
                     "records=%d status=%s error=%r",
                     entity_set, len(batch), exc.status_code, str(exc)[:300],
                 )
-                for index, match_value, payload in batch:
-                    _update_one(index, match_value, payload)
+                _one_by_one(batch, _update_one, len(batch))
                 return
 
             for position, (index, match_value, payload) in enumerate(batch):
@@ -878,10 +1059,13 @@ class DataverseClient:
                     "$batch rejected %d of %d updates for %s, retrying them one by one",
                     len(rejected_at), len(batch), entity_set,
                 )
-            # Retried alone, a rejected update either succeeds or raises the
-            # real error for the caller.
-            for position in sorted(rejected_at):
-                _update_one(*batch[position])
+            # Retried alone, a rejected update either succeeds or gives the
+            # real error (raised, or kept in record_errors).
+            _one_by_one(
+                [batch[position] for position in sorted(rejected_at)],
+                _update_one,
+                len(batch),
+            )
 
         for batch in chunked(creates, batch_size):
             _create_batch(batch)

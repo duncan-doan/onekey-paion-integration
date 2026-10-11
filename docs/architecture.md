@@ -12,6 +12,9 @@
                              └──────────────┘
 ```
 
+How the scheduled sync runs in Azure (timers, the queue, workers and
+instances) is in [QUEUE_ARCHITECTURE.md](QUEUE_ARCHITECTURE.md).
+
 ## Packages
 
 | Package | Responsibility |

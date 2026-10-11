@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from dataverse.exceptions import DataverseHTTPError
 from onekey.exceptions import OneKeyNotFoundError
 
-from .env import REPO_ROOT
+from .env import REPO_ROOT, skip_unchanged
 
 if TYPE_CHECKING:
     from dataverse import DataverseClient
@@ -398,13 +398,19 @@ def sync_lookup_tables(
             summaries.append(summary)
             continue
         try:
+            unchanged: set = set()
             written = dv.bulk_upsert_by_field(
                 table.entity_set,
                 table.key_field,
                 records,
+                skip_unchanged=skip_unchanged(),
+                skipped=unchanged,
             )
             summary["insert"] = sum(1 for _key, _id, created in written if created)
-            summary["update"] = sum(1 for _key, _id, created in written if not created)
+            summary["unchanged"] = len(unchanged)
+            summary["update"] = sum(
+                1 for key, _id, created in written if not created and key not in unchanged
+            )
             summary["dataverse"] = len(written)
         except DataverseHTTPError as exc:
             logger.error("Lookup upsert %s failed: %s", table.entity_set, exc)

@@ -24,6 +24,7 @@ Optional:
     ONEKEY_SAMPLE    HCOs in the sample (default 5)
     SYNC_DELTA_FROM  UTC start for every delta (2026-08-01), instead of where
                      the last job stopped reading; remove once covered
+    SYNC_SKIP_UNCHANGED  false writes records that already match (default true)
     SYNC_LOG_DIR     directory for sync log files and reports (default off)
 """
 
@@ -56,10 +57,10 @@ os.environ.setdefault("SYNC_LOG_DIR", "off")
 
 
 def _stats(result: dict, key: str) -> str:
-    """processed/created/updated/failed for one phase of a sync result."""
+    """processed/created/updated/skipped/failed for one phase of a sync result."""
     stats = result.get(key) or {}
     return "/".join(
-        str(stats.get(name, 0)) for name in ("processed", "created", "updated", "failed")
+        str(stats.get(name, 0)) for name in ("processed", "created", "updated", "skipped", "failed")
     )
 
 
@@ -101,7 +102,7 @@ def sample_ok_to_dv(timer: func.TimerRequest) -> None:
 
         logging.info(
             "sample_ok_to_dv_complete success=%s job=%s status=%s "
-            "processed/created/updated/failed accounts=%s addresses=%s "
+            "processed/created/updated/skipped/failed accounts=%s addresses=%s "
             "affiliations=%s contacts=%s activity_affiliations=%s "
             "hierarchy_linked=%s errors=%s",
             result.get("success"),

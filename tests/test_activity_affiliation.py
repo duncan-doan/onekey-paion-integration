@@ -92,3 +92,18 @@ def test_role_lookup_uses_full_external_id():
     assert payload == {
         "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')"
     }
+
+
+def test_transform_w2w_affiliation_compound_key_has_both_ends():
+    engine = create_transform_engine(load_mapping_config())
+    edge = {
+        "childWorkplaceEid": "WUKH1",
+        "parentWorkplaceEid": "WUKH2",
+        "fromWorkplaceEid": "WUKH1",
+        "toWorkplaceEid": "WUKH2",
+    }
+    payload = engine.transform_w2w_affiliation(
+        edge, from_account_id="from-guid", to_account_id="to-guid"
+    )
+    # W2W-002b appends the parent; it used to overwrite the child.
+    assert payload["ts_compoundkey"] == "WUKH1 - WUKH2"

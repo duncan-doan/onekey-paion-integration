@@ -4,6 +4,8 @@ This app is a Python v4 Function App. The timers do not run the country sync
 themselves. They sync the choice options once, then enqueue one message per
 codebase on `onekey-queue`, and `scheduled_onekey_worker` runs that message. A
 failed message is retried, then moved to `onekey-queue-poison`.
+How messages, workers and instances fit together is in
+[QUEUE_ARCHITECTURE.md](QUEUE_ARCHITECTURE.md).
 
 `host.json` sets `functionTimeout` to 12 hours, because one country's full
 sync can run for hours. Use **Flex Consumption** or **Premium**, where the
@@ -242,6 +244,7 @@ az functionapp config appsettings set \
 | `SYNC_SCHEDULE` | for scheduled sync | `true` enables the delta and full timers. |
 | `ONEKEY_CODBASE` | no | Comma-separated territories. Default `WUK`. The sample uses the first. |
 | `ONEKEY_SAMPLE` | no | HCOs in `sample_ok_to_dv`. Default `5`. |
+| `SYNC_SKIP_UNCHANGED` | no | Default `true`: a record that already holds every value to write is not updated (counted as skipped, `ts_skipped` on the job). `false` writes every record. |
 | `SYNC_DELTA_FROM` | no | UTC start for every delta, e.g. `2026-08-01`. Unset: start where the last job stopped reading. See [The delta window](#the-delta-window). |
 | `SYNC_LOG_DIR` | no | Leave unset. The app forces `off` because the package folder is read-only. |
 

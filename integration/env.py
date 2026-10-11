@@ -25,6 +25,15 @@ def log_dir():
     return Path(value) if value else REPO_ROOT / "logs"
 
 
+def skip_unchanged():
+    """Whether a sync leaves records that already hold their values unwritten.
+
+    ``SYNC_SKIP_UNCHANGED`` is on unless set to false (or 0/no/off).
+    """
+    value = os.environ.get("SYNC_SKIP_UNCHANGED", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def load_env(path=None, override=False):
     """Read a ``.env`` file into ``os.environ``.
 

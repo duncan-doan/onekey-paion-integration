@@ -80,8 +80,9 @@ class OneKeySession:
         self.config = config
         self._session = session or requests.Session()
         self.stats = RequestStats()
-        # Called with no arguments after every request, success or not. The
-        # sync engine uses it to refresh a running job's heartbeat.
+        # Called with no arguments after every request, success or not, and
+        # before each retry wait. The sync engine uses it to refresh a running
+        # job's heartbeat.
         self.after_request = None
         self._apply_default_headers()
 
@@ -170,12 +171,27 @@ class OneKeySession:
                 self.stats.attempts - attempts_before,
                 elapsed * 1000,
             )
-            hook = self.after_request
-            if hook is not None:
-                try:
-                    hook()
-                except Exception:  # noqa: BLE001
-                    logger.debug("after_request hook failed", exc_info=True)
+            self._call_after_request()
+
+    def _call_after_request(self):
+        """Run the after_request hook; a failing hook never fails the request."""
+        hook = self.after_request
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:  # noqa: BLE001
+            logger.debug("after_request hook failed", exc_info=True)
+
+    def _wait(self, delay):
+        """Sleep before the next attempt, running the hook first.
+
+        The waits of one request add up to 25 minutes under throttling, longer
+        than the queue worker's busy check trusts a silent heartbeat. Running
+        the hook here keeps a live job from looking killed.
+        """
+        self._call_after_request()
+        time.sleep(delay)
 
     def _send(self, method, url, path, **kwargs):
         """The retry loop behind :meth:`request`."""
@@ -203,7 +219,7 @@ class OneKeySession:
                         type(exc).__name__,
                         delay,
                     )
-                    time.sleep(delay)
+                    self._wait(delay)
                 continue
             else:
                 if response.status_code not in _RETRY_STATUSES:
@@ -236,7 +252,7 @@ class OneKeySession:
                         "OneKey %s %s throttled (429): attempt=%d/%d delay_s=%.0f",
                         method, path, attempt, self.config.max_retries, delay,
                     )
-                    time.sleep(delay)
+                    self._wait(delay)
                     continue
 
             if attempt < self.config.max_retries:
@@ -251,7 +267,7 @@ class OneKeySession:
                     getattr(last_error, "status_code", None) or "error",
                     delay,
                 )
-                time.sleep(delay)
+                self._wait(delay)
 
         raise last_error
 

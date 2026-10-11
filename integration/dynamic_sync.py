@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .dynamic_mapping import load_mapping_config, MappingConfig
+from .env import skip_unchanged
 from .transform import TransformEngine
 from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, msg, setup_logging, short_job
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EMPTY_ENTITY = {"processed": 0, "created": 0, "updated": 0, "failed": 0}
+_EMPTY_ENTITY = {"processed": 0, "created": 0, "updated": 0, "skipped": 0, "failed": 0}
 _EMPTY_HIERARCHY = {
     "edges": 0,
     "linked": 0,
@@ -67,6 +68,13 @@ def _ctx(engine, **context) -> dict:
 
 def _empty_entity_stats() -> dict:
     return dict(_EMPTY_ENTITY)
+
+
+def _operation(created: bool, unchanged: bool) -> str:
+    """Record log operation: create, skip (already up to date) or update."""
+    if created:
+        return "create"
+    return "skip" if unchanged else "update"
 
 
 def _empty_hierarchy_stats() -> dict:
@@ -111,6 +119,8 @@ class DynamicSyncEngine:
         self.bulk_batch_size = bulk_batch_size or getattr(
             getattr(dataverse_client, "config", None), "bulk_batch_size", None
         ) or 100
+        # Do not update a record that already holds the values to write.
+        self.skip_unchanged = skip_unchanged()
         self.tracer = JobTracer(
             dataverse_client, batch_size=self.bulk_batch_size
         )
@@ -410,12 +420,20 @@ class DynamicSyncEngine:
                 codebase_failed = False
                 try:
                     flattened_hcos: list[dict] = []
+                    # One population walk feeds both halves: a walk is hundreds
+                    # of paced packets, and two would read two snapshots.
+                    packets = None
+                    if not hco_only and not hcp_only:
+                        packets = self._collect_population_packets(
+                            codebase, max_records=max_records
+                        )
 
                     if not hcp_only:
                         hco_result, flattened_hcos, raw_workplaces = self._sync_hcos(
                             codebase,
                             max_records=max_records,
                             dry_run=dry_run,
+                            raw_workplaces=packets[0] if packets is not None else None,
                         )
                         self._merge_entity(results["accounts"], hco_result)
                         self._checkpoint(results)
@@ -448,9 +466,16 @@ class DynamicSyncEngine:
                             self._checkpoint(results)
 
                     if not hco_only:
-                        composed, activity_packets = self._collect_population_hcps(
-                            codebase, max_records=max_records
-                        )
+                        if packets is not None:
+                            composed, stats = self._compose_population_hcps(*packets)
+                            activity_packets = packets[2]
+                            logger.info(
+                                msg("HCP rows composed", _ctx(self, codbase=codebase), **stats)
+                            )
+                        else:
+                            composed, activity_packets = self._collect_population_hcps(
+                                codebase, max_records=max_records
+                            )
                         hcp_result = self._sync_hcps(
                             codebase,
                             max_records=max_records,
@@ -614,20 +639,13 @@ class DynamicSyncEngine:
         finally:
             self._finish_job(results, aborted=aborted)
 
-    def _collect_population_packets(
-        self,
-        codebase: str,
-        max_records: int = None,
-    ) -> tuple[list[dict], list[dict], list[dict]]:
-        """Return (workplaces, individuals, activities) from refreshMyOnekey."""
+    @staticmethod
+    def _split_population(records) -> tuple[list[dict], list[dict], list[dict]]:
+        """Sort population records into (workplaces, individuals, activities)."""
         workplaces: list[dict] = []
         individuals: list[dict] = []
         activities: list[dict] = []
-
-        started = self.sync_logger.phase_started("extract", codbase=codebase)
-        for record in self.onekey.iter_population(
-            cod_base=codebase, max_records=max_records
-        ):
+        for record in records:
             entity_type = (record.get("entityType") or "").upper()
             if entity_type == "WORKPLACE":
                 workplaces.append(record)
@@ -635,6 +653,18 @@ class DynamicSyncEngine:
                 individuals.append(record)
             elif entity_type == "ACTIVITY":
                 activities.append(record)
+        return workplaces, individuals, activities
+
+    def _collect_population_packets(
+        self,
+        codebase: str,
+        max_records: int = None,
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        """Return (workplaces, individuals, activities) from refreshMyOnekey."""
+        started = self.sync_logger.phase_started("extract", codbase=codebase)
+        workplaces, individuals, activities = self._split_population(
+            self.onekey.iter_population(cod_base=codebase, max_records=max_records)
+        )
 
         self.sync_logger.phase_finished(
             "extract",
@@ -782,20 +812,46 @@ class DynamicSyncEngine:
 
     @staticmethod
     def _merge_entity(target: dict, source: dict) -> None:
-        for key in ("processed", "created", "updated", "failed"):
+        for key in _EMPTY_ENTITY:
             target[key] += source.get(key, 0)
 
     @staticmethod
     def _merge_hierarchy(target: dict, source: dict) -> None:
         for key in _EMPTY_HIERARCHY:
             target[key] += source.get(key, 0)
-    
+
+    def _bulk_upsert(
+        self, entity_set: str, key_name: str, payloads: list[dict]
+    ) -> tuple[list[tuple], dict, set]:
+        """bulk_upsert_by_field, keeping records Dataverse rejects on their own.
+
+        Returns the results, ``{match_value: error}`` for the rejected
+        records, whose result has no record id, and the match values left
+        alone because Dataverse already held their values (skip_unchanged).
+        One bad record becomes one failure row instead of stopping the
+        codebase, so the job still covers its window. A fault shared by every
+        record still raises.
+        """
+        rejected: dict = {}
+        unchanged: set = set()
+        results = self.dataverse.bulk_upsert_by_field(
+            entity_set,
+            key_name,
+            payloads,
+            batch_size=self.bulk_batch_size,
+            record_errors=rejected,
+            skip_unchanged=self.skip_unchanged,
+            skipped=unchanged,
+        )
+        return results, rejected, unchanged
+
     def _sync_hcos(
         self,
         codebase: str,
         max_records: int = None,
         dry_run: bool = False,
         flattened: list[dict] | None = None,
+        raw_workplaces: list[dict] | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
         with self._phase(PHASE_HCO, "accounts", codbase=codebase) as phase:
             result = self._sync_hcos_impl(
@@ -803,6 +859,7 @@ class DynamicSyncEngine:
                 max_records=max_records,
                 dry_run=dry_run,
                 flattened=flattened,
+                raw_workplaces=raw_workplaces,
             )
             phase["stats"] = result[0]
             return result
@@ -813,31 +870,36 @@ class DynamicSyncEngine:
         max_records: int = None,
         dry_run: bool = False,
         flattened: list[dict] | None = None,
+        raw_workplaces: list[dict] | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
         """Sync HCOs for a single codebase using bulk upserts.
 
         Parent ``parentaccountid`` is always deferred to ``_sync_hierarchy``.
+        The workplaces are ``flattened`` rows, else ``raw_workplaces`` already
+        read from the population, else read here from refreshMyOnekey.
 
         Returns:
-            stats, flattened HCO rows, raw OneKey WORKPLACE records (for W2W).
+            stats, flattened HCO rows, raw OneKey WORKPLACE records (for W2W;
+            empty when ``flattened`` was given).
         """
 
         result = _empty_entity_stats()
-        raw_workplaces: list[dict] = []
 
-        if flattened is None:
-            hcos = []
-            started = self.sync_logger.phase_started("extract", codbase=codebase)
-            for record in self.onekey.iter_population(
-                cod_base=codebase, max_records=max_records
-            ):
-                if (record.get("entityType") or "").upper() == "WORKPLACE":
-                    hcos.append(record)
-            raw_workplaces = hcos
-            self.sync_logger.phase_finished(
-                "extract", started, {"workplaces": len(hcos)}, codbase=codebase
-            )
-            flattened = [flatten_hco(r) for r in hcos]
+        if flattened is not None:
+            raw_workplaces = []
+        else:
+            if raw_workplaces is None:
+                raw_workplaces = []
+                started = self.sync_logger.phase_started("extract", codbase=codebase)
+                for record in self.onekey.iter_population(
+                    cod_base=codebase, max_records=max_records
+                ):
+                    if (record.get("entityType") or "").upper() == "WORKPLACE":
+                        raw_workplaces.append(record)
+                self.sync_logger.phase_finished(
+                    "extract", started, {"workplaces": len(raw_workplaces)}, codbase=codebase
+                )
+            flattened = [flatten_hco(r) for r in raw_workplaces]
 
         contracted = {
             eid
@@ -936,12 +998,7 @@ class DynamicSyncEngine:
         payloads = [item[3] for item in prepared]
 
         try:
-            bulk_results = self.dataverse.bulk_upsert_by_field(
-                "accounts",
-                key_name,
-                payloads,
-                batch_size=self.bulk_batch_size,
-            )
+            bulk_results, rejected, unchanged = self._bulk_upsert("accounts", key_name, payloads)
         except Exception as e:
             result["failed"] += len(prepared)
             for workplace_eid, _, key_value, _, _ in prepared:
@@ -955,12 +1012,27 @@ class DynamicSyncEngine:
                 )
             raise
 
-        for (workplace_eid, _, _, _, hco), (_, account_id, created) in zip(
+        for (workplace_eid, _, key_value, _, hco), (match, account_id, created) in zip(
             prepared, bulk_results
         ):
+            if not account_id:
+                error = rejected.get(match)
+                result["failed"] += 1
+                done += 1
+                self._fail(
+                    "account",
+                    workplace_eid,
+                    "upsert",
+                    str(error or "Dataverse rejected the record"),
+                    external_id=key_value,
+                    exc=error,
+                )
+                continue
             self._account_cache[workplace_eid] = account_id
             if created:
                 result["created"] += 1
+            elif match in unchanged:
+                result["skipped"] += 1
             else:
                 result["updated"] += 1
             result["processed"] += 1
@@ -970,7 +1042,7 @@ class DynamicSyncEngine:
                 "account",
                 workplace_eid,
                 account_id,
-                "create" if created else "update",
+                _operation(created, match in unchanged),
             )
             if done % 100 == 0 or done == len(prepared):
                 self.sync_logger.log_progress("accounts", done, len(prepared))
@@ -1052,11 +1124,8 @@ class DynamicSyncEngine:
 
         address_key = self.config.require_key_field("customeraddress")
         try:
-            bulk_results = self.dataverse.bulk_upsert_by_field(
-                "customeraddresses",
-                address_key,
-                [p for _, p, _ in prepared],
-                batch_size=self.bulk_batch_size,
+            bulk_results, rejected, unchanged = self._bulk_upsert(
+                "customeraddresses", address_key, [p for _, p, _ in prepared]
             )
         except Exception as e:
             result["failed"] += len(prepared)
@@ -1071,11 +1140,25 @@ class DynamicSyncEngine:
                 )
             raise
 
-        for (key, _, workplace_eid), (_, record_id, created) in zip(
+        for (key, _, workplace_eid), (match, record_id, created) in zip(
             prepared, bulk_results
         ):
+            if not record_id:
+                error = rejected.get(match)
+                result["failed"] += 1
+                self._fail(
+                    "customeraddress",
+                    workplace_eid,
+                    "upsert",
+                    str(error or "Dataverse rejected the record"),
+                    external_id=key,
+                    exc=error,
+                )
+                continue
             if created:
                 result["created"] += 1
+            elif match in unchanged:
+                result["skipped"] += 1
             else:
                 result["updated"] += 1
             result["processed"] += 1
@@ -1084,7 +1167,7 @@ class DynamicSyncEngine:
                 "customeraddress",
                 key,
                 record_id,
-                "create" if created else "update",
+                _operation(created, match in unchanged),
             )
 
         return result
@@ -1358,11 +1441,8 @@ class DynamicSyncEngine:
         for batch in chunked(prepared, self.bulk_batch_size):
             payloads = [item[2] for item in batch]
             try:
-                bulk_results = self.dataverse.bulk_upsert_by_field(
-                    entity_set,
-                    affiliation_key,
-                    payloads,
-                    batch_size=self.bulk_batch_size,
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    entity_set, affiliation_key, payloads
                 )
             except Exception as e:
                 result["failed"] += len(batch)
@@ -1377,11 +1457,25 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (external_id, _, _payload, edge), (_, record_id, created) in zip(
+            for (external_id, _, _payload, edge), (match, record_id, created) in zip(
                 batch, bulk_results
             ):
+                if not record_id:
+                    error = rejected.get(match)
+                    result["failed"] += 1
+                    self._fail(
+                        "ts_affiliation",
+                        edge.get("fromWorkplaceEid") or external_id,
+                        "upsert",
+                        str(error or "Dataverse rejected the record"),
+                        external_id=external_id,
+                        exc=error,
+                    )
+                    continue
                 if created:
                     result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
                 else:
                     result["updated"] += 1
                 result["processed"] += 1
@@ -1395,7 +1489,7 @@ class DynamicSyncEngine:
                     "ts_affiliation",
                     external_id,
                     record_id,
-                    "create" if created else "update",
+                    _operation(created, match in unchanged),
                 )
 
             self.sync_logger.log_progress("affiliations", done, len(prepared))
@@ -1558,11 +1652,8 @@ class DynamicSyncEngine:
         for batch in chunked(prepared, self.bulk_batch_size):
             payloads = [item[2] for item in batch]
             try:
-                bulk_results = self.dataverse.bulk_upsert_by_field(
-                    entity_set,
-                    affiliation_key,
-                    payloads,
-                    batch_size=self.bulk_batch_size,
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    entity_set, affiliation_key, payloads
                 )
             except Exception as e:
                 result["failed"] += len(batch)
@@ -1577,25 +1668,38 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (external_id, _, _payload, flat), (_, record_id, created) in zip(
+            for (external_id, _, _payload, flat), (match, record_id, created) in zip(
                 batch, bulk_results
             ):
+                if not record_id:
+                    error = rejected.get(match)
+                    result["failed"] += 1
+                    self._fail(
+                        "ts_affiliation",
+                        external_id,
+                        "upsert",
+                        str(error or "Dataverse rejected the record"),
+                        external_id=external_id,
+                        exc=error,
+                    )
+                    continue
                 if created:
                     result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
                 else:
                     result["updated"] += 1
                 result["processed"] += 1
                 done += 1
-                self._note_success(
-                    external_id,
-                    flat.get("individualEid"),
-                    flat.get("workplaceEid"),
-                )
+                # Only the activity: its failure rows use the activity EID. The
+                # individual and workplace EIDs would resolve the contact and
+                # account rows, which this write did not touch.
+                self._note_success(external_id)
                 self.sync_logger.log_record_success(
                     "ts_affiliation",
                     external_id,
                     record_id,
-                    "create" if created else "update",
+                    _operation(created, match in unchanged),
                 )
 
             self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
@@ -1617,45 +1721,53 @@ class DynamicSyncEngine:
         Contact composition keeps one ACTIVITY per individual (prefer
         ``isMainActivity``). Affiliation sync uses ``all_activity_packets``.
         """
-        individuals: dict[str, dict] = {}
-        workplaces: dict[str, dict] = {}
-        activities_by_individual: dict[str, dict] = {}
-        all_activities: list[dict] = []
-
         started = self.sync_logger.phase_started("extract", codbase=codebase, entity="hcp")
+        workplaces, individuals, activities = self._split_population(
+            self.onekey.iter_population(
+                cod_base=codebase,
+                max_records=max_records,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        )
+        composed, stats = self._compose_population_hcps(workplaces, individuals, activities)
+        self.sync_logger.phase_finished(
+            "extract", started, stats, codbase=codebase, entity="hcp"
+        )
+        return composed, activities
 
-        for record in self.onekey.iter_population(
-            cod_base=codebase,
-            max_records=max_records,
-            date_from=date_from,
-            date_to=date_to,
-        ):
-            entity_type = (record.get("entityType") or "").upper()
-            if entity_type == "WORKPLACE":
-                workplace = record.get("workplace") or {}
-                workplace_eid = workplace.get("workplaceEid")
-                if workplace_eid:
-                    workplaces[workplace_eid] = record
-            elif entity_type == "INDIVIDUAL":
-                individual = record.get("individual") or {}
-                individual_eid = individual.get("individualEid")
-                if individual_eid:
-                    individuals[individual_eid] = record
-            elif entity_type == "ACTIVITY":
-                all_activities.append(record)
-                activity = record.get("activity") or {}
-                individual_eid = activity.get("individualEid")
-                if not individual_eid:
-                    continue
-                existing = activities_by_individual.get(individual_eid)
-                if existing is None:
+    def _compose_population_hcps(
+        self,
+        workplace_records: list[dict],
+        individual_records: list[dict],
+        activity_records: list[dict],
+    ) -> tuple[list[dict], dict]:
+        """Join population packets into HCP contact rows; return them and the counts."""
+        workplaces: dict[str, dict] = {}
+        for record in workplace_records:
+            workplace_eid = (record.get("workplace") or {}).get("workplaceEid")
+            if workplace_eid:
+                workplaces[workplace_eid] = record
+        individuals: dict[str, dict] = {}
+        for record in individual_records:
+            individual_eid = (record.get("individual") or {}).get("individualEid")
+            if individual_eid:
+                individuals[individual_eid] = record
+        activities_by_individual: dict[str, dict] = {}
+        for record in activity_records:
+            activity = record.get("activity") or {}
+            individual_eid = activity.get("individualEid")
+            if not individual_eid:
+                continue
+            existing = activities_by_individual.get(individual_eid)
+            if existing is None:
+                activities_by_individual[individual_eid] = record
+            else:
+                existing_activity = existing.get("activity") or {}
+                if activity.get("isMainActivity") and not existing_activity.get(
+                    "isMainActivity"
+                ):
                     activities_by_individual[individual_eid] = record
-                else:
-                    existing_activity = existing.get("activity") or {}
-                    if activity.get("isMainActivity") and not existing_activity.get(
-                        "isMainActivity"
-                    ):
-                        activities_by_individual[individual_eid] = record
 
         composed = []
         skipped_unjoined = 0
@@ -1686,25 +1798,18 @@ class DynamicSyncEngine:
                 )
             )
 
-        contracted_wp = set(workplaces)
-        self._contracted_workplace_eids |= contracted_wp
+        self._contracted_workplace_eids |= set(workplaces)
         self._contracted_individual_eids |= set(individuals)
 
-        self.sync_logger.phase_finished(
-            "extract",
-            started,
-            {
-                "hcps": len(composed),
-                "individuals": len(individuals),
-                "main_activities": len(activities_by_individual),
-                "activity_packets": len(all_activities),
-                "workplaces": len(workplaces),
-                "skipped_out_of_contract": skipped_unjoined,
-            },
-            codbase=codebase,
-            entity="hcp",
-        )
-        return composed, all_activities
+        stats = {
+            "hcps": len(composed),
+            "individuals": len(individuals),
+            "main_activities": len(activities_by_individual),
+            "activity_packets": len(activity_records),
+            "workplaces": len(workplaces),
+            "skipped_out_of_contract": skipped_unjoined,
+        }
+        return composed, stats
 
     def _sync_hcps(
         self,
@@ -1832,12 +1937,7 @@ class DynamicSyncEngine:
         for batch in chunked(prepared, self.bulk_batch_size):
             payloads = [item[2] for item in batch]
             try:
-                bulk_results = self.dataverse.bulk_upsert_by_field(
-                    "contacts",
-                    key_name,
-                    payloads,
-                    batch_size=self.bulk_batch_size,
-                )
+                bulk_results, rejected, unchanged = self._bulk_upsert("contacts", key_name, payloads)
             except Exception as e:
                 result["failed"] += len(batch)
                 for individual_eid, _, payload, _ in batch:
@@ -1851,13 +1951,26 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (individual_eid, _, _, hcp), (_, contact_id, created) in zip(
+            for (individual_eid, _, payload, hcp), (match, contact_id, created) in zip(
                 batch, bulk_results
             ):
-                if contact_id:
-                    self._contact_cache[str(individual_eid)] = contact_id
+                if not contact_id:
+                    error = rejected.get(match)
+                    result["failed"] += 1
+                    self._fail(
+                        "contact",
+                        individual_eid,
+                        "upsert",
+                        str(error or "Dataverse rejected the record"),
+                        external_id=payload.get(key_name),
+                        exc=error,
+                    )
+                    continue
+                self._contact_cache[str(individual_eid)] = contact_id
                 if created:
                     result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
                 else:
                     result["updated"] += 1
                 result["processed"] += 1
@@ -1867,7 +1980,7 @@ class DynamicSyncEngine:
                     "contact",
                     individual_eid,
                     contact_id,
-                    "create" if created else "update",
+                    _operation(created, match in unchanged),
                 )
 
             self.sync_logger.log_progress("contacts", done, len(prepared))
@@ -2066,7 +2179,11 @@ class DynamicSyncEngine:
                     if record and record.get("contactid"):
                         self._contact_cache[eid] = record["contactid"]
         except Exception as e:
+            # Raise rather than carry on: every contact left out of the cache
+            # would fail as "not found", a non-retryable lookup failure, and
+            # the job would still cover its window.
             logger.warning(msg("Contact lookup failed", _ctx(self), error=str(e)))
+            raise
 
         return {
             str(eid): self._contact_cache[str(eid)]
@@ -2117,8 +2234,10 @@ class DynamicSyncEngine:
                     if record and record.get("accountid"):
                         self._account_cache[eid] = record["accountid"]
         except Exception as e:
+            # Raise for the reason given in _lookup_contacts_bulk.
             logger.warning(msg("Account lookup failed", _ctx(self), error=str(e)))
-        
+            raise
+
         return {
             str(eid): self._account_cache[str(eid)]
             for eid in workplace_eids
