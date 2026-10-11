@@ -251,10 +251,11 @@ class SyncLogger:
         self._operation_times: dict[str, list[float]] = defaultdict(list)
         # Set by the sync engine when a job begins; added to every line.
         self.job_id: str | None = None
-        
+        self._file_handler: logging.FileHandler | None = None
+
         # Set up file logging
         self._setup_file_logging()
-    
+
     def _setup_file_logging(self):
         """Configure file handler for this session, unless file logs are off."""
         if self.log_dir is None:
@@ -267,7 +268,20 @@ class SyncLogger:
 
         # Add to root logger
         logging.getLogger().addHandler(file_handler)
+        self._file_handler = file_handler
         logger.info(msg("Sync log file", {"session": self.session_id}, path=log_file))
+
+    def close(self) -> None:
+        """Detach and close this session's log file.
+
+        A warm Function instance builds an engine, and so a SyncLogger, per
+        queue message. Left on the root logger, each file handler would stay
+        open and copy every later run's lines into this session's file.
+        """
+        handler, self._file_handler = self._file_handler, None
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
     
     def start_sync(
         self,

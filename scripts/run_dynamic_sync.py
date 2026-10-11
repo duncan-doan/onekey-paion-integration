@@ -218,6 +218,11 @@ class MockDataverse:
     def find_many_by_field(self, *args, **kwargs):
         return {}
 
+    def retrieve_multiple(self, *args, **kwargs):
+        # The pre-sync schema check reads one row per table; without this
+        # every dry run failed validation and stopped before any phase.
+        return []
+
     def update_multiple(self, *args, **kwargs):
         return None
 

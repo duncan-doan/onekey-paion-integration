@@ -93,3 +93,21 @@ def test_gap_report_written_to_log_dir(monkeypatch, tmp_path):
     path = _gaps().write_report()
     assert path is not None and path.parent == tmp_path
     assert "SP.WUK.XX" in path.read_text(encoding="utf-8")
+
+
+def test_closing_a_sync_logger_detaches_its_log_file(tmp_path):
+    # A warm instance builds a SyncLogger per queue message; an open handler
+    # left on the root logger would copy every later run into this file.
+    import logging
+
+    from integration.sync_logger import SyncLogger
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    sync_logger = SyncLogger(session_id="closed", log_dir=tmp_path)
+    assert len(root.handlers) == len(before) + 1
+    sync_logger.close()
+    assert root.handlers == before
+    logging.getLogger("integration").warning("after close")
+    assert "after close" not in (tmp_path / "sync_closed.log").read_text()
+    sync_logger.close()  # closing twice is harmless

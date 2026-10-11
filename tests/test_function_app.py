@@ -78,3 +78,26 @@ def test_timers_and_the_retry_worker_fill_the_right_queues():
     assert bindings["scheduled_onekey_full"]["work"] == QUEUES["full"]
     assert bindings["scheduled_onekey_delta"]["work"] == QUEUES["retry"]
     assert bindings["scheduled_onekey_retry_worker"]["delta"] == QUEUES["delta"]
+
+
+def test_full_and_delta_workers_continue_on_their_own_queue():
+    # A part that spent its time budget queues the next part where it came from.
+    bindings = queue_bindings(FUNCTION_APP.read_text(encoding="utf-8"))
+    assert bindings["scheduled_onekey_full_worker"]["more"] == QUEUES["full"]
+    assert bindings["scheduled_onekey_delta_worker"]["more"] == QUEUES["delta"]
+    assert "more" not in bindings["scheduled_onekey_retry_worker"]
+
+
+def test_every_binding_is_a_parameter_of_its_function():
+    # A binding whose arg_name the function does not take stops the worker
+    # from loading, and with it every function in the app.
+    tree = ast.parse(FUNCTION_APP.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        params = {arg.arg for arg in node.args.args}
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Call):
+                for keyword in decorator.keywords:
+                    if keyword.arg == "arg_name":
+                        assert ast.literal_eval(keyword.value) in params, node.name

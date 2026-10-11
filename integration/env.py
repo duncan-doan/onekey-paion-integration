@@ -34,6 +34,28 @@ def skip_unchanged():
     return value not in {"0", "false", "no", "off"}
 
 
+# Flex Consumption ends a running execution 60 minutes into a scale-in. A
+# queued full sync or delta stops between batches after this long and queues
+# a continuation, leaving time to finish the batch and the job record.
+DEFAULT_TIME_BUDGET_MINUTES = 45
+
+
+def time_budget_seconds():
+    """Seconds a queued sync may run before it pauses, or None for no limit.
+
+    ``SYNC_TIME_BUDGET_MINUTES`` (default 45); 0 or off removes the limit,
+    and a value that is not a number falls back to the default.
+    """
+    raw = os.environ.get("SYNC_TIME_BUDGET_MINUTES", "").strip().lower()
+    if raw in {"0", "off", "false", "no"}:
+        return None
+    try:
+        minutes = float(raw) if raw else DEFAULT_TIME_BUDGET_MINUTES
+    except ValueError:
+        minutes = DEFAULT_TIME_BUDGET_MINUTES
+    return minutes * 60 if minutes > 0 else None
+
+
 def load_env(path=None, override=False):
     """Read a ``.env`` file into ``os.environ``.
 

@@ -62,6 +62,22 @@ _EMPTY_HIERARCHY = {
 }
 
 
+class SyncPaused(RuntimeError):
+    """The run spent its time budget; it stopped between two batches.
+
+    Raised by DynamicSyncEngine._check_deadline. The sync methods catch it,
+    record the job as not covering its window, and return with ``paused``
+    set, so the queue worker can queue a continuation (integration.queue_sync).
+    ``phase`` and ``stats`` carry the counts of the phase it stopped in, which
+    would otherwise be lost with the phase's return value.
+    """
+
+    def __init__(self, message: str, phase: str | None = None, stats: dict | None = None):
+        super().__init__(message)
+        self.phase = phase
+        self.stats = stats
+
+
 def _ctx(engine, **context) -> dict:
     """Context for an engine log line: the given fields, then the short job ID."""
     return {**context, "job": short_job(engine.tracer.job_id)}
@@ -69,6 +85,13 @@ def _ctx(engine, **context) -> dict:
 
 def _empty_entity_stats() -> dict:
     return dict(_EMPTY_ENTITY)
+
+
+def _codebase_outcome(failed: bool, results: dict) -> str:
+    """The codebase phase's logged outcome: error, paused or ok."""
+    if failed:
+        return "error"
+    return "paused" if results.get("paused") else "ok"
 
 
 def _operation(created: bool, unchanged: bool) -> str:
@@ -136,6 +159,29 @@ class DynamicSyncEngine:
         self._contracted_individual_eids: set[str] = set()
         # Cache for contact lookups (individualEid -> contactid)
         self._contact_cache: dict[str, str] = {}
+        # time.monotonic() after which a run stops between batches, or None.
+        # Queue workers set it: Flex Consumption stops an execution 60
+        # minutes into a scale-in, so a run ends cleanly before that and a
+        # continuation message picks up the rest.
+        self.deadline: float | None = None
+        # Records created or updated by the current job (not skipped or
+        # rejected): a paused run that wrote none made no progress.
+        self.records_written = 0
+
+    def close(self) -> None:
+        """Release what the engine holds open: its sync log file."""
+        self.sync_logger.close()
+
+    def _check_deadline(
+        self, before: str, phase: str | None = None, stats: dict | None = None
+    ) -> None:
+        """Raise SyncPaused when the time budget is spent; call between batches.
+
+        ``phase`` is the results key of the running phase and ``stats`` its
+        counts so far, so a pause does not lose them.
+        """
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise SyncPaused(f"time budget spent before a {before} batch", phase, stats)
 
     def validate_before_sync(self) -> ValidationResult:
         """Run all validation checks before starting sync."""
@@ -169,6 +215,7 @@ class DynamicSyncEngine:
     ) -> None:
         self.succeeded_ids.clear()
         self.succeeded_records.clear()
+        self.records_written = 0
         self.tracer.begin(
             job_type=job_type,
             codebases=codebases,
@@ -185,6 +232,8 @@ class DynamicSyncEngine:
 
     def _finish_job(self, results: dict | None, aborted: bool = False) -> None:
         self._set_request_hook(None)
+        if isinstance(results, dict):
+            results["records_written"] = self.records_written
         self.tracer.finish(results, aborted=aborted)
         self._log_http_summary()
 
@@ -245,6 +294,11 @@ class DynamicSyncEngine:
         started = self.sync_logger.phase_started(name, **fields)
         try:
             yield outcome
+        except SyncPaused:
+            self.sync_logger.phase_finished(
+                name, started, outcome.get("stats"), outcome="paused", **fields
+            )
+            raise
         except Exception as exc:
             self.sync_logger.phase_finished(
                 name, started, outcome.get("stats"), outcome="error",
@@ -510,6 +564,8 @@ class DynamicSyncEngine:
                             )
                             self._checkpoint(results)
 
+                except SyncPaused as exc:
+                    self._record_pause(results, codebase, exc)
                 except Exception as e:
                     logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
                     results["errors"].append(f"{codebase}: {e}")
@@ -519,9 +575,11 @@ class DynamicSyncEngine:
                 self.sync_logger.phase_finished(
                     "codebase",
                     codebase_started,
-                    outcome="error" if codebase_failed else "ok",
+                    outcome=_codebase_outcome(codebase_failed, results),
                     codbase=codebase,
                 )
+                if results.get("paused"):
+                    break  # the deadline holds for every codebase
 
             gap_path = self.transformer.picklist_gaps.write_report()
             results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
@@ -537,6 +595,27 @@ class DynamicSyncEngine:
             raise
         finally:
             self._finish_job(results, aborted=aborted)
+
+    def _record_pause(self, results: dict, codebase: str, exc: SyncPaused) -> None:
+        """Keep a paused phase's counts and mark the job as not covering its window.
+
+        The error entry is what keeps the job from covering its window
+        (scheduled_sync.covered_window ignores only picklist errors), so the
+        next delta, or the continuation, reads it again.
+        """
+        if exc.phase in results and exc.stats:
+            self._merge_entity(results[exc.phase], exc.stats)
+        results["paused"] = True
+        results["errors"].append(f"{codebase}: paused, {exc}")
+        logger.warning(
+            msg(
+                f"Codebase {codebase} paused; a continuation finishes it",
+                _ctx(self),
+                reason=str(exc),
+                written=self.records_written,
+            )
+        )
+        self._checkpoint(results)
 
     def sync_affiliations_only(
         self,
@@ -722,6 +801,8 @@ class DynamicSyncEngine:
             "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
+            # Contact changes the window could not apply; see _sync_delta_codebase.
+            "unjoined": {"activities": 0, "individuals": 0},
             "picklist_gaps": 0,
             "picklist_gap_report": None,
             "errors": [],
@@ -797,7 +878,11 @@ class DynamicSyncEngine:
                         results["by_process_code"][code] += delta_result.get(
                             "by_process_code", {}
                         ).get(code, 0)
+                    for kind, count in (delta_result.get("unjoined") or {}).items():
+                        results["unjoined"][kind] = results["unjoined"].get(kind, 0) + count
                     self._checkpoint(results)
+                except SyncPaused as exc:
+                    self._record_pause(results, codebase, exc)
                 except Exception as e:
                     logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
                     results["errors"].append(f"{codebase}: {e}")
@@ -807,9 +892,11 @@ class DynamicSyncEngine:
                 self.sync_logger.phase_finished(
                     "codebase",
                     codebase_started,
-                    outcome="error" if codebase_failed else "ok",
+                    outcome=_codebase_outcome(codebase_failed, results),
                     codbase=codebase,
                 )
+                if results.get("paused"):
+                    break  # the deadline holds for every codebase
 
             gap_path = self.transformer.picklist_gaps.write_report()
             results["picklist_gaps"] = len(self.transformer.picklist_gaps.gaps)
@@ -858,6 +945,9 @@ class DynamicSyncEngine:
             record_errors=rejected,
             skip_unchanged=self.skip_unchanged,
             skipped=unchanged,
+        )
+        self.records_written += sum(
+            1 for match, record_id, _ in results if record_id and match not in unchanged
         )
         return results, rejected, unchanged
 
@@ -1011,57 +1101,63 @@ class DynamicSyncEngine:
             return result, flattened, raw_workplaces
 
         key_name = prepared[0][1]
-        payloads = [item[3] for item in prepared]
 
-        try:
-            bulk_results, rejected, unchanged = self._bulk_upsert("accounts", key_name, payloads)
-        except Exception as e:
-            result["failed"] += len(prepared)
-            for workplace_eid, _, key_value, _, _ in prepared:
-                self._fail(
-                    "account",
-                    workplace_eid,
-                    "upsert",
-                    str(e),
-                    external_id=key_value,
-                    exc=e,
+        # One bulk call per batch, so a run can stop between batches when
+        # its time budget is spent (see _check_deadline).
+        for batch in chunked(prepared, self.bulk_batch_size):
+            self._check_deadline("accounts", "accounts", result)
+            payloads = [item[3] for item in batch]
+            try:
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    "accounts", key_name, payloads
                 )
-            raise
+            except Exception as e:
+                result["failed"] += len(batch)
+                for workplace_eid, _, key_value, _, _ in batch:
+                    self._fail(
+                        "account",
+                        workplace_eid,
+                        "upsert",
+                        str(e),
+                        external_id=key_value,
+                        exc=e,
+                    )
+                raise
 
-        for (workplace_eid, _, key_value, _, hco), (match, account_id, created) in zip(
-            prepared, bulk_results
-        ):
-            if not account_id:
-                error = rejected.get(match)
-                result["failed"] += 1
+            for (workplace_eid, _, key_value, _, hco), (match, account_id, created) in zip(
+                batch, bulk_results
+            ):
+                if not account_id:
+                    error = rejected.get(match)
+                    result["failed"] += 1
+                    done += 1
+                    self._fail(
+                        "account",
+                        workplace_eid,
+                        "upsert",
+                        str(error or "Dataverse rejected the record"),
+                        external_id=key_value,
+                        exc=error,
+                    )
+                    continue
+                self._account_cache[workplace_eid] = account_id
+                if created:
+                    result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
                 done += 1
-                self._fail(
+                self._note_success(workplace_eid, entity="account", external_id=key_value)
+                self.sync_logger.log_record_success(
                     "account",
                     workplace_eid,
-                    "upsert",
-                    str(error or "Dataverse rejected the record"),
-                    external_id=key_value,
-                    exc=error,
+                    account_id,
+                    _operation(created, match in unchanged),
                 )
-                continue
-            self._account_cache[workplace_eid] = account_id
-            if created:
-                result["created"] += 1
-            elif match in unchanged:
-                result["skipped"] += 1
-            else:
-                result["updated"] += 1
-            result["processed"] += 1
-            done += 1
-            self._note_success(workplace_eid, entity="account", external_id=key_value)
-            self.sync_logger.log_record_success(
-                "account",
-                workplace_eid,
-                account_id,
-                _operation(created, match in unchanged),
-            )
-            if done % 100 == 0 or done == len(prepared):
-                self.sync_logger.log_progress("accounts", done, len(prepared))
+                if done % 100 == 0 or done == len(prepared):
+                    self.sync_logger.log_progress("accounts", done, len(prepared))
 
         return result, flattened, raw_workplaces
 
@@ -1139,52 +1235,54 @@ class DynamicSyncEngine:
             return result
 
         address_key = self.config.require_key_field("customeraddress")
-        try:
-            bulk_results, rejected, unchanged = self._bulk_upsert(
-                "customeraddresses", address_key, [p for _, p, _ in prepared]
-            )
-        except Exception as e:
-            result["failed"] += len(prepared)
-            for key, _, workplace_eid in prepared:
-                self._fail(
-                    "customeraddress",
-                    workplace_eid,
-                    "upsert",
-                    str(e),
-                    external_id=key,
-                    exc=e,
+        for batch in chunked(prepared, self.bulk_batch_size):
+            self._check_deadline("addresses", "addresses", result)
+            try:
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    "customeraddresses", address_key, [p for _, p, _ in batch]
                 )
-            raise
+            except Exception as e:
+                result["failed"] += len(batch)
+                for key, _, workplace_eid in batch:
+                    self._fail(
+                        "customeraddress",
+                        workplace_eid,
+                        "upsert",
+                        str(e),
+                        external_id=key,
+                        exc=e,
+                    )
+                raise
 
-        for (key, _, workplace_eid), (match, record_id, created) in zip(
-            prepared, bulk_results
-        ):
-            if not record_id:
-                error = rejected.get(match)
-                result["failed"] += 1
-                self._fail(
+            for (key, _, workplace_eid), (match, record_id, created) in zip(
+                batch, bulk_results
+            ):
+                if not record_id:
+                    error = rejected.get(match)
+                    result["failed"] += 1
+                    self._fail(
+                        "customeraddress",
+                        workplace_eid,
+                        "upsert",
+                        str(error or "Dataverse rejected the record"),
+                        external_id=key,
+                        exc=error,
+                    )
+                    continue
+                if created:
+                    result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                self._note_success(workplace_eid, key, entity="customeraddress", external_id=key)
+                self.sync_logger.log_record_success(
                     "customeraddress",
-                    workplace_eid,
-                    "upsert",
-                    str(error or "Dataverse rejected the record"),
-                    external_id=key,
-                    exc=error,
+                    key,
+                    record_id,
+                    _operation(created, match in unchanged),
                 )
-                continue
-            if created:
-                result["created"] += 1
-            elif match in unchanged:
-                result["skipped"] += 1
-            else:
-                result["updated"] += 1
-            result["processed"] += 1
-            self._note_success(workplace_eid, key, entity="customeraddress", external_id=key)
-            self.sync_logger.log_record_success(
-                "customeraddress",
-                key,
-                record_id,
-                _operation(created, match in unchanged),
-            )
 
         return result
 
@@ -1288,13 +1386,22 @@ class DynamicSyncEngine:
             return result
 
         link_failures: list[tuple[str, BaseException]] = []
+        counted = {"linked": 0}
+
+        def before_batch(linked_so_far: int) -> None:
+            self.records_written += linked_so_far - counted["linked"]
+            counted["linked"] = linked_so_far
+            self._check_deadline("hierarchy")
+
         linked, failed = apply_updates(
             self.dataverse,
             updates,
             self.bulk_batch_size,
             match_field=account_key,
             failures=link_failures,
+            before_batch=before_batch,
         )
+        self.records_written += linked - counted["linked"]
         for child_eid, exc in link_failures:
             self._fail(
                 "account",
@@ -1463,6 +1570,7 @@ class DynamicSyncEngine:
 
         done = 0
         for batch in chunked(prepared, self.bulk_batch_size):
+            self._check_deadline("HCO relations", "affiliations", result)
             payloads = [item[2] for item in batch]
             try:
                 bulk_results, rejected, unchanged = self._bulk_upsert(
@@ -1676,6 +1784,7 @@ class DynamicSyncEngine:
 
         done = 0
         for batch in chunked(prepared, self.bulk_batch_size):
+            self._check_deadline("activity affiliations", "activity_affiliations", result)
             payloads = [item[2] for item in batch]
             try:
                 bulk_results, rejected, unchanged = self._bulk_upsert(
@@ -1961,6 +2070,7 @@ class DynamicSyncEngine:
         key_name = prepared[0][1]
         done = 0
         for batch in chunked(prepared, self.bulk_batch_size):
+            self._check_deadline("contacts", "contacts", result)
             payloads = [item[2] for item in batch]
             try:
                 bulk_results, rejected, unchanged = self._bulk_upsert("contacts", key_name, payloads)
@@ -2033,6 +2143,7 @@ class DynamicSyncEngine:
             "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
             "by_process_code": {"I": 0, "U": 0, "R": 0},
+            "unjoined": {"activities": 0, "individuals": 0},
         }
 
         workplaces = []
@@ -2147,18 +2258,29 @@ class DynamicSyncEngine:
                         workplace_index.get(workplace_eid),
                     )
                 )
-            if skipped:
-                logger.info(
-                    msg(
-                        "Contacts skipped outside contracted population",
-                        _ctx(self),
-                        records=skipped,
-                    )
-                )
+            result["unjoined"]["activities"] = skipped
             result["contacts"] = self._sync_hcps(
                 codebase,
                 dry_run=dry_run,
                 composed=composed,
+            )
+
+        # A contact is built from its INDIVIDUAL, main ACTIVITY and WORKPLACE
+        # results; OneKey sends them as separate results with the ACTIVITY's
+        # own individual and workplace empty (checked on UAT). A change that
+        # arrives without the other two in this window is not applied until
+        # the next full sync. Counted on the job so production shows how often.
+        result["unjoined"]["individuals"] = sum(
+            1 for eid in individuals if eid not in activities_by_individual
+        )
+        if any(result["unjoined"].values()):
+            logger.warning(
+                msg(
+                    "Delta changes not applied to contacts",
+                    _ctx(self, codbase=codebase),
+                    activities_without_individual_or_workplace=result["unjoined"]["activities"],
+                    individuals_without_activity=result["unjoined"]["individuals"],
+                )
             )
 
         if sync_activity_affiliations and all_activities:

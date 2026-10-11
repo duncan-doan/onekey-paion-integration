@@ -95,24 +95,17 @@ def main() -> int:
     try:
         rows = None
         if args.phase or args.dry_run:
-            from integration.retry_sync import PHASE_STEPS, fetch_pending_failures
+            from integration.retry_sync import fetch_pending_failures
 
+            # The phase is part of the query, so --limit counts its rows only.
             rows = fetch_pending_failures(
                 dataverse,
                 codebase=args.codbase,
                 job_id=args.job_id,
                 source_ids=source_ids or None,
+                steps=[args.phase] if args.phase else None,
                 limit=args.limit,
             )
-            if args.phase:
-                allowed = {
-                    (phase, entity)
-                    for name, phase, entity in PHASE_STEPS
-                    if name == args.phase
-                }
-                rows = [
-                    row for row in rows if (row["phase"], row["entity"]) in allowed
-                ]
         summary = retry_pending_failures(
             engine,
             codebase=args.codbase,

@@ -45,7 +45,9 @@ def parse_args():
         "else to where the last integration job stopped reading.",
     )
     parser.add_argument("--date-to", help="Delta end (YYYY-MM-DD). Defaults to today.")
-    parser.add_argument("--retry-limit", type=int, default=100, help="Pending failures per run")
+    parser.add_argument(
+        "--retry-limit", type=int, default=None, help="Pending failures per run (default 100)"
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--trigger",
@@ -56,7 +58,21 @@ def parse_args():
     parser.add_argument("--config-dir")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--quiet", "-q", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.full:
+        # A full sync reads the whole population and retries nothing.
+        ignored = [
+            flag
+            for flag, value in (
+                ("--date-from", args.date_from),
+                ("--date-to", args.date_to),
+                ("--retry-limit", args.retry_limit),
+            )
+            if value is not None
+        ]
+        if ignored:
+            parser.error(f"{', '.join(ignored)} cannot be used with --full")
+    return args
 
 
 def main() -> int:
@@ -73,28 +89,37 @@ def main() -> int:
         date_to=args.date_to,
         dry_run=args.dry_run,
         trigger=TRIGGER_BY_NAME[args.trigger],
-        retry_limit=args.retry_limit,
+        retry_limit=100 if args.retry_limit is None else args.retry_limit,
         config_dir=args.config_dir,
         bulk_batch_size=args.bulk_batch_size,
     )
-    retry = result.get("retry") or {}
-    delta = result.get("delta") or {}
     print("\n" + "=" * 60)
     print("SCHEDULED SYNC")
     print("=" * 60)
     print(f"Success: {result.get('success', False)}")
-    print(
-        "Retry:   "
-        f"selected={retry.get('selected', 0)} "
-        f"resolved={retry.get('resolved', 0)} "
-        f"pending={retry.get('pending', 0)} "
-        f"ignored={retry.get('ignored', 0)}"
-    )
-    if retry.get("jobs"):
-        print(f"Retry jobs: {', '.join(retry['jobs'])}")
-    if delta.get("job_id"):
-        print(f"Delta job:  {delta['job_id']} ({delta.get('trace_status', '')})")
-    print(f"Resolved by delta: {result.get('resolved_by_delta', 0)}")
+    full = result.get("full")
+    if full is not None:
+        # --full, or a delta for a codebase no job has read yet.
+        if result.get("promoted_to_full"):
+            print("No completed Full or Delta job yet: ran a full sync instead of the delta")
+        if full.get("job_id"):
+            print(f"Full job:   {full['job_id']} ({full.get('trace_status', '')})")
+        print(f"Resolved by full: {result.get('resolved_by_full', 0)}")
+    else:
+        retry = result.get("retry") or {}
+        delta = result.get("delta") or {}
+        print(
+            "Retry:   "
+            f"selected={retry.get('selected', 0)} "
+            f"resolved={retry.get('resolved', 0)} "
+            f"pending={retry.get('pending', 0)} "
+            f"ignored={retry.get('ignored', 0)}"
+        )
+        if retry.get("jobs"):
+            print(f"Retry jobs: {', '.join(retry['jobs'])}")
+        if delta.get("job_id"):
+            print(f"Delta job:  {delta['job_id']} ({delta.get('trace_status', '')})")
+        print(f"Resolved by delta: {result.get('resolved_by_delta', 0)}")
     print("=" * 60)
     return 0 if result.get("success") else 1
 

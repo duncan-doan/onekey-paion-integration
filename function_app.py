@@ -27,6 +27,9 @@ Optional:
     SYNC_DELTA_FROM  UTC start for every delta (2026-08-01), instead of where
                      the last job stopped reading; remove once covered
     SYNC_SKIP_UNCHANGED  false writes records that already match (default true)
+    SYNC_TIME_BUDGET_MINUTES  minutes a queued full sync or delta runs before
+                     it stops between batches and queues its next part
+                     (default 45, 0 off)
     SYNC_LOG_DIR     directory for sync log files and reports (default off)
 """
 
@@ -234,15 +237,18 @@ def _work(
     message: func.QueueMessage,
     poison: func.Out[str],
     delta: typing.Optional[func.Out[str]] = None,
+    more: typing.Optional[func.Out[str]] = None,
 ) -> None:
     """Run one delivery from the mode's queue; an exception lets Azure retry then poison it.
 
     Work that retrying cannot fix (a malformed message, a message for another
     queue, work that failed on its last allowed delivery) goes to the poison
     queue straight away. A retry that is over, done or poisoned, also puts its
-    codebase on ``delta``.
+    codebase on ``delta``. A full sync or delta that spent its time budget
+    puts its next part back on its own queue through ``more``.
     """
     from integration.queue_sync import (
+        OUTCOME_CONTINUED,
         OUTCOME_POISON,
         OUTCOME_SKIPPED,
         QUEUES,
@@ -286,6 +292,17 @@ def _work(
             item.codebase,
             QUEUES["delta"],
         )
+    if outcome.next_part:
+        more.set(outcome.next_part)
+        logging.info(
+            "scheduled_queue_continued queue=%s id=%s mode=%s codebase=%s part=%d written=%s",
+            queue,
+            message.id,
+            item.mode,
+            item.codebase,
+            item.part + 1,
+            (outcome.result or {}).get("records_written"),
+        )
     if outcome.status == OUTCOME_POISON:
         poison.set(body.decode("utf-8", errors="replace"))
         logging.error(
@@ -299,10 +316,13 @@ def _work(
         return
     ran = ran_mode(item, outcome.result)
     detail = (outcome.result or {}).get(ran) or {}
+    status = {OUTCOME_SKIPPED: "skipped", OUTCOME_CONTINUED: "paused"}.get(
+        outcome.status, "complete"
+    )
     logging.info(
         "scheduled_queue_%s queue=%s id=%s mode=%s ran=%s codebase=%s job=%s status=%s "
         "busy_job=%s",
-        "skipped" if outcome.status == OUTCOME_SKIPPED else "complete",
+        status,
         queue,
         message.id,
         item.mode,
@@ -315,6 +335,11 @@ def _work(
 
 
 @app.queue_output(
+    arg_name="more",
+    queue_name="onekey-full",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_output(
     arg_name="poison",
     queue_name="onekey-full-poison",
     connection="AzureWebJobsStorage",
@@ -324,9 +349,15 @@ def _work(
     queue_name="onekey-full",
     connection="AzureWebJobsStorage",
 )
-def scheduled_onekey_full_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
-    """Run one codebase's full sync, with FULL_MAX_DELIVERIES deliveries."""
-    _work("full", message, poison)
+def scheduled_onekey_full_worker(
+    message: func.QueueMessage, poison: func.Out[str], more: func.Out[str]
+) -> None:
+    """Run one codebase's full sync, with FULL_MAX_DELIVERIES deliveries.
+
+    A sync still running after SYNC_TIME_BUDGET_MINUTES stops between batches
+    and queues its next part on onekey-full (``more``).
+    """
+    _work("full", message, poison, more=more)
 
 
 @app.queue_output(
@@ -357,6 +388,11 @@ def scheduled_onekey_retry_worker(
 
 
 @app.queue_output(
+    arg_name="more",
+    queue_name="onekey-delta",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_output(
     arg_name="poison",
     queue_name="onekey-delta-poison",
     connection="AzureWebJobsStorage",
@@ -366,6 +402,12 @@ def scheduled_onekey_retry_worker(
     queue_name="onekey-delta",
     connection="AzureWebJobsStorage",
 )
-def scheduled_onekey_delta_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
-    """Pull one codebase's delta; Azure gives it maxDequeueCount deliveries."""
-    _work("delta", message, poison)
+def scheduled_onekey_delta_worker(
+    message: func.QueueMessage, poison: func.Out[str], more: func.Out[str]
+) -> None:
+    """Pull one codebase's delta; Azure gives it maxDequeueCount deliveries.
+
+    A delta that runs as a full sync (no job has read the codebase yet) can
+    outlast SYNC_TIME_BUDGET_MINUTES; it queues its next part on onekey-delta.
+    """
+    _work("delta", message, poison, more=more)

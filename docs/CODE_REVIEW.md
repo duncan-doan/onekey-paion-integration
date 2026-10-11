@@ -2,8 +2,9 @@
 
 Reviewed the OneKey and Dataverse clients, mapping/transformation, full and
 delta orchestration, retry tracing, queue workers, configuration, and tests.
-Concrete fixes are applied in this workspace. Scheduled delta synchronization
-still has a significant completeness issue described first below.
+Concrete fixes are applied in this workspace. Updated 12 October 2026 with
+measurements from UAT (Application Insights and read-only checks against
+OneKey and Dataverse); see **Third review: measured on UAT**.
 
 This review used offline tests, the local IQVIA reference PDFs, and official
 Microsoft documentation. It did not call either live service, verify the
@@ -15,18 +16,15 @@ several of the first round's fixes; see **Revisions after the second review**.
 
 | Priority | Finding and evidence | Impact and recommended next change |
 | --- | --- | --- |
-| High | Delta contact composition requires related ACTIVITY, INDIVIDUAL, and WORKPLACE records in the same change window. See [`_sync_delta_codebase`](../integration/dynamic_sync.py), especially the `if activities_by_individual` composition block. An offline INDIVIDUAL-only delta returns success with zero contact writes and no failure. The vendor contract makes this the normal case: an ACTIVITY result "is always served with its workplace and its individual", and creating an individual with an activity delivers only the activity and its workplace, with no separate INDIVIDUAL result (Developer Guide 6.13.9). | Name/classification updates, activity transfers, new HCPs and other independent changes can disappear after the watermark advances. First step: when no separate INDIVIDUAL or WORKPLACE result is in the window, compose the contact from the `individual` and `workplace` embedded in the ACTIVITY result. Beyond that, hydrate changed entities from a persisted contracted snapshot rather than using presence in a delta as proof of membership in the contracted population. |
-| Medium | The delta window starts 15 minutes before the previous window's end ([`WINDOW_OVERLAP`](../integration/scheduled_sync.py)), and the deltas run once a day at 00:00 UTC. OneKey dates an entity before the web service can serve it, after "a short but not constant time" (Developer Guide 6.13.7), and the guide recommends a refresh early in the morning and another at noon for population updates the nightly OneKey Connect job completes late (6.13.8). | A record dated more than 15 minutes before a nightly read but served only after it is read by no later delta, and waits for the monthly full sync. For example, dated 23:20 and served at 00:05: the 00:00 read is too early, and the next window starts at 23:45. Widen the overlap to several hours (re-reads are idempotent and skip-unchanged avoids the writes) and consider a second daily delta at noon UTC. |
-| Medium | [`_POLYMORPHIC_NAVIGATION`](../dataverse/client.py) maps the customer lookups but not `ts_fromid` (bound as `ts_FromID_account` / `ts_FromID_contact`). | With skip-unchanged on (the default), every `ts_affiliation` bulk upsert asks for `_ts_fromid_account_value` / `_ts_fromid_contact_value`, columns that do not exist. Dataverse answers 400, the client logs a warning and repeats the lookup without comparison, so affiliations, the largest table, are never skipped and each batch costs an extra failed request. Add `ts_fromid_account` and `ts_fromid_contact` → `ts_fromid`. |
+| High | Azure has `SYNC_SKIP_UNCHANGED=false` (checked 12 October), so every sync rewrites every record. Measured on UAT (Application Insights, 11 October): the WDE full sync took 171 minutes, of which contacts 112 min at 3.3 records/s and accounts 20 min at 7/s, through UpdateMultiple; the `$batch` tables ran at 27–30/s. Flex Consumption ends a running execution 60 minutes into a scale-in (WDE was killed at 60–91 minutes, three times). | Remove the setting or set it to `true`. A steady-state full sync then mostly reads: on UAT data 1,000/1,000 accounts and addresses, 1,500/1,500 contacts and 300/300 of each affiliation type already matched, and a 100-key lookup takes about 0.3 s, so WDE should take roughly 20–30 minutes. Longer runs (first loads, months with many changes) now stop after `SYNC_TIME_BUDGET_MINUTES` and continue as a new part; that also needs skip-unchanged on, and a run that pauses while it is off is poisoned with that reason. |
+| High | Delta contacts need the INDIVIDUAL, main ACTIVITY and WORKPLACE results in the same window ([`_sync_delta_codebase`](../integration/dynamic_sync.py)). Checked on UAT (90-day WUK window, 34,047 results): OneKey sends them as separate results, and an ACTIVITY's own `individual` and `workplace` objects are empty, so the vendor guide's "served with its workplace and its individual" (6.13.9) does not hold for this connector and cannot be used as a fallback. | What OneKey sends when only an individual changes is still unknown. Each delta job now records `unjoined` (`activities` without their individual or workplace, `individuals` without an activity) in `ts_phasecounts` and logs a warning, so production shows how often a contact change waits for the next full sync. If it happens, replay those IDs through the retry path (billed by-ID reads) or keep a contracted snapshot. |
 | High | [`active_job`](../integration/scheduled_sync.py) checks before creating a job; it does not acquire a lease. [`upsert_by_field`](../dataverse/client.py) and bulk upserts perform lookup followed by create. CLI runs can bypass the busy check. | Simultaneous workers can both start and create the same logical row. Use an atomic per-codebase lease and enforced alternate keys/native upserts. An immediate negative lookup after an ambiguous create also cannot prove that the original request will never commit. Existing schema/key claims in older documentation require deployment verification. |
+| Low | OneKey returns 250 records per refresh packet whatever is requested (measured), about 1.6 s per packet. With the old 1.0 s default `ONEKEY_PACKET_DELAY` (Azure does not set it), three parallel walks made over 60 calls a minute against the common 50-per-minute quota (START HERE 6.1.14); WDE's 11 October run hit 4 throttling waits of 30–300 s. | The default is now 2.5 s: three walks stay near 48 calls a minute, and one walk takes about 15 minutes for WDE instead of 12. With one worker at a time, 1.0 is safe. |
 | Medium | A population walk keeps its transaction only in memory. See [`iter_population`](../onekey/client.py). | Within a walk, a packet lost in transit is re-fetched by number (up to three) and a packet answered `success:false` is requested again, so these no longer fail the run. A run that dies mid-walk still starts again from the first packet, which for a full sync means re-reading the whole population. Persisting the transaction and last delivered packet would let a retried delivery resume. |
 | Medium | `AFF-007` onward in [`entity_mapping.csv`](../config/entity_mapping.csv) targets `ts_affiliationrole`; [`transform_activity_affiliation`](../integration/transform.py) and orchestration only write `ts_affiliation`. | Activity role rows are never persisted. An offline activity with TIH roles produces only account, contact, and affiliation writes. Add role creation/update and reconciliation using the configured lookup tables. |
 | Medium | [`_sync_addresses_impl`](../integration/dynamic_sync.py) receives one primary address per flattened HCO. Additional slots defined in [`entity_mapping.csv`](../config/entity_mapping.csv) have already been discarded by flattening. | Secondary addresses are lost. An offline two-address workplace writes only its first address. Iterate original address entries and construct each composite key before flattening. |
-| Medium | [`CatalogResolver.ensure`](../integration/lookup_sync.py) uses raw codes as stub labels, then upserts on a cache miss. | A failed preload or a concurrently added row can have its proper label overwritten by `HOS`/`01`. Find existing GUIDs without updating labels; use insert-only stub creation backed by a unique key. |
 | Medium | Empty source values and disappearing hierarchy/relationship entries commonly omit writes. | Existing Dataverse values and links can remain after the corresponding source data changes or disappears. Define authoritative fields and explicit clear/deactivate behavior. |
 | Medium | Population walks, flattened entities, indexes, composed HCP rows, and prepared payloads coexist in memory during full sync. | Memory scales with contracted population size. Measure peak RSS on a representative export, then spool/index packets and write bounded chunks while preserving phase dependencies. A wall-clock timeout alone does not control memory. |
-| Low | [`apply_updates`](../integration/hierarchy.py) falls back to one write per account on any UpdateMultiple error and continues past service errors. | During a Dataverse outage each hierarchy batch costs about three requests per account instead of stopping, unlike `bulk_upsert_by_field`, which stops at the first service error. Fall back only for record errors, or stop at the first single service failure. |
-| Low | Offline tests that build an engine without a log directory write `sync_*.log` files into the repo's `logs/`. | The folder is gitignored, but test runs mix with real run logs, so local logs cannot be trusted as evidence of live behavior. Give those tests a temporary `SyncLogger` directory. |
 
 Additional operational limits: job/failure tracing remains best effort if the
 initial job row cannot be created. Heartbeat writes use the same Dataverse
@@ -143,7 +141,7 @@ unlimited entitlement; verify the tenant allocation and usage reports. See
 **Verification**
 
 Run `.venv/bin/python -m pytest -q` for the full offline regression suite.
-Final result: **429 passed, 5 live tests skipped**. Python compilation and
+Final result: **510 passed, 5 live tests skipped**. Python compilation and
 the whitespace check with `cr-at-eol` (preserving existing CRLF files) passed.
 Regression coverage includes incomplete population streams, lost-packet
 recovery, `success:false` packet retries, capped retry hints and heartbeat
@@ -166,3 +164,25 @@ with an explicit `--live` flag and appropriate connector credentials.
 | `.env.example` requested 250 records per packet. | OneKey cuts a larger request to the cap, so a smaller request only adds packets and calls against the per-minute quota. | 1,000. |
 | `processCode` R was reported as needing replacement reconciliation. | The guide defines R as REFRESH (update or insert); the code's upsert was correct. | Description and log label corrected. |
 | The README and `onekey/auth.py` docstring dropped the live-verified authentication evidence. | It recorded a verified result (no auth → 401, Basic → 200). | Restored. |
+
+**Third review: measured on UAT (12 October 2026)**
+
+Every check was read-only: Application Insights queries, OneKey population
+reads, and Dataverse GETs through a client that refused any other method.
+
+| Finding | Evidence | Change |
+| --- | --- | --- |
+| Skip-unchanged never applied to affiliations | Dataverse answered 400 `Could not find a property named '_ts_fromid_account_value'`; with `ts_fromid` mapped, 300/300 HCO relations and 300/300 activity affiliations matched | `ts_fromid_account` / `ts_fromid_contact` added to `_POLYMORPHIC_NAVIGATION`. The two affiliation phases took 22 minutes of WDE's 171 |
+| Lookups made twice the round trips needed | A GET took 0.27 s for 50 keys, 0.28 s for 100 and 0.31 s for 150 (4.3 KB URL at 100) | 100 keys per lookup, with a 6,000-character cap on the filter for long keys |
+| 15-minute delta overlap | OneKey's delay before serving a change is "short but not constant" (6.13.7) | `WINDOW_OVERLAP` is 6 hours |
+| Catalog stub could overwrite a label | `ensure` upserted the raw code as the label on any cache miss | Looks the row up first and only creates it when the code is new |
+| Schema check reported outages as missing tables | Any error became `entity_not_found` | Only 403/404 fail the check; throttling and outages raise and the queue retries |
+| Hierarchy fallback during an outage | One write per account, three attempts each, continuing past service errors | Stops at the first single write that fails for a service reason; auth errors are not retried singly |
+| Log handlers left open | Each engine added a root `FileHandler` that was never removed | `SyncLogger.close()`, called when `engine_from_env` ends |
+| Delta contact changes dropped silently | Only an INFO line | `unjoined` counts on the job and a warning |
+| `run_dynamic_sync.py --dry-run` stopped at validation | `MockDataverse` had no `retrieve_multiple` | Added |
+| `retry_failed_sync.py --phase` could select nothing | `--limit` applied before the phase filter | The phase is part of the query |
+| `run_scheduled_sync.py` full runs | Printed delta fields only; date and retry flags silently ignored | Prints the full job; the flags are rejected with `--full` |
+| Tests wrote into `logs/` | One `sync_*.log` per run | Tests default `SYNC_LOG_DIR` to a temporary directory |
+| Full syncs cut off at 60 minutes | Flex scale-in; WDE needs hours on a first load | Queue workers stop between batches after `SYNC_TIME_BUDGET_MINUTES` (45) and queue the next part; poisoned if a part wrote nothing, if skip-unchanged is off, or after 12 parts |
+| OneKey quota with three workers | 1.0 s default pacing gave over 60 calls a minute | `ONEKEY_PACKET_DELAY` default 2.5 s |

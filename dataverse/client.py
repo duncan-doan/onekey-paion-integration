@@ -134,6 +134,11 @@ _POLYMORPHIC_NAVIGATION = {
     "customerid_contact": "customerid",
     "parentid_account": "parentid",
     "parentid_contact": "parentid",
+    # ts_affiliation.ts_fromid: an account (HCO-HCO) or a contact (HCP-HCO).
+    # Without these, the skip-unchanged read asks for a column that does not
+    # exist, Dataverse answers 400, and no affiliation is ever skipped.
+    "ts_fromid_account": "ts_fromid",
+    "ts_fromid_contact": "ts_fromid",
 }
 _BIND_BY_ID = re.compile(r"^/?\w+\(([0-9a-fA-F-]{36})\)$")
 _ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T")
@@ -243,9 +248,14 @@ class RequestStats:
 
 # Microsoft recommends 100–1000 targets per CreateMultiple/UpdateMultiple for
 # standard tables; there is no fixed record maximum (message size / timeout
-# bind). Keep lookups smaller to stay under OData URL length limits.
+# bind).
 DEFAULT_BULK_BATCH_SIZE = 100
-DEFAULT_LOOKUP_CHUNK_SIZE = 50
+# Values per lookup filter. On UAT a GET for 100 values takes about as long
+# as one for 50 (0.28 s against 0.27 s), so one lookup per bulk batch halves
+# the round trips of the existence check. _MAX_FILTER_CHARS keeps a filter of
+# long keys (composite affiliation keys) well inside URL length limits.
+DEFAULT_LOOKUP_CHUNK_SIZE = 100
+_MAX_FILTER_CHARS = 6000
 
 # entity_set -> (logical_name, primary_id_attribute)
 _ENTITY_META = {
@@ -282,6 +292,27 @@ def chunked(items, size):
     size = max(1, int(size))
     for start in range(0, len(items), size):
         yield items[start:start + size]
+
+
+def _filter_chunks(field, values, size):
+    """Yield ``field eq 'value' or ...`` filters of at most ``size`` values.
+
+    A filter also stops growing at _MAX_FILTER_CHARS, so long values make
+    smaller chunks rather than an over-long URL.
+    """
+    size = max(1, int(size))
+    clauses, length = [], 0
+    for value in values:
+        clause = f"{field} eq '{escape_odata(value)}'"
+        if clauses and (
+            len(clauses) >= size or length + 4 + len(clause) > _MAX_FILTER_CHARS
+        ):
+            yield " or ".join(clauses)
+            clauses, length = [], 0
+        length += len(clause) + (4 if clauses else 0)
+        clauses.append(clause)
+    if clauses:
+        yield " or ".join(clauses)
 
 
 class DataverseClient:
@@ -660,10 +691,7 @@ class DataverseClient:
                 columns.append(col)
 
         found = {}
-        for chunk in chunked(unique, chunk_size):
-            filter_expr = " or ".join(
-                f"{match_field} eq '{escape_odata(v)}'" for v in chunk
-            )
+        for filter_expr in _filter_chunks(match_field, unique, chunk_size):
             # No $top: a value already stored twice would take a second slot
             # and push another value's row off the page; that value would then
             # look missing and be created again.

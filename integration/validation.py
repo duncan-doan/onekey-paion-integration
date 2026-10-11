@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from dataverse.exceptions import DataverseHTTPError
+
 if TYPE_CHECKING:
     from .dynamic_mapping import MappingConfig, FieldMapping, EntityDefinition
 
@@ -380,14 +382,21 @@ class DataverseValidator:
         self._metadata_cache = {}
     
     def validate_entity_exists(self, entity_set: str) -> bool:
-        """Check if an entity set exists in Dataverse."""
+        """Check if an entity set exists in Dataverse.
+
+        False only when Dataverse says the set is missing (404) or closed to
+        this user (403). Throttling, an outage or a lost connection raises, so
+        the run fails as a retryable error rather than a schema problem.
+        """
         try:
             # One row is enough to prove the set exists. top=0 is falsy, so
             # retrieve_multiple sent no $top and paged through the whole table.
             self.client.retrieve_multiple(entity_set, top=1, max_records=1)
             logger.debug("Entity %s exists in Dataverse", entity_set)
             return True
-        except Exception as e:
+        except DataverseHTTPError as e:
+            if e.status_code not in (403, 404):
+                raise
             logger.warning("Entity %s not found or inaccessible: %s", entity_set, e)
             return False
     

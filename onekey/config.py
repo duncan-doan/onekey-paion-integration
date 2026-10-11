@@ -38,8 +38,11 @@ class OneKeyConfig:
     timeout: float = 30.0
     max_retries: int = 8
     verify_ssl: bool = True
-    # Seconds to wait between successful population packets (rate-limit hygiene).
-    packet_delay: float = 1.0
+    # Seconds to wait between successful population packets. OneKey allows
+    # about 50 calls a minute per endpoint, shared by every worker, and a
+    # packet takes ~1.6 s: with 2.5 s three parallel walks stay near 48 a
+    # minute (1.0 s gave ~58 and throttle waits of 30-300 s each).
+    packet_delay: float = 2.5
     # Requested /pop/refreshMyOnekey packet size (protocol range 100-2000).
     # Connector-specific backend caps can lower the actual packet size.
     page_size: int = 1000
@@ -123,7 +126,7 @@ class OneKeyConfig:
             max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "8")),
             verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "true").lower()
             not in ("0", "false", "no"),
-            packet_delay=float(os.environ.get(f"{prefix}PACKET_DELAY", "1.0")),
+            packet_delay=float(os.environ.get(f"{prefix}PACKET_DELAY", "2.5")),
             page_size=int(os.environ.get(f"{prefix}PAGE_SIZE", "1000")),
         )
 

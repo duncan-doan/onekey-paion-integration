@@ -171,6 +171,15 @@ def test_pending_filter_excludes_running_parent_and_max_attempts():
     assert "ts_sourceid eq 'WUKE00001259'" in text
 
 
+def test_pending_filter_can_keep_one_step():
+    # retry_failed_sync --phase: filtered in the query, so --limit counts only
+    # that step's rows instead of the oldest rows of any step.
+    text = pending_filter(steps=["affiliations"])
+    assert f"(ts_phase eq {PHASE_HCO} and ts_entitytype eq {ENTITY_AFFILIATION})" in text
+    assert f"ts_entitytype eq {ENTITY_ACCOUNT})" not in text
+    assert pending_filter(steps=["nope"]).endswith("ts_phase eq -1")
+
+
 def test_fetch_normalizes_parent_codebase():
     dataverse = FakeDataverse(
         rows=[
@@ -476,7 +485,7 @@ def test_delta_window_starts_from_last_covering_job():
         ]
     )
     iso_from, iso_to = delta_window(dataverse, ["WUK"], date_to="2026-10-02")
-    assert iso_from == "2026-09-29T23:45:04Z"
+    assert iso_from == "2026-09-29T18:00:04Z"  # less WINDOW_OVERLAP (6 h)
     assert iso_to == "2026-10-02T23:59:59Z"
     entity_set, query = dataverse.queries[0]
     assert entity_set == JOBS

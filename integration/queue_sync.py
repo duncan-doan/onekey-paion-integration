@@ -67,9 +67,16 @@ FULL_MAX_DELIVERIES = 2
 # for the retry to end, so one more delivery is enough.
 RETRY_MAX_DELIVERIES = 2
 
+# A full sync or delta that spends its time budget (SYNC_TIME_BUDGET_MINUTES)
+# stops between batches and queues the same work as part N+1; skip-unchanged
+# lets the next part pass quickly over what earlier parts wrote. Past this
+# many parts, or after a part that wrote nothing, the work is poisoned.
+MAX_PARTS = 12
+
 OUTCOME_DONE = "done"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_POISON = "poison"
+OUTCOME_CONTINUED = "continued"
 
 # A run_id goes into log lines and ts_name, so it holds no spaces.
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
@@ -111,6 +118,9 @@ class SyncQueueMessage:
     # (ISO UTC). Unset on manual messages.
     run_id: str | None = None
     enqueued_at: str | None = None
+    # 1 for queued work; N+1 for the continuation of a part that spent its
+    # time budget. Left out of the body while it is 1.
+    part: int = 1
     version: int = MESSAGE_VERSION
 
     def __post_init__(self) -> None:
@@ -134,11 +144,16 @@ class SyncQueueMessage:
             raise QueueMessageError(f"Invalid run_id: {self.run_id!r}")
         if self.enqueued_at is not None and _parse_utc(self.enqueued_at) is None:
             raise QueueMessageError(f"Invalid enqueued_at: {self.enqueued_at!r}")
+        if isinstance(self.part, bool) or not isinstance(self.part, int) or self.part < 1:
+            raise QueueMessageError(f"Invalid part: {self.part!r}")
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "codebase", codebase)
 
     def encode(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
+        body = asdict(self)
+        if body["part"] == 1:
+            del body["part"]  # first parts read as before, so a rollback keeps them
+        return json.dumps(body, separators=(",", ":"), sort_keys=True)
 
     @classmethod
     def decode(
@@ -160,6 +175,7 @@ class SyncQueueMessage:
                 "choices",
                 "run_id",
                 "enqueued_at",
+                "part",
                 "version",
             }
             unknown = set(payload) - allowed
@@ -185,6 +201,8 @@ class WorkOutcome:
     reason: str | None = None
     # Encoded message for onekey-delta, once a retry is over.
     next_delta: str | None = None
+    # Encoded continuation for the same queue, after a part spent its budget.
+    next_part: str | None = None
 
 
 def _parse_utc(value: str) -> datetime | None:
@@ -255,6 +273,23 @@ def delta_after(item: SyncQueueMessage) -> str:
     ).encode()
 
 
+def continuation_after(item: SyncQueueMessage) -> str:
+    """The next part of work whose time budget ran out, for the same queue.
+
+    It keeps the run, so the run's total time includes every part.
+    """
+    return SyncQueueMessage(
+        mode=item.mode,
+        codebase=item.codebase,
+        date_to=item.date_to,
+        retry_limit=item.retry_limit,
+        choices=item.choices,
+        run_id=item.run_id,
+        enqueued_at=item.enqueued_at,
+        part=item.part + 1,
+    ).encode()
+
+
 def run_progress(
     item: SyncQueueMessage, started_at: datetime, finished_at: datetime
 ) -> dict | None:
@@ -285,6 +320,7 @@ def dispatch(message: SyncQueueMessage) -> dict:
     delta for a codebase with no completed job runs as a full sync
     (``promoted_to_full`` in the result).
     """
+    from integration.env import time_budget_seconds
     from integration.scheduled_sync import (
         IF_BUSY_RAISE,
         IF_BUSY_SKIP,
@@ -308,8 +344,9 @@ def dispatch(message: SyncQueueMessage) -> dict:
             if_busy=IF_BUSY_RAISE if message.mode == "full" else IF_BUSY_SKIP,
             sync_choices=message.choices,
             run_id=message.run_id,
+            time_budget=time_budget_seconds(),
         )
-    if result.get("skipped"):
+    if result.get("skipped") or result.get("paused"):
         return result
     if not result.get("success"):
         ran = ran_mode(message, result)
@@ -394,4 +431,46 @@ def handle_message(
         raise
     if result.get("skipped"):
         return WorkOutcome(OUTCOME_SKIPPED, item=item, result=result)
+    if result.get("paused"):
+        return _continue(item, result)
     return WorkOutcome(OUTCOME_DONE, item=item, result=result, next_delta=next_delta)
+
+
+def _continue(item: SyncQueueMessage, result: dict) -> WorkOutcome:
+    """Queue the next part of paused work, or poison it when it cannot finish.
+
+    A part that wrote nothing would only repeat itself: the OneKey walk alone
+    may outlast the budget, or every write is failing. Each part also re-reads
+    OneKey, so MAX_PARTS caps how long a run can keep coming back. Without
+    skip-unchanged every part would rewrite the records the first one wrote,
+    and never reach the rest.
+    """
+    from integration.env import skip_unchanged
+
+    written = int(result.get("records_written") or 0)
+    if not skip_unchanged():
+        reason = (
+            f"part {item.part} spent its time budget and SYNC_SKIP_UNCHANGED is off, "
+            "so a next part would rewrite the same records; turn it on to continue"
+        )
+    elif written == 0:
+        reason = (
+            f"part {item.part} spent its time budget without writing a record; "
+            "raise SYNC_TIME_BUDGET_MINUTES or run it from the CLI"
+        )
+    elif item.part >= MAX_PARTS:
+        reason = f"still unfinished after {item.part} parts"
+    else:
+        logger.warning(
+            "Queue work paused: mode=%s codebase=%s part=%d written=%d; queuing part %d",
+            item.mode,
+            item.codebase,
+            item.part,
+            written,
+            item.part + 1,
+        )
+        return WorkOutcome(
+            OUTCOME_CONTINUED, item=item, result=result, next_part=continuation_after(item)
+        )
+    logger.error("Queue work stopped: mode=%s codebase=%s %s", item.mode, item.codebase, reason)
+    return WorkOutcome(OUTCOME_POISON, item=item, result=result, reason=reason)

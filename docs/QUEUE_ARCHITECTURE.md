@@ -134,6 +134,7 @@ stateDiagram-v2
     [*] --> Visible: timer, retry worker or manual put
     Visible --> Hidden: an instance takes it, dequeue count + 1
     Hidden --> Deleted: worker returned, done or skipped
+    Hidden --> Deleted: time budget spent, next part queued as a new message
     Hidden --> Visible: worker raised, visible again after 30 min
     Hidden --> Visible: instance died, lease expires within about 10 min
     Hidden --> Poison: malformed, wrong queue, or a full sync or retry failed twice
@@ -148,11 +149,33 @@ stateDiagram-v2
 | Retry failed | worker | Retried once, while the delta waits; on the 2nd failed delivery the worker writes it to `onekey-retry-poison` itself (`RETRY_MAX_DELIVERIES`) and queues the delta anyway. Its rows stay Pending for the next run |
 | Full sync failed | worker | Retried once; on the 2nd failed delivery the worker writes it to `onekey-full-poison` itself (`FULL_MAX_DELIVERIES`), because each retry repeats hours of work |
 | Full sync, country busy | worker raises `SyncBusy` | Visible again after 30 min; counts as a delivery |
+| Full sync or delta still running after `SYNC_TIME_BUDGET_MINUTES` | worker | Stops between batches, finishes its job as not covering its window, and queues part N+1 on its own queue; the message is deleted. See [Time budget and continuations](#time-budget-and-continuations) |
 | Malformed message, or a `mode` for another queue | worker | Straight to the poison queue; retrying cannot fix it |
 | Instance killed mid-run (restart, deployment, scale-in, 12 h timeout) | nobody | Lease expires, message reappears, another instance runs it from the first phase |
 
 `maxDequeueCount` and `visibilityTimeout` in `host.json` apply to all three
 queues; the per-queue limits above live in `integration/queue_sync.py`.
+
+### Time budget and continuations
+
+Flex Consumption ends a running execution 60 minutes into a scale-in, and a
+large country's first load writes for hours. So a full sync or delta from the
+queue stops itself after `SYNC_TIME_BUDGET_MINUTES` (default 45), always
+between two batches, leaving time to finish the batch and the job record:
+
+1. The job ends Partially Succeeded with `<country>: paused, time budget spent
+   before a <phase> batch` in `ts_errorsummary`, so it does not cover its window.
+2. The worker queues the same message with `"part": N+1` on its own queue
+   (`scheduled_queue_continued` in the log). It keeps the run's `run_id`, so
+   the run's total time covers every part.
+3. The next part reads OneKey again and goes through the phases again. With
+   `SYNC_SKIP_UNCHANGED` on, what earlier parts wrote is only read and
+   compared, so it gets past them in minutes and writes the rest.
+
+A part is poisoned instead of continued when it wrote nothing (the OneKey walk
+alone outlasted the budget), when `SYNC_SKIP_UNCHANGED` is off (every part
+would rewrite the same records), or after `MAX_PARTS` (12) parts. A
+steady-state monthly full sync, which mostly skips, should finish in one part.
 
 ## Instances and scaling
 
@@ -270,7 +293,8 @@ parent hierarchy, HCO–HCO affiliations, HCP contacts, HCP–HCO affiliations.
 2. App setting `SYNC_DELTA_FROM`
 3. Where the last Full or Delta job of the country that covered its window
    stopped reading (the earlier of `ts_watermarkto` and `ts_startedon`), less
-   15 minutes
+   6 hours (`WINDOW_OVERLAP`): OneKey dates a change before it can serve it,
+   after a delay that is not constant
 4. No such job: a **full sync** runs instead (logged as `mode=delta ran=full`)
 
 The window ends when the delta worker runs, after the retry.
@@ -289,7 +313,9 @@ The window ends when the delta worker runs, after the retry.
 | `ONEKEY_CODBASE` | `WUK,WDE,WNL,WDK,WNO,WSE,WFI` | Countries the timers enqueue |
 | `SYNC_SCHEDULE` | `true` | Timers enqueue; `false` stops them |
 | `SYNC_DELTA_FROM` | unset | Fixed delta start for every country while set |
-| `SYNC_SKIP_UNCHANGED` | `true` | Records that already hold their values are not written |
+| `SYNC_SKIP_UNCHANGED` | `true` | Records that already hold their values are not written. Needed for continuations |
+| `SYNC_TIME_BUDGET_MINUTES` | `45` | A queued full sync or delta stops between batches after this long and queues its next part; `0` turns it off |
+| `ONEKEY_PACKET_DELAY` | `2.5` | Seconds between OneKey packets; keeps three parallel walks under OneKey's ~50 calls a minute |
 
 Changing an app setting restarts the app, which stops any sync that is running.
 
@@ -384,6 +410,24 @@ traces
 | order by run desc
 ```
 
+### Delta contact changes not applied
+
+A delta writes a contact only when the individual, its main activity and the
+workplace all came in its window. Each delta job records the rest in
+`ts_phasecounts` as `"unjoined":{"activities":…,"individuals":…}` and logs a
+warning. Watch it for a couple of weeks before deciding whether those changes
+need replaying (they otherwise wait for the next monthly full sync):
+
+```kusto
+traces
+| where timestamp > ago(14d)
+| where message startswith "Delta changes not applied to contacts"
+| extend codebase = extract(@"codbase=(\w+)", 1, message),
+         activities = toint(extract(@"activities_without_individual_or_workplace=(\d+)", 1, message)),
+         individuals = toint(extract(@"individuals_without_activity=(\d+)", 1, message))
+| summarize deltas = count(), activities = sum(activities), individuals = sum(individuals) by codebase
+```
+
 ### Moving from `onekey-queue`
 
 Before this layout, one worker read `onekey-queue`. Nothing reads it now. Before
@@ -394,7 +438,9 @@ bindings create the new queues on first use.
 
 ## Known limits
 
-- A retried run starts again from the first phase; there is no phase resume.
+- A part, or a run retried after a failure, starts again from the OneKey walk
+  and the first phase; skip-unchanged makes the repeated phases cheap, but the
+  walk (about 15 minutes for WDE) is read again each time.
 - A retry whose instance is killed on every delivery is poisoned by Azure
   without running the worker, so it queues no delta. The next day's delta
   starts from the last covering job, so no window is lost.

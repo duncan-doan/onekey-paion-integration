@@ -376,7 +376,9 @@ def test_search_needs_at_least_one_criterion():
 # -- population paging ----------------------------------------------------
 
 
-def test_iter_population_walks_packets_until_complete():
+def test_iter_population_walks_packets_until_complete(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("onekey.client.time.sleep", sleeps.append)
     pages = [
         FakeResponse(
             200,
@@ -403,6 +405,8 @@ def test_iter_population_walks_packets_until_complete():
     assert second["transactionUniqueIdentifier"] == "tx1"
     # Dropping codBase on a continuation makes OneKey answer 403.
     assert second["codBase"] == "WDE"
+    # Packets are paced to stay under OneKey's per-minute quota.
+    assert sleeps == [session.config.packet_delay]  # between the two packets
 
 
 def test_iter_population_stops_at_max_records():

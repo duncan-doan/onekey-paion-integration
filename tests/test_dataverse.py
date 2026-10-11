@@ -16,7 +16,7 @@ from dataverse import (
     TokenProvider,
     escape_odata,
 )
-from dataverse.client import MAX_RETRY_AFTER_SECONDS
+from dataverse.client import DEFAULT_LOOKUP_CHUNK_SIZE, MAX_RETRY_AFTER_SECONDS
 from integration import (
     ACCOUNT_KEY_FIELD,
     CONTACT_KEY_FIELD,
@@ -594,8 +594,9 @@ def test_batch_rejects_more_than_the_dataverse_limit_before_sending():
 def test_batch_upserts_split_at_the_dataverse_batch_limit():
     records = [{"ts_externalid": str(index), "line1": "Updated"} for index in range(1001)]
     existing = [{"ts_externalid": str(index), "customeraddressid": str(index)} for index in range(1001)]
+    step = DEFAULT_LOOKUP_CHUNK_SIZE
     client = make_client([
-        *[FakeResponse(200, {"value": existing[start:start + 50]}) for start in range(0, 1001, 50)],
+        *[FakeResponse(200, {"value": existing[start:start + step]}) for start in range(0, 1001, step)],
         batch_response(*[(204, None, None)] * 1000),
         batch_response((204, None, None)),
     ])
@@ -1206,6 +1207,51 @@ def test_a_customer_lookup_compares_by_its_column():
     assert skipped == {"I1"}
     assert "_parentcustomerid_value" in client._session.calls[0]["params"]["$select"]
     assert len(client._session.calls) == 1  # nothing written
+
+
+@pytest.mark.parametrize("target", ["account", "contact"])
+def test_an_affiliation_from_lookup_compares_by_ts_fromid(target):
+    # ts_fromid is one lookup to accounts or contacts. Read back as
+    # _ts_fromid_<target>_value, a column that does not exist, Dataverse
+    # answered 400 and no affiliation was ever skipped.
+    source = "AAAAAAAA-0000-0000-0000-000000000001"
+    workplace = "BBBBBBBB-0000-0000-0000-000000000002"
+    client = make_client([
+        FakeResponse(200, {"value": [{
+            "ts_externalid": "A1", "ts_affiliationid": "aff-1",
+            "_ts_fromid_value": source.lower(), "_ts_toid_value": workplace.lower(),
+        }]}),
+    ])
+    skipped = set()
+    client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid",
+        [{"ts_externalid": "A1",
+          f"ts_FromID_{target}@odata.bind": f"/{target}s({source})",
+          "ts_ToID@odata.bind": f"/accounts({workplace})"}],
+        fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert skipped == {"A1"}
+    select = client._session.calls[0]["params"]["$select"].split(",")
+    assert "_ts_fromid_value" in select
+    assert len(client._session.calls) == 1  # nothing written
+
+
+def test_lookups_send_100_values_per_request():
+    client = make_client([FakeResponse(200, {"value": []}) for _ in range(3)])
+    client.find_many_by_field("accounts", "ts_externalid", [f"W{n}" for n in range(250)])
+    filters = [call["params"]["$filter"] for call in client._session.calls]
+    assert [f.count(" eq ") for f in filters] == [100, 100, 50]
+
+
+def test_long_lookup_values_make_smaller_requests():
+    long_key = "X" * 200
+    values = [f"{long_key}{n:03d}" for n in range(100)]
+    client = make_client([FakeResponse(200, {"value": []}) for _ in range(10)])
+    client.find_many_by_field("ts_affiliations", "ts_externalid", values)
+    filters = [call["params"]["$filter"] for call in client._session.calls]
+    assert len(filters) > 1
+    assert all(len(f) <= 6000 for f in filters)
+    assert sum(f.count(" eq ") for f in filters) == 100
 
 
 def test_skip_unchanged_is_off_unless_asked():

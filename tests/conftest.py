@@ -3,7 +3,9 @@
 Live API calls require an explicit --live flag, even when credentials exist.
 """
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,10 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "live: calls the real OneKey API")
+    # Engines built without a log directory write sync_*.log files; keep them
+    # out of the repo's logs/, where they would pass for real run logs. Tests
+    # that check the log directory set SYNC_LOG_DIR themselves.
+    os.environ.setdefault("SYNC_LOG_DIR", tempfile.mkdtemp(prefix="onekey-test-logs-"))
     if config.getoption("--live"):
         from integration import load_env
 

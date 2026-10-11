@@ -83,10 +83,14 @@ def pending_filter(
     codebase: str | None = None,
     job_id: str | None = None,
     source_ids: list[str] | None = None,
+    steps: list[str] | None = None,
     max_attempts: int = MAX_RETRY_ATTEMPTS,
     now: datetime | None = None,
 ) -> str:
     """OData filter for retryable failures whose parent job is not running.
+
+    ``steps`` keeps only the rows of those PHASE_STEPS names (``contacts``,
+    ``hierarchy``…), so a limit counts rows of those steps alone.
 
     Nothing marks a killed job Abandoned, so a parent stuck at Running with a
     heartbeat older than STALE_JOB_AFTER counts as finished; otherwise its
@@ -127,6 +131,14 @@ def pending_filter(
         )
         if quoted:
             parts.append(f"({quoted})")
+    if steps:
+        pairs = " or ".join(
+            f"(ts_phase eq {phase} and ts_entitytype eq {entity})"
+            for name, phase, entity in PHASE_STEPS
+            if name in steps
+        )
+        # An unknown step name matches nothing rather than everything.
+        parts.append(f"({pairs})" if pairs else "ts_phase eq -1")
     return " and ".join(parts)
 
 
@@ -136,9 +148,10 @@ def fetch_pending_failures(
     codebase: str | None = None,
     job_id: str | None = None,
     source_ids: list[str] | None = None,
+    steps: list[str] | None = None,
     limit: int = 100,
 ) -> list[dict]:
-    """Return normalized pending failure rows, oldest first."""
+    """Return normalized pending failure rows, oldest first (``steps``: see pending_filter)."""
     rows = dataverse.retrieve_multiple(
         FAILURES,
         select=[
@@ -153,7 +166,7 @@ def fetch_pending_failures(
             "ts_retrystatus",
         ],
         filter=pending_filter(
-            codebase=codebase, job_id=job_id, source_ids=source_ids
+            codebase=codebase, job_id=job_id, source_ids=source_ids, steps=steps
         ),
         order_by="ts_occurredon asc",
         expand=(

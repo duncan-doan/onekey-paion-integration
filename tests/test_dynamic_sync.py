@@ -270,3 +270,96 @@ def test_skip_unchanged_can_be_switched_off(tmp_path, monkeypatch):
 
     assert set(dataverse.skip_flags) == {False}
     assert result["accounts"]["skipped"] == 0
+
+
+def test_the_cli_dry_run_mock_passes_the_schema_check(tmp_path):
+    # scripts/run_dynamic_sync.py --dry-run uses MockDataverse. Without
+    # retrieve_multiple every entity looked missing and the run stopped at
+    # validation, before any phase.
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "run_dynamic_sync.py"
+    spec = importlib.util.spec_from_file_location("run_dynamic_sync", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    engine, onekey = _engine(tmp_path, module.MockDataverse())
+    result = engine.sync_full(["WUK"], dry_run=True, sync_picklists=False)
+    assert result["success"] is True
+    assert "validation" not in result
+    assert result["accounts"]["processed"] == 2
+
+
+def test_a_delta_counts_contact_changes_it_cannot_apply(tmp_path):
+    # OneKey sends INDIVIDUAL, ACTIVITY and WORKPLACE as separate results. A
+    # contact is only written when all three are in the window, so the rest
+    # is counted on the job instead of disappearing into an INFO line.
+    records = [
+        POPULATION[0],  # WUKH1
+        {"entityType": "INDIVIDUAL", "individual": {"individualEid": "WUKI9", "lastName": "Alone"}},
+        {
+            "entityType": "ACTIVITY",
+            "activity": {"activityEid": "WUKA2", "individualEid": "WUKI2",
+                         "workplaceEid": "WUKH1", "isMainActivity": True},
+        },
+    ]
+    dataverse = BulkDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records)
+    result = engine.sync_delta(
+        ["WUK"], "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", sync_picklists=False
+    )
+    assert result["unjoined"] == {"activities": 1, "individuals": 1}
+    assert result["contacts"]["processed"] == 0
+    final = dataverse.updated[-1][2]
+    assert '"unjoined":{"activities":1,"individuals":1}' in final["ts_phasecounts"]
+
+
+# -- time budget -----------------------------------------------------------
+
+
+def _workplaces(count):
+    return [
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": f"WUKH{n:04d}", "officialName": f"H{n}"}}
+        for n in range(count)
+    ]
+
+
+def test_a_run_past_its_time_budget_stops_between_batches(tmp_path, monkeypatch):
+    # Flex Consumption ends an execution 60 minutes into a scale-in; a queued
+    # run stops cleanly first, keeps what it wrote, and does not cover its
+    # window, so the continuation (or the next delta) reads it again.
+    from integration.scheduled_sync import covered_window
+
+    clock = [0.0]
+    monkeypatch.setattr("integration.dynamic_sync.time.monotonic", lambda: clock[0])
+    dataverse = BulkDataverse()
+    original = dataverse.bulk_upsert_by_field
+
+    def slow_upsert(*args, **kwargs):
+        clock[0] += 100  # each batch takes 100 s
+        return original(*args, **kwargs)
+
+    dataverse.bulk_upsert_by_field = slow_upsert
+    engine, _ = _engine(tmp_path, dataverse, _workplaces(250))
+    engine.bulk_batch_size = 100
+    engine.deadline = 150  # spent during the second batch
+
+    result = engine.sync_full(["WUK"], sync_picklists=False)
+
+    assert result["paused"] is True
+    assert result["accounts"]["processed"] == 200  # two batches, the third never sent
+    assert result["records_written"] == 200
+    assert len([u for u in dataverse.upserts if u[0] == "accounts"]) == 2
+    assert result["contacts"]["processed"] == 0  # later phases did not start
+    final = dataverse.updated[-1][2]
+    assert "WUK: paused" in final["ts_errorsummary"]
+    assert not covered_window(final)
+
+
+def test_without_a_deadline_the_run_finishes(tmp_path):
+    engine, _ = _engine(tmp_path, BulkDataverse(), _workplaces(250))
+    engine.bulk_batch_size = 100
+    result = engine.sync_full(["WUK"], sync_picklists=False)
+    assert "paused" not in result
+    assert result["accounts"]["processed"] == 250

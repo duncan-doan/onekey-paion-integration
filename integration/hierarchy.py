@@ -53,7 +53,6 @@ def resolve_accounts(
         match_field,
         eids,
         select=[match_field, "accountid", "_parentaccountid_value"],
-        chunk_size=50,
     )
 
 
@@ -122,16 +121,31 @@ def build_updates(
     return updates, stats
 
 
+def _rejects_record(exc: DataverseHTTPError) -> bool:
+    """True for a 4xx about the account itself (a loop, a deleted row)."""
+    status = exc.status_code
+    return status is not None and 400 <= status < 500 and status not in (401, 403, 429)
+
+
 def apply_updates(
     dataverse: "DataverseClient",
     updates: list[dict],
     batch_size: int,
     match_field: str | None = None,
     failures: list | None = None,
+    before_batch=None,
 ) -> tuple[int, int]:
+    """Link each account to its parent; ``before_batch`` runs before every batch.
+
+    ``before_batch`` gets the number of links written so far. The sync engine
+    passes its time-budget check, so a long first load stops between batches
+    rather than mid-request.
+    """
     updated = failed = 0
     total = len(updates)
     for i, batch in enumerate(chunked(updates, batch_size), 1):
+        if before_batch is not None:
+            before_batch(updated)
         payloads = [
             {
                 "accountid": row["accountid"],
@@ -150,6 +164,8 @@ def apply_updates(
                 total,
             )
         except DataverseHTTPError as exc:
+            if exc.status_code in (401, 403):
+                raise  # one write at a time cannot fix authentication
             logger.warning(
                 "UpdateMultiple failed for hierarchy batch %d, linking one by one: "
                 "records=%d status=%s error=%r",
@@ -171,6 +187,11 @@ def apply_updates(
                     )
                     updated += 1
                 except DataverseHTTPError as single_exc:
+                    if not _rejects_record(single_exc):
+                        # Throttling or an outage: every remaining link would
+                        # fail the same way, three attempts each. Stop here;
+                        # the job does not cover its window, so it runs again.
+                        raise
                     failed += 1
                     label = (
                         row.get(match_field)

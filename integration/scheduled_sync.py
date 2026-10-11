@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -57,10 +58,13 @@ from integration.retry_sync import resolve_pending_for_ids, retry_pending_failur
 
 logger = logging.getLogger(__name__)
 
-# Start each window this far before the previous window's end. OneKey stamps
-# changes with its own clock and upserts are idempotent, so the overlap only
-# re-reads a few records.
-WINDOW_OVERLAP = timedelta(minutes=15)
+# Start each window this far before the previous window's end. OneKey dates a
+# change before its web service can serve it, after "a short but not constant
+# time" (Developer Guide 6.13.7): a record dated more than this before a read
+# but served after it is read by no later delta, only by the next full sync.
+# Re-reading costs little: upserts are idempotent, and with skip-unchanged a
+# record already in Dataverse is only read, not written.
+WINDOW_OVERLAP = timedelta(hours=6)
 
 # Recent Succeeded/Partially Succeeded jobs inspected for the window start.
 _START_SCAN = 50
@@ -463,7 +467,15 @@ def run_delta(
         "success": bool(delta.get("success")),
         "delta": delta,
         "resolved_by_delta": resolved,
+        **_pause_fields(delta),
     }
+
+
+def _pause_fields(sync_result: dict) -> dict:
+    """``paused`` and ``records_written`` for a run that spent its time budget."""
+    if not sync_result.get("paused"):
+        return {}
+    return {"paused": True, "records_written": int(sync_result.get("records_written") or 0)}
 
 
 def run_full(
@@ -494,6 +506,7 @@ def run_full(
         "success": bool(full.get("success")),
         "full": full,
         "resolved_by_full": resolved,
+        **_pause_fields(full),
     }
 
 
@@ -580,6 +593,7 @@ def run_from_env(
     if_busy: str | None = None,
     sync_choices: bool = True,
     run_id: str | None = None,
+    time_budget: float | None = None,
 ) -> dict:
     """Build the OneKey and Dataverse clients from the environment and run the job.
 
@@ -597,9 +611,15 @@ def run_from_env(
     default, for the CLI) does not check.
 
     ``run_id`` names the scheduled run in each job's ts_name (see run_report).
+
+    ``time_budget`` (seconds from now) makes the run stop between batches once
+    it is spent and return with ``paused`` set; the queue worker then queues a
+    continuation. None (the CLI) runs to the end.
     """
+    deadline = time.monotonic() + time_budget if time_budget else None
     selected = codebases or ["WUK"]
     with engine_from_env(config_dir, bulk_batch_size) as engine:
+        engine.deadline = deadline
         if run_id:
             engine.tracer.run_id = run_id
         if not dry_run:
@@ -704,14 +724,19 @@ def engine_from_env(config_dir: str | None = None, bulk_batch_size: int | None =
     load_env()
     onekey = OneKeyClient(OneKeySession(OneKeyConfig.from_env()))
     dataverse = DataverseClient(DataverseConfig.from_env())
+    engine = None
     try:
-        yield create_sync_engine(
+        engine = create_sync_engine(
             onekey,
             dataverse,
             config_dir,
             bulk_batch_size=bulk_batch_size,
         )
+        yield engine
     finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
         onekey.close()
         if hasattr(dataverse, "close"):
             dataverse.close()

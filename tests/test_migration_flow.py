@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
+from dataverse.exceptions import DataverseHTTPError
 from integration.dynamic_mapping import load_mapping_config
-from integration.hierarchy import edges_from_hcos
+from integration.hierarchy import apply_updates, edges_from_hcos
 from integration.transform import CATALOG_NAVIGATION, create_transform_engine
 
 
@@ -179,3 +182,57 @@ def test_catalog_row_that_cannot_be_created_is_a_gap_not_a_crash():
         g.mapping_type == "TET" and g.source_value == "HOS"
         for g in engine.picklist_gaps.gaps
     )
+
+
+class _HierarchyDataverse:
+    """update_multiple fails with ``bulk``; single updates fail per account id."""
+
+    def __init__(self, bulk, single=None):
+        self.bulk = bulk
+        self.single = single or {}
+        self.updates = []
+
+    def update_multiple(self, entity_set, records, logical_name=None):
+        raise DataverseHTTPError("bulk failed", status_code=self.bulk)
+
+    def update(self, entity_set, record_id, data, attempts=None):
+        self.updates.append(record_id)
+        if record_id in self.single:
+            raise DataverseHTTPError("single failed", status_code=self.single[record_id])
+        return record_id
+
+
+def _links(count):
+    return [
+        {
+            "accountid": f"acc-{n}",
+            "parentaccountid@odata.bind": "/accounts(parent)",
+            "ts_externalid": f"W{n}",
+        }
+        for n in range(count)
+    ]
+
+
+def test_a_rejected_hierarchy_link_is_recorded_and_the_rest_continue():
+    dataverse = _HierarchyDataverse(bulk=400, single={"acc-1": 400})
+    failures = []
+    linked, failed = apply_updates(
+        dataverse, _links(3), 100, match_field="ts_externalid", failures=failures
+    )
+    assert (linked, failed) == (2, 1)
+    assert [label for label, _ in failures] == ["W1"]
+
+
+def test_a_service_error_stops_hierarchy_links_at_the_first_single_write():
+    # During an outage every link would fail the same way, three attempts each.
+    dataverse = _HierarchyDataverse(bulk=503, single={"acc-0": 503})
+    with pytest.raises(DataverseHTTPError):
+        apply_updates(dataverse, _links(3), 100, match_field="ts_externalid", failures=[])
+    assert dataverse.updates == ["acc-0"]
+
+
+def test_hierarchy_links_are_not_written_singly_after_an_auth_failure():
+    dataverse = _HierarchyDataverse(bulk=403)
+    with pytest.raises(DataverseHTTPError):
+        apply_updates(dataverse, _links(3), 100, match_field="ts_externalid", failures=[])
+    assert dataverse.updates == []

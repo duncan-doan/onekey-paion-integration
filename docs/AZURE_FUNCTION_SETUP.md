@@ -54,7 +54,7 @@ Any other field is logged as unknown and ignored.
 ### The delta window
 
 Each delta starts where the last Full or Delta job of the same codebase that
-covered its whole window stopped reading, less 15 minutes of overlap. A job
+covered its whole window stopped reading, less 6 hours of overlap. A job
 stopped reading at the earlier of `ts_watermarkto` (its window end) and
 `ts_startedon`; the latest such end among recent jobs wins. A message that waited
 in the queue, or failed and came back, therefore leaves no gap: the next delta
@@ -262,7 +262,8 @@ az functionapp config appsettings set \
 | `SYNC_SCHEDULE` | for scheduled sync | `true` enables the delta and full timers. |
 | `ONEKEY_CODBASE` | no | Comma-separated territories. Default `WUK`. The sample uses the first. |
 | `ONEKEY_SAMPLE` | no | HCOs in `sample_ok_to_dv`. Default `5`. |
-| `SYNC_SKIP_UNCHANGED` | no | Default `true`: a record that already holds every value to write is not updated (counted as skipped, `ts_skipped` on the job). `false` writes every record. |
+| `SYNC_SKIP_UNCHANGED` | no | Default `true`: a record that already holds every value to write is not updated (counted as skipped, `ts_skipped` on the job). `false` writes every record, makes a full sync of a large country take hours, and stops a paused run from continuing. |
+| `SYNC_TIME_BUDGET_MINUTES` | no | Default `45`. A queued full sync or delta still running after this long stops between batches and queues its next part, before Flex Consumption ends the execution 60 minutes into a scale-in. `0` turns it off. See [Queue architecture](QUEUE_ARCHITECTURE.md#time-budget-and-continuations). |
 | `SYNC_DELTA_FROM` | no | UTC start for every delta, e.g. `2026-08-01`. Unset: start where the last job stopped reading. See [The delta window](#the-delta-window). |
 | `SYNC_LOG_DIR` | no | Leave unset. The app forces `off` because the package folder is read-only. |
 

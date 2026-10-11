@@ -9,6 +9,8 @@ from integration import queue_sync
 from integration.queue_sync import (
     FULL_MAX_DELIVERIES,
     OUTCOME_DONE,
+    MAX_PARTS,
+    OUTCOME_CONTINUED,
     OUTCOME_POISON,
     OUTCOME_SKIPPED,
     QUEUES,
@@ -127,6 +129,8 @@ def test_dispatch_runs_one_codebase_and_skips_a_busy_delta(monkeypatch):
         "if_busy": IF_BUSY_SKIP,
         "sync_choices": False,
         "run_id": None,
+        # Stops before Flex Consumption's 60-minute scale-in limit.
+        "time_budget": 45 * 60,
     }
 
 
@@ -369,3 +373,78 @@ def test_run_progress_counts_the_message_and_the_run_so_far():
 def test_a_manual_message_has_no_run_progress():
     now = datetime.now(timezone.utc)
     assert run_progress(SyncQueueMessage(mode="delta", codebase="WNL"), now, now) is None
+
+
+# -- time budget: a paused part queues the next one ----------------------------
+
+
+def _paused(written, mode="full"):
+    return {"success": True, "paused": True, "records_written": written, mode: {"job_id": "job-1"}}
+
+
+def test_a_paused_full_sync_queues_its_next_part(monkeypatch):
+    fake_runner(monkeypatch, _paused(800))
+    body = SyncQueueMessage(
+        mode="full", codebase="WDE", run_id="full-20261101T000000Z-7",
+        enqueued_at="2026-11-01T00:00:00Z",
+    ).encode()
+    outcome = handle_message(body, 1, mode="full")
+    assert outcome.status == OUTCOME_CONTINUED
+    following = SyncQueueMessage.decode(outcome.next_part)
+    assert (following.mode, following.codebase, following.part) == ("full", "WDE", 2)
+    # Still the same run, so its total time covers every part.
+    assert following.run_id == "full-20261101T000000Z-7"
+    assert following.enqueued_at == "2026-11-01T00:00:00Z"
+
+
+def test_a_part_that_wrote_nothing_is_not_continued(monkeypatch):
+    # The OneKey walk alone outlasted the budget: another part would repeat it.
+    fake_runner(monkeypatch, _paused(0))
+    outcome = handle_message(SyncQueueMessage(mode="full", codebase="WDE").encode(), 1, mode="full")
+    assert outcome.status == OUTCOME_POISON
+    assert outcome.next_part is None
+    assert "without writing a record" in outcome.reason
+
+
+def test_continuations_stop_after_max_parts(monkeypatch):
+    fake_runner(monkeypatch, _paused(800, mode="delta"))
+    body = SyncQueueMessage(mode="delta", codebase="WDE", part=MAX_PARTS).encode()
+    outcome = handle_message(body, 1, mode="delta")
+    assert outcome.status == OUTCOME_POISON
+    assert f"after {MAX_PARTS} parts" in outcome.reason
+
+
+def test_a_first_part_is_encoded_as_before():
+    # Bodies without "part" stay readable by the version before this one.
+    assert "part" not in json.loads(SyncQueueMessage(mode="full", codebase="WDE").encode())
+    second = SyncQueueMessage(mode="full", codebase="WDE", part=2)
+    assert SyncQueueMessage.decode(second.encode()) == second
+
+
+@pytest.mark.parametrize("part", [0, -1, True, "2"])
+def test_an_invalid_part_is_rejected(part):
+    with pytest.raises(QueueMessageError):
+        SyncQueueMessage(mode="full", codebase="WDE", part=part)
+
+
+@pytest.mark.parametrize(
+    "setting, seconds",
+    [(None, 45 * 60), ("30", 30 * 60), ("0", None), ("off", None), ("junk", 45 * 60)],
+)
+def test_time_budget_setting(monkeypatch, setting, seconds):
+    from integration.env import time_budget_seconds
+
+    if setting is None:
+        monkeypatch.delenv("SYNC_TIME_BUDGET_MINUTES", raising=False)
+    else:
+        monkeypatch.setenv("SYNC_TIME_BUDGET_MINUTES", setting)
+    assert time_budget_seconds() == seconds
+
+
+def test_paused_work_is_not_continued_without_skip_unchanged(monkeypatch):
+    # Each part would rewrite what the first part wrote and never get further.
+    monkeypatch.setenv("SYNC_SKIP_UNCHANGED", "false")
+    fake_runner(monkeypatch, _paused(800))
+    outcome = handle_message(SyncQueueMessage(mode="full", codebase="WDE").encode(), 1, mode="full")
+    assert outcome.status == OUTCOME_POISON
+    assert "SYNC_SKIP_UNCHANGED is off" in outcome.reason

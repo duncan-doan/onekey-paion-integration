@@ -267,6 +267,8 @@ def phase_counts_json(results: dict | None) -> str | None:
         payload["picklists"] = len(results.get("picklists") or [])
     if results.get("by_process_code"):
         payload["by_process_code"] = results["by_process_code"]
+    if any((results.get("unjoined") or {}).values()):
+        payload["unjoined"] = results["unjoined"]
     if "picklist_gaps" in results:
         payload["picklist_gaps"] = int(results.get("picklist_gaps") or 0)
     if results.get("trace_failures_dropped"):

@@ -307,3 +307,35 @@ def test_missing_code_is_inserted_then_bound():
     assert dv.written[0]["ts_longlabel"] == "ZZZ"
     assert dv.written[0]["ts_codbase"] == "WDE"
     assert "ts_name" not in dv.written[0]
+
+
+def test_a_code_the_preload_missed_keeps_its_label():
+    # The stub row's label is the raw code; writing it over an existing row
+    # would replace "Hospital" with "HOS".
+    class FakeDataverse:
+        def __init__(self):
+            self.written = []
+            self.filters = []
+
+        def retrieve_multiple(self, entity_set, select=None, **kwargs):
+            return []  # the preload read nothing
+
+        def find_one(self, entity_set, filter, select=None):
+            self.filters.append(filter)
+            return {"ts_hcotype_refid": "stored-guid"}
+
+        def upsert_by_field(self, entity_set, match_field, match_value, data):
+            self.written.append(data)
+            return "new-guid", True
+
+    dv = FakeDataverse()
+    resolver = CatalogResolver(dv)
+    resolver.preload(load_mapping_config().lookup_tables)
+    engine = create_transform_engine(load_mapping_config())
+    engine.catalog_resolver = resolver.ensure
+    payload = engine.transform_hco(
+        {"workplaceEid": "WDEH1", "officialName": "Klinik", "codBase": "WDE", "typeCode": "HOS"}
+    )
+    assert payload["ts_Type_ref@odata.bind"] == "/ts_hcotype_refs(stored-guid)"
+    assert dv.written == []
+    assert dv.filters == ["ts_externalid eq 'WDE.TET.HOS'"]

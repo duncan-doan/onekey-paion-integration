@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from dataverse.client import escape_odata
 from dataverse.exceptions import DataverseHTTPError
 from onekey.exceptions import OneKeyNotFoundError
 
@@ -269,12 +270,26 @@ class CatalogResolver:
         )
         if not row:
             return odata_lookup_bind(table.entity_set, table.key_field, external)
-        record_id, created = self.dv.upsert_by_field(
-            table.entity_set,
-            table.key_field,
-            external,
-            row,
-        )
+        # A row the preload did not see (its read failed, or another country
+        # added it since) keeps its proper label: the stub row carries the raw
+        # code as its label, so it is only written when the code is new.
+        _, primary_id = _primary_id(table.entity_set)
+        existing = None
+        if hasattr(self.dv, "find_one"):
+            existing = self.dv.find_one(
+                table.entity_set,
+                filter=f"{table.key_field} eq '{escape_odata(external)}'",
+                select=[primary_id],
+            )
+        if existing and existing.get(primary_id):
+            record_id, created = existing[primary_id], False
+        else:
+            record_id, created = self.dv.upsert_by_field(
+                table.entity_set,
+                table.key_field,
+                external,
+                row,
+            )
         self._ids[key] = str(record_id)
         logger.info(
             "Catalog %s %s %s",

@@ -50,7 +50,7 @@ def test_window_end_is_the_earlier_of_watermark_and_start():
 
 def test_a_late_start_does_not_skip_the_wait():
     # Enqueued with date_to=00:00, failed once, ran at 00:42: the next window
-    # must start at 00:00 - 15 min, not at 00:42 - 15 min.
+    # must start at 00:00 less the overlap, not at 00:42 less it.
     jobs = Jobs([
         {
             "ts_jobid": "delta-7",
@@ -60,7 +60,7 @@ def test_a_late_start_does_not_skip_the_wait():
         }
     ])
     iso_from, _ = delta_window(jobs, ["WUK"], date_to="2026-10-08T00:00:00Z")
-    assert iso_from == "2026-10-06T23:45:00Z"
+    assert iso_from == "2026-10-06T18:00:00Z"
     assert "ts_watermarkto" in jobs.queries[0][1]["select"]
 
 
@@ -384,7 +384,7 @@ def test_a_codebase_with_a_completed_job_gets_its_delta(monkeypatch):
     )
     result = run_retry_then_delta(engine, codebases=["WNL"])
     assert [name for name, _ in calls] == ["retry", "delta"]
-    assert calls[1][1]["date_from"] == "2026-10-08T23:45:10Z"
+    assert calls[1][1]["date_from"] == "2026-10-08T18:00:10Z"
     assert "promoted_to_full" not in result
     # One read of the job history, not one for the check and one for the window.
     assert len(engine.dataverse.queries) == 1
@@ -406,7 +406,7 @@ def test_the_delta_alone_works_out_its_window_without_retrying(monkeypatch):
     )
     result = run_delta(engine, codebases=["WNL"])
     assert [name for name, _ in calls] == ["delta"]
-    assert calls[0][1]["date_from"] == "2026-10-08T23:45:10Z"
+    assert calls[0][1]["date_from"] == "2026-10-08T18:00:10Z"
     assert set(result) == {"success", "delta", "resolved_by_delta"}
 
 
@@ -433,3 +433,33 @@ def test_a_redelivered_message_is_not_blocked_by_its_own_run(fake_engine):
     filters = [kwargs["filter"] for _, kwargs in fake_engine.dataverse.queries]
     assert len(filters) == 2
     assert all("not (contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in filters)
+
+
+def test_a_paused_promoted_full_sync_reports_it_at_the_top(monkeypatch):
+    # The queue worker reads paused and records_written from the top level to
+    # decide whether to queue the next part.
+    engine, calls = promotion_engine(monkeypatch, [])
+    engine.sync_full = lambda **kwargs: {
+        "success": True, "job_id": "full-1", "paused": True, "records_written": 300,
+    }
+    result = run_delta(engine, codebases=["WNL"])
+    assert result["promoted_to_full"] is True
+    assert (result["paused"], result["records_written"]) == (True, 300)
+
+
+def test_a_finished_delta_reports_no_pause(monkeypatch):
+    engine, calls = promotion_engine(
+        monkeypatch,
+        [{"ts_jobid": "d-1", "ts_startedon": "2026-10-09T00:00:20Z",
+          "ts_watermarkto": "2026-10-09T00:00:10Z", "ts_errorsummary": None}],
+    )
+    assert "paused" not in run_delta(engine, codebases=["WNL"])
+
+
+def test_a_time_budget_becomes_the_engine_deadline(fake_engine, monkeypatch):
+    engine = fake_engine
+    monkeypatch.setattr(scheduled_sync.time, "monotonic", lambda: 1000.0)
+    run_from_env(codebases=["WUK"], full=True, time_budget=2700)
+    assert engine.deadline == 3700.0
+    run_from_env(codebases=["WUK"], full=True)  # the CLI: no limit
+    assert engine.deadline is None
