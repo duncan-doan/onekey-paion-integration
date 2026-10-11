@@ -1,8 +1,10 @@
 """Connection settings for a Dataverse environment."""
 
+import math
 import os
 import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from .exceptions import DataverseConfigError
 
@@ -40,10 +42,34 @@ class DataverseConfig:
                 raise DataverseConfigError(f"{field} is required")
 
         url = self.environment_url.strip().rstrip("/")
-        if not url.startswith("http"):
+        if "://" not in url:
             url = "https://" + url
-        # Accept a pasted Web API or maker URL and reduce it to the org root.
+        # Accept a pasted Web API URL and reduce it to the org root.
         url = re.sub(r"/api/data/v[\d.]+/?$", "", url)
+        try:
+            parsed = urlsplit(url)
+            valid_url = (
+                parsed.scheme == "https" and bool(parsed.hostname)
+                and parsed.username is None and parsed.password is None
+                and not parsed.path and not parsed.query and not parsed.fragment
+                and not any(char.isspace() for char in url)
+            )
+            parsed.port  # Validate a pasted port before issuing a request.
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise DataverseConfigError("environment_url must be an HTTPS organization root")
+        if not isinstance(self.api_version, str) or not re.fullmatch(r"v\d+\.\d+", self.api_version):
+            raise DataverseConfigError("api_version must be a version such as v9.2")
+        if (
+            isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout) or self.timeout <= 0
+        ):
+            raise DataverseConfigError("timeout must be a positive finite number")
+        for field in ("max_retries", "bulk_batch_size"):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise DataverseConfigError(f"{field} must be a positive integer")
         object.__setattr__(self, "environment_url", url)
 
     @property
@@ -67,14 +93,22 @@ class DataverseConfig:
         if missing:
             raise DataverseConfigError("Missing environment variables: " + ", ".join(missing))
 
+        try:
+            timeout = float(os.environ.get(f"{prefix}TIMEOUT", "60"))
+            max_retries = int(os.environ.get(f"{prefix}MAX_RETRIES", "3"))
+            bulk_batch_size = int(os.environ.get(f"{prefix}BULK_BATCH_SIZE", "100"))
+        except ValueError as exc:
+            raise DataverseConfigError("Dataverse numeric environment settings are invalid") from exc
+
         return cls(
             environment_url=os.environ[f"{prefix}URL"],
             tenant_id=os.environ[f"{prefix}TENANT_ID"],
             client_id=os.environ[f"{prefix}CLIENT_ID"],
             client_secret=os.environ[f"{prefix}CLIENT_SECRET"],
             api_version=os.environ.get(f"{prefix}API_VERSION", "v9.2"),
-            timeout=float(os.environ.get(f"{prefix}TIMEOUT", "60")),
-            bulk_batch_size=int(os.environ.get(f"{prefix}BULK_BATCH_SIZE", "100")),
+            timeout=timeout,
+            max_retries=max_retries,
+            bulk_batch_size=bulk_batch_size,
         )
 
     def __repr__(self):

@@ -28,6 +28,7 @@ from integration.job_trace import (
 )
 from integration.retry_sync import (
     _normalize_failure,
+    _update_failures,
     fetch_pending_failures,
     pending_filter,
     resolve_pending_for_ids,
@@ -72,6 +73,7 @@ class Engine:
         self.onekey = onekey or FakeOneKey()
         self.tracer = JobTracer(dataverse)
         self.succeeded_ids = set()
+        self.succeeded_records = set()
         self.sync_logger = SimpleNamespace(job_id=None)
         self._contracted_workplace_eids = set()
         self._contracted_individual_eids = set()
@@ -364,9 +366,73 @@ def test_resolve_pending_for_succeeded_ids():
     assert "ts_sourceid eq 'WUKE00001259'" in dataverse.queries[0][1]["filter"]
 
 
+def test_resolution_requires_the_successful_phase_entity_and_external_key():
+    from integration.job_trace import ENTITY_ADDRESS, PHASE_ADDRESSES, PHASE_HIERARCHY
+
+    def pending(record_id, phase, entity, external=""):
+        return {
+            "ts_integrationfailureid": record_id, "ts_sourceid": "WUKH1",
+            "ts_phase": phase, "ts_entitytype": entity, "ts_externalid": external,
+        }
+
+    dataverse = FakeDataverse(rows=[
+        pending("account", PHASE_HCO, ENTITY_ACCOUNT, "WUKH1"),
+        pending("address", PHASE_ADDRESSES, ENTITY_ADDRESS, "WUKH1 - ADDR1"),
+        pending("hierarchy", PHASE_HIERARCHY, ENTITY_ACCOUNT),
+        pending("edge-1", PHASE_HCO, ENTITY_AFFILIATION, "WUKH1 - WUKH2 - HIE"),
+        pending("edge-2", PHASE_HCO, ENTITY_AFFILIATION, "WUKH1 - WUKH3 - HIE"),
+    ])
+    resolved = resolve_pending_for_ids(
+        dataverse, {"WUKH1"}, succeeded_records={
+            (PHASE_HCO, ENTITY_ACCOUNT, "WUKH1", "WUKH1"),
+            (PHASE_HCO, ENTITY_AFFILIATION, "WUKH1", "WUKH1 - WUKH2 - HIE"),
+        },
+    )
+    assert resolved == 2
+    assert {record_id for _, record_id, _ in dataverse.updated} == {"account", "edge-1"}
+
+
+def test_a_current_failure_blocks_resolution_of_the_same_operation():
+    dataverse = FakeDataverse(rows=[{
+        "ts_integrationfailureid": "old-failure", "ts_sourceid": "WUKH1",
+        "ts_phase": PHASE_HCO, "ts_entitytype": ENTITY_ACCOUNT, "ts_externalid": "WUKH1",
+    }])
+    resolved = resolve_pending_for_ids(
+        dataverse, {"WUKH1"},
+        succeeded_records={(PHASE_HCO, ENTITY_ACCOUNT, "WUKH1", "WUKH1")},
+        failed_records=[{
+            "phase": PHASE_HCO, "entity": ENTITY_ACCOUNT,
+            "source_id": "WUKH1", "external_id": "WUKH1",
+        }],
+    )
+    assert resolved == 0
+    assert dataverse.updated == []
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 503])
+def test_failure_row_updates_do_not_fan_out_after_a_service_error(status):
+    dataverse = FakeDataverse()
+    dataverse.config = SimpleNamespace(bulk_batch_size=1)
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append(args)
+        raise DataverseHTTPError("service failure", status_code=status)
+
+    dataverse.update_multiple = unavailable
+    written = _update_failures(dataverse, [
+        ("failure-1", {"ts_retrystatus": RETRY_PENDING}),
+        ("failure-2", {"ts_retrystatus": RETRY_PENDING}),
+    ])
+    assert written == set()
+    assert len(calls) == 1
+    assert dataverse.updated == []
+
+
 def test_scheduled_job_retries_then_delta_then_resolves():
     dataverse = FakeDataverse(
-        rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259"}]
+        rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259",
+               "ts_phase": PHASE_HCO, "ts_entitytype": ENTITY_ACCOUNT}]
     )
     engine = Engine(dataverse)
     # Left behind by a retry group; the delta must not inherit it.
@@ -376,6 +442,7 @@ def test_scheduled_job_retries_then_delta_then_resolves():
     def sync_delta(**kwargs):
         seen["retry_of_job_id"] = engine.tracer.retry_of_job_id
         engine.succeeded_ids.add("WUKE00001259")
+        engine.succeeded_records.add((PHASE_HCO, ENTITY_ACCOUNT, "WUKE00001259", "WUKE00001259"))
         return {"success": True, "job_id": "delta-job", "mode": "delta"}
 
     engine.sync_delta = sync_delta
@@ -445,13 +512,15 @@ def test_covered_window():
 
 def test_scheduled_full_resolves_pending():
     dataverse = FakeDataverse(
-        rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259"}]
+        rows=[{"ts_integrationfailureid": "fail-9", "ts_sourceid": "WUKE00001259",
+               "ts_phase": PHASE_HCO, "ts_entitytype": ENTITY_ACCOUNT}]
     )
     engine = Engine(dataverse)
 
     def sync_full(**kwargs):
         engine.calls.append(("full", kwargs["codebases"]))
         engine.succeeded_ids.add("WUKE00001259")
+        engine.succeeded_records.add((PHASE_HCO, ENTITY_ACCOUNT, "WUKE00001259", "WUKE00001259"))
         return {"success": True, "job_id": "full-job", "mode": "full"}
 
     engine.sync_full = sync_full

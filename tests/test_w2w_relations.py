@@ -175,7 +175,7 @@ def test_transform_w2w_binds_from_and_to():
     assert payload["ts_externalid"] == "WUKE00001260 - WUKE00117965 - AUT"
     assert payload["ts_FromID_account@odata.bind"] == "/accounts(from-guid)"
     assert payload["ts_ToID@odata.bind"] == "/accounts(to-guid)"
-    assert payload["ts_linktype"] == engine.config.get_value("linkcode", "AUT")
+    assert payload["ts_linktype"] == int(engine.config.get_value("linkcode", "AUT"))
     assert payload["ts_isprimary"] is False
 
 

@@ -8,6 +8,7 @@ from integration.dynamic_sync import DynamicSyncEngine
 from integration.job_trace import (
     FAILURES,
     HEARTBEAT_EVERY_SECONDS,
+    HEARTBEAT_RETRY_SECONDS,
     JOB_AFFILIATIONS,
     JOB_DELTA,
     JOB_FULL,
@@ -31,6 +32,7 @@ class FakeDataverse:
         self.fail_create = fail_create
         self.created = []
         self.updated = []
+        self.update_attempts = []
         self.batches = []
 
     def create(self, entity_set, data, return_record=False):
@@ -39,8 +41,9 @@ class FakeDataverse:
         self.created.append((entity_set, data))
         return f"guid-{len(self.created)}"
 
-    def update(self, entity_set, record_id, data):
+    def update(self, entity_set, record_id, data, attempts=None):
         self.updated.append((entity_set, record_id, data))
+        self.update_attempts.append(attempts)
         return record_id
 
     def create_multiple(self, entity_set, records, logical_name=None):
@@ -84,6 +87,204 @@ def test_summarize_includes_hierarchy_misses():
     assert totals["updated"] == 2
     assert totals["skipped"] == 3
     assert totals["failed"] == 7
+
+
+def test_failed_trace_batch_is_retained_and_retried_without_service_error_fanout():
+    dataverse = FakeDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    tracer.record_failure(
+        phase=PHASE_HCO, entity="account", source_id="WUKH1",
+        operation="upsert", message="timeout", exc=TimeoutError(),
+    )
+    original = dataverse.create_multiple
+
+    def unavailable(*args, **kwargs):
+        raise DataverseHTTPError("throttled", status_code=429)
+
+    dataverse.create_multiple = unavailable
+    tracer.flush()
+    assert len(tracer._pending) == 1
+    assert all(entity != FAILURES for entity, _ in dataverse.created)
+
+    dataverse.create_multiple = original
+    tracer.flush()
+    assert tracer._pending == {}
+    assert tracer.written_failures == 1
+
+
+def test_unpersisted_failure_rows_prevent_a_covering_job():
+    dataverse = FakeDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    tracer.record_failure(
+        phase=PHASE_HCO, entity="account", source_id="WUKH1",
+        operation="upsert", message="timeout", exc=TimeoutError(),
+    )
+
+    def unavailable(*args, **kwargs):
+        raise DataverseHTTPError("service unavailable", status_code=503)
+
+    dataverse.create_multiple = unavailable
+    result = {"success": True, "accounts": {"processed": 1, "failed": 1}}
+    tracer.finish(result)
+    assert result["success"] is False
+    assert "could not persist 1 failure" in result["errors"][0]
+    assert "trace:" in dataverse.updated[-1][2]["ts_errorsummary"]
+
+
+def test_single_trace_write_failure_is_retained_until_next_checkpoint():
+    dataverse = FakeDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    tracer.record_failure(
+        phase=PHASE_HCO, entity="account", source_id="WUKH1",
+        operation="upsert", message="timeout", exc=TimeoutError(),
+    )
+    dataverse.create_multiple = None
+    original = dataverse.create
+
+    def unavailable(*args, **kwargs):
+        # What the client raises when it cannot reach Dataverse.
+        raise DataverseHTTPError("transport unavailable")
+
+    dataverse.create = unavailable
+    tracer.flush()
+    assert len(tracer._pending) == 1
+    dataverse.create = original
+    tracer.flush()
+    assert tracer._pending == {}
+    assert tracer.written_failures == 1
+
+
+class KeyedFailureDataverse(FakeDataverse):
+    """Failure rows keyed by ts_failurekey, unique as in Dataverse.
+
+    ``reject`` holds columns that make a row fail with a 400.
+    """
+
+    def __init__(self, reject=()):
+        super().__init__()
+        self.stored = {}
+        self.reject = set(reject)
+        self.create_calls = 0
+
+    def _store(self, row):
+        if self.reject & set(row):
+            raise DataverseHTTPError("bad value", status_code=400)
+        if row["ts_failurekey"] in self.stored:
+            raise DataverseHTTPError("A record with matching key values already exists", status_code=412)
+        self.stored[row["ts_failurekey"]] = row
+
+    def create(self, entity_set, data, return_record=False):
+        if entity_set == FAILURES:
+            self.create_calls += 1
+            self._store(data)
+        return super().create(entity_set, data, return_record)
+
+    def create_multiple(self, entity_set, records, logical_name=None):
+        # All or nothing, like CreateMultiple on a standard table.
+        if any(
+            self.reject & set(row) or row["ts_failurekey"] in self.stored for row in records
+        ):
+            raise DataverseHTTPError("bad value", status_code=400)
+        for row in records:
+            self.stored[row["ts_failurekey"]] = row
+        return super().create_multiple(entity_set, records, logical_name)
+
+    def find_many_by_field(self, entity_set, field, values, select=None, **kwargs):
+        return {value: {field: value} for value in values if value in self.stored}
+
+
+def _three_failures(tracer, **kwargs):
+    for n in range(1, 4):
+        tracer.record_failure(
+            phase=PHASE_HCO, entity="account", source_id=f"WUKH{n}",
+            operation="upsert", message="bad", **kwargs,
+        )
+
+
+def test_failure_rows_that_landed_behind_a_gateway_timeout_are_not_resent():
+    dataverse = KeyedFailureDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    _three_failures(tracer)
+
+    def landed_but_timed_out(entity_set, rows, logical_name=None):
+        for row in rows:
+            dataverse._store(row)
+        raise DataverseAmbiguousWriteError("gateway returned 504", status_code=504)
+
+    dataverse.create_multiple = landed_but_timed_out
+    result = {"success": True}
+    tracer.finish(result)
+    assert len(dataverse.stored) == 3
+    assert tracer.written_failures == 3
+    assert dataverse.create_calls == 0
+    # Written rows must not hold the job back from covering its window.
+    assert result["success"] is True
+    assert "errors" not in result
+
+
+def test_a_rejected_failure_row_is_written_without_optional_columns():
+    dataverse = KeyedFailureDataverse(reject={"ts_externalid"})
+    dataverse.create_multiple = None
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    _three_failures(tracer, external_id="bad-key")
+    result = {"success": True}
+    tracer.finish(result)
+    assert len(dataverse.stored) == 3
+    assert all("ts_externalid" not in row for row in dataverse.stored.values())
+    assert tracer.written_failures == 3
+    assert result["success"] is True
+
+
+def test_a_failure_row_dataverse_always_rejects_does_not_fail_the_job():
+    # The same rows would fail on every run: blocking the window would stall it.
+    dataverse = KeyedFailureDataverse(reject={"ts_sourceid"})
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    _three_failures(tracer)
+    result = {"success": True, "accounts": {"processed": 3, "failed": 3}}
+    tracer.finish(result)
+    assert tracer.dropped_failures == 3
+    assert tracer._pending == {}
+    assert result["success"] is True
+    assert result["trace_failures_dropped"] == 3
+    final = dataverse.updated[-1][2]
+    assert "ts_errorsummary" not in final
+    assert '"trace_failures_dropped":3' in final["ts_phasecounts"]
+
+
+def test_a_rejected_row_that_already_exists_counts_as_written():
+    dataverse = KeyedFailureDataverse()
+    dataverse.create_multiple = None
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    _three_failures(tracer)
+    first = next(iter(tracer._pending.values()))
+    dataverse.stored[first["ts_failurekey"]] = first  # resent after an unknown outcome
+    tracer.flush()
+    assert tracer.written_failures == 3
+    assert tracer.dropped_failures == 0
+
+
+def test_an_outage_while_writing_rows_singly_stops_at_the_first_row():
+    dataverse = KeyedFailureDataverse()
+    dataverse.create_multiple = None
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    _three_failures(tracer)
+
+    def unavailable(entity_set, data, return_record=False):
+        dataverse.create_calls += 1
+        raise DataverseHTTPError("service unavailable", status_code=503)
+
+    dataverse.create = unavailable
+    tracer.flush()
+    assert dataverse.create_calls == 1
+    assert len(tracer._pending) == 3
 
 
 def test_trace_status_values():
@@ -319,8 +520,8 @@ class HookedDataverse(FakeDataverse):
         super().__init__()
         self.after_request = None
 
-    def update(self, entity_set, record_id, data):
-        super().update(entity_set, record_id, data)
+    def update(self, entity_set, record_id, data, attempts=None):
+        super().update(entity_set, record_id, data, attempts=attempts)
         if self.after_request:
             self.after_request()
         return record_id
@@ -348,6 +549,35 @@ def test_beat_refreshes_the_heartbeat_at_most_every_interval(monkeypatch):
     assert len(heartbeats(dataverse)) == 1
 
 
+def test_heartbeat_is_sent_once_and_retried_a_minute_after_a_failure(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(job_trace.time, "monotonic", lambda: clock[0])
+    dataverse = HookedDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.begin(job_type=JOB_FULL, codebases=["WUK"])
+    working = dataverse.update
+
+    def throttled(entity_set, record_id, data, attempts=None):
+        dataverse.update_attempts.append(attempts)
+        raise DataverseHTTPError("throttled", status_code=429)
+
+    dataverse.update = throttled
+    clock[0] += HEARTBEAT_EVERY_SECONDS
+    tracer.beat()
+    # Once, not retried: a retry would wait out the throttling inside the
+    # request that triggered the heartbeat.
+    assert dataverse.update_attempts == [1]
+
+    dataverse.update = working
+    clock[0] += HEARTBEAT_RETRY_SECONDS - 1
+    tracer.beat()
+    assert heartbeats(dataverse) == []
+    clock[0] += 1
+    tracer.beat()
+    assert len(heartbeats(dataverse)) == 1
+    assert dataverse.update_attempts[-1] == 1
+
+
 def test_beat_does_nothing_once_the_job_finished(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(job_trace.time, "monotonic", lambda: clock[0])
@@ -368,6 +598,8 @@ class HookEngine:
     _set_request_hook = DynamicSyncEngine._set_request_hook
 
     def __init__(self):
+        self.succeeded_ids = set()
+        self.succeeded_records = set()
         self.dataverse = HookedDataverse()
         self.onekey = SimpleNamespace(session=SimpleNamespace(after_request=None))
         self.tracer = JobTracer(self.dataverse)

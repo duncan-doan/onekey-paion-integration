@@ -20,9 +20,12 @@ rather than on the first data call.
 
 import base64
 import logging
+import math
 import random
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -39,6 +42,12 @@ from .exceptions import (
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Shortest wait after a 429, and the longest wait honoured before any attempt.
+# A huge Retry-After must not park a worker for hours while its heartbeat
+# keeps the job looking alive.
+_THROTTLE_MIN_WAIT = 30
+_MAX_RETRY_WAIT = 300
 
 
 @dataclass
@@ -184,14 +193,36 @@ class OneKeySession:
             logger.debug("after_request hook failed", exc_info=True)
 
     def _wait(self, delay):
-        """Sleep before the next attempt, running the hook first.
+        """Sleep before the next attempt, keeping long waits visible to the job.
 
-        The waits of one request add up to 25 minutes under throttling, longer
-        than the queue worker's busy check trusts a silent heartbeat. Running
-        the hook here keeps a live job from looking killed.
+        Throttling can pause one request for minutes, longer than the queue
+        worker's busy check trusts a silent heartbeat. Refreshing the hook
+        during the wait keeps a live job from looking killed.
         """
         self._call_after_request()
+        while delay > 60:
+            time.sleep(60)
+            delay -= 60
+            self._call_after_request()
         time.sleep(delay)
+
+    @staticmethod
+    def _retry_after(response):
+        """Seconds from a numeric or HTTP-date Retry-After, or None."""
+        value = (getattr(response, "headers", None) or {}).get("Retry-After")
+        if value is None:
+            return None
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return max(delay, 0) if math.isfinite(delay) else None
 
     def _send(self, method, url, path, **kwargs):
         """The retry loop behind :meth:`request`."""
@@ -231,26 +262,28 @@ class OneKeySession:
                 except OneKeyHTTPError as exc:
                     last_error = exc
 
-                # Honour Retry-After on 429; use a long floor so we do not
-                # re-hit the limit immediately after a short exponential wait.
                 if response.status_code == 429:
                     self.stats.throttled += 1
-                if response.status_code == 429 and attempt < self.config.max_retries:
-                    headers = getattr(response, "headers", None) or {}
-                    retry_after = headers.get("Retry-After")
-                    delay = None
-                    if retry_after:
-                        try:
-                            delay = float(retry_after)
-                        except ValueError:
-                            delay = None
-                    if delay is None:
-                        delay = min(60 * attempt, 300) + random.uniform(0, 5)
+                retry_after = (
+                    self._retry_after(response) if response.status_code in (429, 503) else None
+                )
+                if attempt < self.config.max_retries and (
+                    response.status_code == 429 or retry_after is not None
+                ):
+                    if response.status_code == 429:
+                        # The quota is per minute (START HERE Guide 6.1.14):
+                        # a shorter wait only spends attempts, so floor it.
+                        delay = (
+                            min(60 * attempt, _MAX_RETRY_WAIT) + random.uniform(0, 5)
+                            if retry_after is None
+                            else min(max(retry_after, _THROTTLE_MIN_WAIT), _MAX_RETRY_WAIT)
+                        )
                     else:
-                        delay = min(max(delay, 30), 300)
+                        delay = min(retry_after, _MAX_RETRY_WAIT)
                     logger.warning(
-                        "OneKey %s %s throttled (429): attempt=%d/%d delay_s=%.0f",
-                        method, path, attempt, self.config.max_retries, delay,
+                        "OneKey %s %s retrying: attempt=%d/%d reason=%d delay_s=%.1f",
+                        method, path, attempt, self.config.max_retries,
+                        response.status_code, delay,
                     )
                     self._wait(delay)
                     continue
@@ -276,6 +309,10 @@ class OneKeySession:
 
         OneKey wraps successful payloads in a top-level ``response`` object and
         reports a ``status`` of ``SUCCESS``, ``WARNING`` or ``ERROR`` inside it.
+        Only ``ERROR`` raises. ``success: false`` is left to the caller: on
+        ``/pop/refreshMyOnekey`` it marks a packet to request again (Developer
+        Guide 6.13 sample), and what it means on a WARNING search is not
+        documented.
         """
         # The guide is explicit that the charset must be declared for UTF-8.
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -290,12 +327,16 @@ class OneKeySession:
                 f"OneKey returned a non-JSON body: {raw.text[:300]}"
             ) from exc
 
+        if not isinstance(body, dict):
+            raise OneKeyAPIResponseError("OneKey returned a non-object JSON body")
         envelope = body.get("response", body)
+        if not isinstance(envelope, dict):
+            raise OneKeyAPIResponseError("OneKey returned a non-object response envelope")
         status = str(envelope.get("status", "")).upper()
         if status == "ERROR":
             raise OneKeyAPIResponseError(
                 "OneKey reported an ERROR status: "
-                + str(envelope.get("statusMessage") or envelope),
+                + str(envelope.get("statusMessage") or "no message"),
                 status=status,
                 payload=envelope,
             )

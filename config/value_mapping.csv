@@ -21,7 +21,7 @@ VAL-IND-006,industrycode,L,Laboratory,16,Laboratory,Lab facility
 # Process Code Mapping (CDC processCode),,,,,,
 VAL-PRC-001,processcode,I,Insert,insert,Insert,New record created in OneKey
 VAL-PRC-002,processcode,U,Update,update,Update,Existing record modified
-VAL-PRC-003,processcode,R,Replace,replace,Replace,Record replaced/merged
+VAL-PRC-003,processcode,R,Refresh,refresh,Refresh,Existing record to update or insert (Developer Guide 6.13.5)
 # Country Code / Codebase Mapping,,,,,,
 VAL-COD-001,codebase,WUK,United Kingdom,GB,United Kingdom,UK codebase
 VAL-COD-002,codebase,WDE,Germany,DE,Germany,Germany codebase

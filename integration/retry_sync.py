@@ -286,6 +286,9 @@ def resolve_pending_for_ids(
     dataverse,
     source_ids: set[str] | list[str],
     exclude_job_guid: str | None = None,
+    *,
+    succeeded_records: set[tuple[int, int, str, str]] | None = None,
+    failed_records: list[dict] | None = None,
 ) -> int:
     """Mark pending failures Resolved when a later sync upserts those IDs.
 
@@ -296,11 +299,17 @@ def resolve_pending_for_ids(
     A delta's IDs are looked up 20 at a time. A full sync upserts far more IDs
     than there are pending rows, so above _RESOLVE_SCAN_AT the pending rows
     are read once and matched here.
+
+    Scheduled jobs supply ``succeeded_records`` so only the same phase,
+    entity, source and external key can resolve a failure. A successful
+    account write cannot resolve an address or affiliation failure.
     """
     ids = sorted({str(source_id) for source_id in source_ids if source_id})
     if not ids:
         return 0
     select = ["ts_integrationfailureid", "ts_sourceid", "_ts_integrationjob_value"]
+    if succeeded_records is not None:
+        select.extend(["ts_phase", "ts_entitytype", "ts_externalid"])
     if len(ids) > _RESOLVE_SCAN_AT:
         wanted = set(ids)
         rows = [
@@ -332,6 +341,26 @@ def resolve_pending_for_ids(
             for row in rows
             if str(row.get("_ts_integrationjob_value") or "").lower() != current
         ]
+    if succeeded_records is not None:
+        successes = defaultdict(set)
+        failures = defaultdict(set)
+        for phase, entity, source, external in succeeded_records:
+            successes[(phase, entity, source)].add(external)
+        for failure in failed_records or []:
+            failures[(failure.get("phase"), failure.get("entity"), failure.get("source_id"))].add(
+                failure.get("external_id") or ""
+            )
+
+        def resolved_by_record(row):
+            key = (row.get("ts_phase"), row.get("ts_entitytype"), row.get("ts_sourceid"))
+            external = row.get("ts_externalid") or ""
+            matched = successes.get(key, set())
+            failed = failures.get(key, set())
+            if failed and (not external or "" in failed or external in failed):
+                return False
+            return bool(matched) and (not external or external in matched)
+
+        rows = [row for row in rows if resolved_by_record(row)]
     # A row that cannot be updated stays Pending for the next retry run.
     resolved = len(
         _update_failures(
@@ -779,6 +808,9 @@ def _update_failures(dataverse, updates: list[tuple[str, dict]]) -> set[str]:
                 written.update(record_id for record_id, _ in batch)
                 continue
             except Exception as exc:
+                if getattr(exc, "status_code", None) in {401, 403, 429, 500, 502, 503, 504}:
+                    logger.warning("Could not update failure rows; stopping after service error: %s", exc)
+                    return written
                 logger.warning(
                     "UpdateMultiple failed for %d failure row(s) (%s); updating one by one",
                     len(batch),

@@ -19,8 +19,8 @@ or lost a codebase is not used as the window start, so the next delta covers
 its window again. A failed ID that OneKey does not change again will not
 appear in a later delta, so step 1 is what retries it.
 
-Queue workers run one codebase at a time and call active_job first, so two
-runs of the same codebase do not overlap.
+Queue workers run one codebase at a time and check active_job first. This is
+a best-effort busy check; simultaneous starts still need an atomic lease.
 """
 
 from __future__ import annotations
@@ -324,6 +324,8 @@ def run_retry_then_delta(
     engine.tracer.trigger = trigger
     engine.tracer.retry_of_job_id = None
     engine.succeeded_ids.clear()
+    if hasattr(engine, "succeeded_records"):
+        engine.succeeded_records.clear()
     iso_from, iso_to = delta_window(
         engine.dataverse, codebases, date_from=date_from, date_to=date_to
     )
@@ -342,7 +344,9 @@ def run_retry_then_delta(
     resolved = 0
     if delta.get("success") and not dry_run:
         resolved = resolve_pending_for_ids(
-            engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid
+            engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid,
+            succeeded_records=getattr(engine, "succeeded_records", None),
+            failed_records=getattr(engine.tracer, "recent_failures", []),
         )
     return {
         "success": bool(delta.get("success")),
@@ -364,13 +368,17 @@ def run_full(
     engine.tracer.trigger = trigger
     engine.tracer.retry_of_job_id = None
     engine.succeeded_ids.clear()
+    if hasattr(engine, "succeeded_records"):
+        engine.succeeded_records.clear()
     full = engine.sync_full(
         codebases=codebases, dry_run=dry_run, sync_choices=sync_choices
     )
     resolved = 0
     if full.get("success") and not dry_run:
         resolved = resolve_pending_for_ids(
-            engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid
+            engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid,
+            succeeded_records=getattr(engine, "succeeded_records", None),
+            failed_records=getattr(engine.tracer, "recent_failures", []),
         )
     return {
         "success": bool(full.get("success")),

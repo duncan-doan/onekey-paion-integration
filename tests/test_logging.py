@@ -217,6 +217,8 @@ class Engine:
     _phase = DynamicSyncEngine._phase
 
     def __init__(self):
+        self.succeeded_ids = set()
+        self.succeeded_records = set()
         self.onekey = SimpleNamespace(session=onekey_session([]))
         self.dataverse = dataverse_client([])
         self.sync_logger = SyncLogger()

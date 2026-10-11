@@ -208,8 +208,10 @@ visible before the first run.
 
 A job counts as live while its `ts_integrationjob` row is Running and its
 `ts_lastheartbeat` is under 20 minutes old. A running job refreshes the
-heartbeat at least every 5 minutes, after any OneKey or Dataverse request, so a
-long phase stays live. A run killed by a restart stays Running, but its
+heartbeat at most every 5 minutes, after any OneKey or Dataverse request and
+during OneKey retry waits, so a long phase stays live. Dataverse retry waits
+are capped at 5 minutes, so even a throttled request goes no more than about
+18 minutes between heartbeats. A run killed by a restart stays Running, but its
 heartbeat stops, so it blocks nothing after 20 minutes. Its failure rows become
 retryable after an hour.
 

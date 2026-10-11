@@ -187,7 +187,7 @@ only the heartbeat age tells a live job from a dead one.
 | Writer | When |
 | --- | --- |
 | Job start | Row created with heartbeat = start time |
-| After every OneKey or Dataverse request, and before each OneKey retry wait | `JobTracer.beat()` writes only if 5 min have passed since the last write |
+| After every OneKey or Dataverse request, and every minute of a OneKey retry wait | `JobTracer.beat()` writes only if 5 min have passed since the last write. It sends the write once, without retries, and tries again a minute later if it failed. Dataverse retry waits do not write it, since it would be throttled too; they are capped so a throttled request stays inside the 20 min |
 | End of each phase | Written with the progress counts |
 
 | Reader | Rule |

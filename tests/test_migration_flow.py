@@ -90,6 +90,35 @@ def test_map_unmapped_gender_omits_and_gaps():
     assert any(g.source_value == "X" for g in engine.picklist_gaps.gaps)
 
 
+def test_choices_and_states_are_json_integers():
+    engine = create_transform_engine(load_mapping_config())
+    account = engine.transform_hco({
+        "workplaceEid": "WUKH1",
+        "officialName": "Hospital",
+        "activityLocationCode": "H",
+        "stateCode": "3",
+    })
+    contact = engine.transform_hcp({
+        "individualEid": "WUKI1",
+        "lastName": "Doe",
+        "genderCode": "F",
+        "stateCode": "9",
+        "preferredLanguageEID": "en",
+    })
+
+    assert account["industrycode"] == 11
+    assert account["statecode"] == 0
+    assert contact["gendercode"] == 2
+    assert contact["statecode"] == 1
+    assert contact["ts_preferredlanguage"] == 126870001
+    for payload in (account, contact):
+        for field in ("industrycode", "statecode", "gendercode", "ts_preferredlanguage", "ts_substatus"):
+            if field in payload:
+                assert type(payload[field]) is int
+    # Numeric identifiers remain strings; only typed option columns convert.
+    assert contact["ts_externalid"] == "WUKI1"
+
+
 def test_edges_from_hcos():
     edges = edges_from_hcos(
         [

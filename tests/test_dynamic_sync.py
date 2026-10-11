@@ -4,7 +4,18 @@ import pytest
 
 from dataverse.exceptions import DataverseHTTPError
 from integration.dynamic_sync import DynamicSyncEngine
-from integration.job_trace import FAILURES
+from integration.job_trace import (
+    ENTITY_ACCOUNT,
+    ENTITY_ADDRESS,
+    ENTITY_AFFILIATION,
+    ENTITY_CONTACT,
+    FAILURES,
+    PHASE_ADDRESSES,
+    PHASE_HCO,
+    PHASE_HCP,
+    PHASE_HCP_ACTIVITY,
+    PHASE_HIERARCHY,
+)
 from integration.sync_logger import SyncLogger
 
 
@@ -99,6 +110,85 @@ def test_full_sync_walks_the_population_once(tmp_path):
     assert result["accounts"]["processed"] == 2
     assert result["contacts"]["processed"] == 1
     assert result["activity_affiliations"]["processed"] == 1
+    assert engine.succeeded_records == {
+        (PHASE_HCO, ENTITY_ACCOUNT, "WUKH1", "WUKH1"),
+        (PHASE_HCO, ENTITY_ACCOUNT, "WUKH2", "WUKH2"),
+        (PHASE_HCP, ENTITY_CONTACT, "WUKI1", "WUKI1"),
+        (PHASE_HCP_ACTIVITY, ENTITY_AFFILIATION, "WUKA1", "WUKA1"),
+    }
+
+
+@pytest.mark.parametrize("mode", ["full", "affiliations_only"])
+def test_dry_run_counts_affiliations_without_existing_guids(tmp_path, mode):
+    records = [
+        {
+            "entityType": "WORKPLACE",
+            "workplace": {
+                "workplaceEid": "WUKH1",
+                "officialName": "One",
+                "relations": [{
+                    "typeCode": "workplaceToWorkplaceLink",
+                    "onekeyEid": "WUKH2",
+                    "linkCode": "HIE",
+                    "isParent": True,
+                }],
+            },
+        },
+        *POPULATION[1:],
+    ]
+    dataverse = BulkDataverse()
+    engine, onekey = _engine(tmp_path, dataverse, records)
+    if mode == "full":
+        result = engine.sync_full(["WUK"], dry_run=True, sync_picklists=False)
+    else:
+        result = engine.sync_affiliations_only(["WUK"], dry_run=True)
+
+    assert result["success"] is True
+    assert result["affiliations"]["processed"] == 1
+    assert result["affiliations"]["failed"] == 0
+    assert result["activity_affiliations"]["processed"] == 1
+    assert result["activity_affiliations"]["failed"] == 0
+    assert onekey.walks == 1
+    assert dataverse.created == dataverse.updated == dataverse.upserts == []
+    assert engine.succeeded_records == set()
+
+
+def test_address_success_keeps_its_phase_entity_and_composite_key(tmp_path):
+    engine, _ = _engine(tmp_path, BulkDataverse())
+    engine._account_cache["WUKH1"] = "account-guid"
+    stats = engine._sync_addresses([
+        {"workplaceEid": "WUKH1", "address_addressEid": "WUKADDR1"}
+    ])
+
+    assert stats["processed"] == 1
+    assert (PHASE_ADDRESSES, ENTITY_ADDRESS, "WUKH1", "WUKH1 - WUKADDR1") in engine.succeeded_records
+    assert all(entity == ENTITY_ADDRESS for _, entity, _, _ in engine.succeeded_records)
+
+
+@pytest.mark.parametrize("already_linked", [False, True])
+def test_hierarchy_records_success_for_updated_or_already_linked_children(tmp_path, already_linked):
+    class HierarchyDataverse(BulkDataverse):
+        def find_many_by_field(self, *args, **kwargs):
+            return {
+                "WUKH1": {
+                    "accountid": "child-guid",
+                    "_parentaccountid_value": "parent-guid" if already_linked else None,
+                },
+                "WUKH2": {"accountid": "parent-guid"},
+            }
+
+        def update_multiple(self, entity_set, records):
+            self.updated.extend((entity_set, row["accountid"], row) for row in records)
+
+    dataverse = HierarchyDataverse()
+    engine, _ = _engine(tmp_path, dataverse)
+    result = engine._sync_hierarchy([
+        {"workplaceEid": "WUKH1", "parentWorkplaceEid": "WUKH2"},
+    ], allowed_workplace_eids={"WUKH1", "WUKH2"})
+
+    assert result["already_linked" if already_linked else "linked"] == 1
+    assert engine.succeeded_records == {(PHASE_HIERARCHY, ENTITY_ACCOUNT, "WUKH1", "")}
+    assert bool(dataverse.updated) is (not already_linked)
 
 
 def test_a_rejected_record_fails_alone_and_the_codebase_carries_on(tmp_path):

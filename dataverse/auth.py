@@ -152,9 +152,11 @@ class TokenProvider:
                 )
                 self._token = payload["access_token"]
                 expires_in = int(payload.get("expires_in", 3600))
-                self._expires_at = time.time() + max(
-                    60, expires_in - _RENEW_MARGIN_SECONDS
-                )
+                # A short-lived token must never be cached past its real
+                # expiry; keep half its lifetime when the usual margin is
+                # larger than the token's lifetime.
+                margin = min(_RENEW_MARGIN_SECONDS, expires_in / 2)
+                self._expires_at = time.time() + max(0, expires_in - margin)
                 logger.info(
                     "Acquired Dataverse token: scope=%s valid_s=%d",
                     self.scope,

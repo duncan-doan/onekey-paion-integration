@@ -5,6 +5,7 @@ See tests/test_live.py for the tests that actually call UAT.
 """
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -27,10 +28,11 @@ from onekey.exceptions import OneKeyAPIResponseError
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text="", headers=None):
         self.status_code = status_code
         self._payload = payload
         self.text = text if payload is None else json.dumps(payload)
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is None:
@@ -100,6 +102,29 @@ def test_password_is_not_in_the_repr():
     assert "hunter2" not in repr(config)
 
 
+@pytest.mark.parametrize("base_url", ["http://x", "ftp://x", "https:///missing-host", "https://user:password@x"])
+def test_basic_auth_requires_https_without_credentials_in_the_url(base_url):
+    with pytest.raises(OneKeyConfigError, match="HTTPS"):
+        OneKeyConfig(base_url, "u", "p", "494")
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"max_retries": 0},
+        {"max_retries": -1},
+        {"max_retries": 1.5},
+        {"timeout": 0},
+        {"timeout": float("nan")},
+        {"packet_delay": -1},
+        {"packet_delay": float("inf")},
+    ],
+)
+def test_invalid_retry_and_timeout_settings_fail_at_configuration(settings):
+    with pytest.raises(OneKeyConfigError):
+        OneKeyConfig("https://x", "u", "p", "494", **settings)
+
+
 # -- auth -----------------------------------------------------------------
 
 
@@ -152,6 +177,106 @@ def test_payload_level_error_status_raises_even_on_http_200():
         session.post_json("/ok/search", {})
 
 
+def test_a_warning_envelope_is_returned_with_its_records():
+    # Only ERROR raises. What success=false means on a WARNING search is not
+    # documented, and a truncated search still carries its records.
+    envelope = {
+        "status": "WARNING",
+        "success": False,
+        "statusMessage": "Partial result",
+        "results": [{"onekeyEid": "A"}],
+    }
+    session = make_session([FakeResponse(200, {"response": envelope})])
+    assert session.post_json("/ok/search", {})["results"] == [{"onekeyEid": "A"}]
+
+
+def test_a_population_packet_answered_with_success_false_is_requested_again(monkeypatch):
+    # The vendor sample (Developer Guide 6.13) waits and asks again.
+    sleeps = []
+    monkeypatch.setattr("onekey.client.time.sleep", sleeps.append)
+    session = make_session(
+        [
+            FakeResponse(200, {"response": {"status": "WARNING", "success": False}}),
+            FakeResponse(
+                200,
+                search_payload(
+                    [{"onekeyEid": "A"}],
+                    isTransactionComplete=True,
+                    transactionPacketIdentifier=1,
+                ),
+            ),
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE"))
+    assert [r["onekeyEid"] for r in records] == ["A"]
+    assert len(session._session.calls) == 2
+    assert sleeps == [5]
+
+
+def test_a_population_packet_that_keeps_failing_stops_the_walk(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    failed = FakeResponse(200, {"response": {"status": "WARNING", "success": False}})
+    session = make_session([failed, failed, failed])
+    with pytest.raises(OneKeyAPIResponseError, match="not delivered after 3"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE"))
+
+
+@pytest.mark.parametrize("payload", [[], {"response": None}, {"response": []}])
+def test_invalid_json_envelope_raises_a_onekey_error(payload):
+    session = make_session([FakeResponse(200, payload)])
+    with pytest.raises(OneKeyAPIResponseError):
+        session.post_json("/ok/search", {})
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_long_retry_after_is_capped_and_keeps_the_heartbeat_fresh(status, monkeypatch):
+    # A huge Retry-After must not park the worker for hours while its
+    # heartbeat keeps the job looking alive.
+    sleeps, heartbeats = [], []
+    monkeypatch.setattr("onekey.auth.time.sleep", sleeps.append)
+    session = make_session(
+        [FakeResponse(status, headers={"Retry-After": "3600"}), FakeResponse(200, search_payload([]))]
+    )
+    session.after_request = lambda: heartbeats.append(1)
+
+    session.post_json("/ok/search", {})
+
+    assert sum(sleeps) == 300
+    assert max(sleeps) <= 60
+    assert len(heartbeats) == 6  # before each minute of waiting and after the request
+    assert len(session._session.calls) == 2
+
+
+def test_a_short_retry_after_on_throttling_still_waits_the_floor(monkeypatch):
+    # The quota is per minute: retrying a 429 within seconds only spends attempts.
+    sleeps = []
+    monkeypatch.setattr("onekey.auth.time.sleep", sleeps.append)
+    session = make_session(
+        [FakeResponse(429, headers={"Retry-After": "1"}), FakeResponse(200, search_payload([]))]
+    )
+    session.post_json("/ok/search", {})
+    assert sum(sleeps) == 30
+
+
+def test_http_date_retry_after_is_respected(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2015, 10, 21, 7, 26, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("onekey.auth.datetime", FixedDatetime)
+    sleeps = []
+    monkeypatch.setattr("onekey.auth.time.sleep", sleeps.append)
+    session = make_session(
+        [
+            FakeResponse(429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+            FakeResponse(200, search_payload([])),
+        ]
+    )
+    session.post_json("/ok/search", {})
+    assert sum(sleeps) == 120
+
+
 def test_utf8_charset_is_declared_on_json_posts():
     session = make_session([FakeResponse(200, search_payload([]))])
     session.post_json("/ok/search", {"a": 1})
@@ -181,6 +306,44 @@ def test_a_territory_is_required():
     client = OneKeyClient(make_session([]))
     with pytest.raises(ValueError, match="required"):
         client.search(ACTIVITY, [])
+
+
+def test_search_rejects_more_than_thirty_criteria_before_calling_the_api():
+    session = make_session([])
+    with pytest.raises(ValueError, match="at most 30"):
+        OneKeyClient(session).search(ACTIVITY, [search_field("a", "b")] * 31, cod_base="WDE")
+    assert session._session.calls == []
+
+
+def test_search_does_not_count_or_operators_as_criteria():
+    session = make_session([FakeResponse(200, search_payload([]))])
+    criteria = [search_field("a", "b"), "OR"] * 29 + [search_field("a", "b")]
+    OneKeyClient(session).search(ACTIVITY, criteria, cod_base="WDE")
+    assert session._session.calls[0]["json"]["fields"] == criteria
+
+
+def test_search_rejects_combining_the_entitys_own_id_with_other_criteria():
+    session = make_session([])
+    with pytest.raises(ValueError, match="no other criterion"):
+        OneKeyClient(session).search(
+            ACTIVITY,
+            [search_field("activity.activityEid", "WUKA1"), "OR", search_field("individual.lastName", "Smith")],
+            cod_base="WUK",
+        )
+    assert session._session.calls == []
+
+
+def test_a_related_id_is_an_ordinary_filter():
+    # sample_sync's search: activities at the sampled workplaces, valid only.
+    session = make_session([FakeResponse(200, search_payload([]))])
+    OneKeyClient(session).search_hcp(
+        cod_base="WUK",
+        fields=[search_field("workplace.workplaceEid", ["WUKH1", "WUKH2"])],
+        result_size=50,
+        is_in_contract=True,
+    )
+    names = [f["name"] for f in session._session.calls[0]["json"]["fields"]]
+    assert names == ["workplace.workplaceEid", "activity.statusCode"]
 
 
 def test_search_hcp_builds_an_activity_request():
@@ -261,12 +424,80 @@ def test_iter_population_stops_at_max_records():
     assert len(records) == 3
 
 
-def test_iter_population_stops_when_no_transaction_id_comes_back():
-    # Without this guard the first packet would replay forever.
+def test_iter_population_fails_when_an_incomplete_packet_omits_the_transaction_id():
+    # Silent success would advance the sync checkpoint past unreturned records.
     session = make_session(
         [FakeResponse(200, search_payload([{"onekeyEid": "A"}], isTransactionComplete=False))]
     )
-    assert len(list(OneKeyClient(session).iter_population(cod_base="WDE"))) == 1
+    with pytest.raises(OneKeyAPIResponseError, match="incomplete"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE"))
+
+
+@pytest.mark.parametrize("complete", [False, None, "false"])
+def test_iter_population_rejects_empty_or_ambiguous_incomplete_packets(complete):
+    session = make_session(
+        [FakeResponse(200, search_payload([], isTransactionComplete=complete, transactionUniqueIdentifier="tx1"))]
+    )
+    with pytest.raises(OneKeyAPIResponseError):
+        list(OneKeyClient(session).iter_population(cod_base="WDE"))
+
+
+def _packet(records, number, complete):
+    return FakeResponse(
+        200,
+        search_payload(
+            records,
+            isTransactionComplete=complete,
+            transactionUniqueIdentifier="tx1",
+            transactionPacketIdentifier=number,
+        ),
+    )
+
+
+def test_iter_population_refetches_a_packet_lost_in_transit(monkeypatch):
+    # A lost response is retried, and OneKey answers with the packet after it;
+    # the walk asks for the missed one by number (Developer Guide 6.13.4).
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            _packet([{"onekeyEid": "C"}], 3, False),
+            _packet([{"onekeyEid": "B"}], 2, False),  # packet 2, asked for by number
+            _packet([{"onekeyEid": "D"}], 4, True),
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert [r["onekeyEid"] for r in records] == ["A", "B", "C", "D"]
+    refetch = session._session.calls[2]["json"]
+    assert refetch["transactionPacketIdentifier"] == 2
+    assert refetch["transactionUniqueIdentifier"] == "tx1"
+    assert refetch["codBase"] == "WDE"
+    assert "transactionPacketIdentifier" not in session._session.calls[3]["json"]
+
+
+def test_iter_population_stops_when_too_many_packets_were_lost(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [_packet([{"onekeyEid": "A"}], 1, False), _packet([{"onekeyEid": "F"}], 6, False)]
+    )
+    with pytest.raises(OneKeyAPIResponseError, match="packet sequence"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE"))
+
+
+def test_iter_population_rejects_a_packet_number_going_backwards(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [_packet([{"onekeyEid": "A"}], 1, False), _packet([{"onekeyEid": "A"}], 1, True)]
+    )
+    with pytest.raises(OneKeyAPIResponseError, match="packet sequence"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE"))
+
+
+def test_iter_population_rejects_two_territories_before_calling_the_api():
+    session = make_session([])
+    with pytest.raises(ValueError, match="not both"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE", iso_cod2="DE"))
+    assert session._session.calls == []
 
 
 @pytest.mark.parametrize("size", [99, 2001])
@@ -346,6 +577,22 @@ def test_flatten_hcp_pulls_person_specialty_and_workplace():
     assert row["specialtyLabel"] == "Pharmaceutical Commercial Assistant"
     assert row["workplaceName"] == "Apotheke am Markt"
     assert row["isValid"] is True
+
+
+def test_qualifications_specialties_are_not_hidden_by_unrelated_ada():
+    row = flatten_hcp(
+        {
+            "individual": {
+                "ada": {"TIT,1": {"code": "DR"}},
+                "qualifications": {
+                    "SP,2": {"code": "SECOND"},
+                    "SP,1": {"code": "FIRST"},
+                },
+            }
+        }
+    )
+    assert row["specialtyCode1"] == "FIRST"
+    assert row["specialtyCode2"] == "SECOND"
 
 
 def test_flatten_hcp_falls_back_to_activity_eids_when_nested_entities_missing():
@@ -570,8 +817,22 @@ def test_after_request_hook_runs_before_each_retry_wait(monkeypatch):
     events = []
     monkeypatch.setattr("onekey.auth.time.sleep", lambda delay: events.append("sleep"))
     session = make_session(
-        [FakeResponse(503), FakeResponse(429), FakeResponse(200, search_payload([]))]
+        [FakeResponse(503), FakeResponse(429, headers={"Retry-After": "1"}), FakeResponse(200, search_payload([]))]
     )
     session.after_request = lambda: events.append("hook")
     session.post_json("/ok/search", {})
     assert events == ["hook", "sleep", "hook", "sleep", "hook"]
+
+
+def test_a_lost_packet_is_recovered_when_the_last_packet_omits_the_transaction_id(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    last = FakeResponse(
+        200,
+        search_payload([{"onekeyEid": "C"}], isTransactionComplete=True, transactionPacketIdentifier=3),
+    )
+    session = make_session(
+        [_packet([{"onekeyEid": "A"}], 1, False), last, _packet([{"onekeyEid": "B"}], 2, False)]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE"))
+    assert [r["onekeyEid"] for r in records] == ["A", "B", "C"]
+    assert session._session.calls[2]["json"]["transactionUniqueIdentifier"] == "tx1"

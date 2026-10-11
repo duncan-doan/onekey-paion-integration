@@ -93,6 +93,7 @@ class TransformEngine:
 
             if transformed is None:
                 continue
+            transformed = self._normalize_option_value(transformed, fm)
 
             if fm.target_field == "description" and fm.transform_rule.startswith("template:"):
                 if transformed:
@@ -157,6 +158,7 @@ class TransformEngine:
 
             if transformed is None:
                 continue
+            transformed = self._normalize_option_value(transformed, fm)
 
             if fm.target_field == "description" and fm.transform_rule.startswith("template:"):
                 if transformed:
@@ -238,6 +240,7 @@ class TransformEngine:
             transformed = self._apply_transform(value, fm, source)
             if transformed is None:
                 continue
+            transformed = self._normalize_option_value(transformed, fm)
 
             if fm.target_field_type == "boolean":
                 transformed = self._normalize_boolean(transformed)
@@ -321,6 +324,7 @@ class TransformEngine:
             transformed = self._apply_transform(value, fm, source)
             if transformed is None:
                 continue
+            transformed = self._normalize_option_value(transformed, fm)
 
             if fm.target_field_type == "boolean":
                 transformed = self._normalize_boolean(transformed)
@@ -344,15 +348,6 @@ class TransformEngine:
 
             if fm.max_length and isinstance(transformed, str):
                 transformed = transformed[: fm.max_length]
-
-            # Picklist integers
-            if fm.target_field_type in ("picklist", "state") and isinstance(
-                transformed, str
-            ):
-                if transformed.isdigit() or (
-                    transformed.startswith("-") and transformed[1:].isdigit()
-                ):
-                    transformed = int(transformed)
 
             payload[fm.target_field] = transformed
 
@@ -455,6 +450,7 @@ class TransformEngine:
             transformed = self._apply_transform(value, fm, normalized)
             if transformed is None:
                 continue
+            transformed = self._normalize_option_value(transformed, fm)
 
             if fm.target_field == key_name:
                 kind = "append" if (fm.transform_rule or "").startswith("append:") else "base"
@@ -493,11 +489,6 @@ class TransformEngine:
                 or composed
             )
             payload["name"] = str(fallback_name)[:250]
-
-        # Picklist codes arrive as strings from value_mapping.csv.
-        type_code = payload.get("addresstypecode")
-        if isinstance(type_code, str) and type_code.isdigit():
-            payload["addresstypecode"] = int(type_code)
 
         return {k: v for k, v in payload.items() if v is not None}
 
@@ -552,6 +543,14 @@ class TransformEngine:
                 payload["ts_compoundkey"] = str(value)
         else:
             payload["ts_compoundkey"] = str(value)
+
+    @staticmethod
+    def _normalize_option_value(value: Any, mapping: "FieldMapping") -> Any:
+        """Dataverse choices and states use JSON integers, including CSV decodes."""
+        if mapping.target_field_type in ("picklist", "state") and isinstance(value, str):
+            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                return int(value)
+        return value
 
     @staticmethod
     def _normalize_boolean(value: Any) -> bool:
@@ -777,10 +776,6 @@ class TransformEngine:
 
         if rule.startswith("constant:"):
             return rule.split(":", 1)[1]
-
-        if rule.startswith("fallback_for:"):
-            # Secondary mapping: only used when primary field is empty (handled by caller)
-            return value
 
         # Lookups are resolved by DynamicSyncEngine before transform; skip here.
         if rule in ("lookup_by_key", "lookup"):

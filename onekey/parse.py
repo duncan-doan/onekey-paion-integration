@@ -10,6 +10,17 @@ normally wants, leaving the raw payload untouched for anything else.
 from __future__ import annotations
 
 
+def _rank(key, value):
+    """Read a rank from the entry or its compound map key."""
+    rank = value.get("rank")
+    if rank is None:
+        rank = str(key).replace("_", ",").partition(",")[2]
+    try:
+        return int(rank)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _coded_values(container):
     """Normalise a OneKey coded-value map into a list ordered by rank.
 
@@ -25,13 +36,12 @@ def _coded_values(container):
         if not isinstance(value, dict):
             continue
         list_code = value.get("listCode")
-        rank = value.get("rank")
-        if list_code is None and "," in key:
-            list_code = key.split(",", 1)[0]
+        if list_code is None and "," in str(key):
+            list_code = str(key).split(",", 1)[0]
         entries.append(
             {
                 "listCode": list_code,
-                "rank": rank if rank is not None else 0,
+                "rank": _rank(key, value),
                 "code": value.get("code"),
                 "label": value.get("codeLabel") or value.get("label"),
                 "corporateLabel": value.get("codeCorporateLabel"),
@@ -55,8 +65,11 @@ def first_ada_code(entity, list_code: str) -> str | None:
 
 def specialties(entity):
     """Return the ``SP`` (specialty) coded values for an individual or workplace."""
-    container = entity.get("ada") or entity.get("qualifications") or {}
-    return [e for e in _coded_values(container) if e["listCode"] == "SP"]
+    for name in ("ada", "qualifications"):
+        matches = [e for e in _coded_values(entity.get(name)) if e["listCode"] == "SP"]
+        if matches:
+            return matches
+    return []
 
 
 def specialty_slots(entity, slots: int = 5) -> dict:
@@ -82,24 +95,15 @@ def _telephone_slots(entity, slots: int = 2) -> dict:
     underscore forms used in mapping paths (``1_1``).
     """
     phones = (entity or {}).get("telephones") or {}
-    out = {f"telephone{i}": None for i in range(1, slots + 1)}
+    out = {"telephone": None, **{f"telephone{i}": None for i in range(1, slots + 1)}}
     if not isinstance(phones, dict) or not phones:
         return out
 
-    def sort_key(item):
-        key, value = item
-        rank = (value or {}).get("rank")
-        if rank is None and "," in str(key):
-            try:
-                rank = int(str(key).split(",", 1)[1])
-            except ValueError:
-                rank = 0
-        return rank if rank is not None else 0
-
-    ordered = sorted(phones.items(), key=sort_key)
+    ordered = sorted(
+        ((key, value) for key, value in phones.items() if isinstance(value, dict)),
+        key=lambda item: _rank(*item),
+    )
     for i, (_, entry) in enumerate(ordered[:slots], start=1):
-        if not isinstance(entry, dict):
-            continue
         out[f"telephone{i}"] = (
             entry.get("callNumberForSearch")
             or entry.get("callNumber")
@@ -176,10 +180,11 @@ def primary_address(workplace):
 
     def sort_key(item):
         key, value = item
-        type_code = value.get("typeCode") or key.split(",", 1)[0]
-        return (0 if type_code == "P" else 1, value.get("rank") or 0)
+        type_code = value.get("typeCode") or str(key).split(",", 1)[0]
+        return (0 if type_code == "P" else 1, _rank(key, value))
 
-    _, entry = sorted(addresses.items(), key=sort_key)[0]
+    candidates = ((key, value) for key, value in addresses.items() if isinstance(value, dict))
+    _, entry = min(candidates, key=sort_key, default=(None, {}))
     return flatten_address_entry(entry)
 
 

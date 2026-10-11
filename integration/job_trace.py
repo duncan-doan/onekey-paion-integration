@@ -19,7 +19,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from dataverse.client import chunked, escape_odata
-from dataverse.exceptions import DataverseAmbiguousWriteError, DataverseHTTPError
+from dataverse.exceptions import (
+    DataverseAmbiguousWriteError,
+    DataverseError,
+    DataverseHTTPError,
+)
 
 if TYPE_CHECKING:
     from dataverse import DataverseClient
@@ -260,6 +264,8 @@ def phase_counts_json(results: dict | None) -> str | None:
         payload["by_process_code"] = results["by_process_code"]
     if "picklist_gaps" in results:
         payload["picklist_gaps"] = int(results.get("picklist_gaps") or 0)
+    if results.get("trace_failures_dropped"):
+        payload["trace_failures_dropped"] = int(results["trace_failures_dropped"])
     if not payload:
         return None
     return clip(json.dumps(payload, separators=(",", ":"), default=str), 10000)
@@ -334,10 +340,33 @@ def classify_failure(exc: BaseException | None, category: str | None, retryable:
 
 
 # A running job refreshes ts_lastheartbeat at most this often, after any
-# OneKey or Dataverse request and before each OneKey retry wait (see
+# OneKey or Dataverse request and during OneKey retry waits (see
 # JobTracer.beat). A Running job whose heartbeat is several intervals old has
 # stopped.
 HEARTBEAT_EVERY_SECONDS = 300
+# After a heartbeat write fails, the next one is tried this much sooner.
+HEARTBEAT_RETRY_SECONDS = 60
+
+# Failure row columns the table does not require. A row Dataverse rejects is
+# written once more without them, so a bad value there does not lose the
+# record's place in the retry queue.
+_OPTIONAL_FAILURE_FIELDS = ("ts_externalid", "ts_httpstatus", "ts_errorcode")
+
+
+def _transient_write_error(exc: BaseException) -> bool:
+    """True when a failure row write failed because of Dataverse, not the row.
+
+    Throttling, server errors, lost connections, unknown outcomes, token
+    failures and permission errors affect every row the same way, so the rows
+    are kept for a later attempt. Any other 4xx rejects the row, and so does
+    an error raised outside the client (a value that cannot be serialised).
+    """
+    if isinstance(exc, DataverseAmbiguousWriteError):
+        return True
+    if isinstance(exc, DataverseHTTPError):
+        status = exc.status_code
+        return status is None or status in (401, 403, 429) or status >= 500
+    return isinstance(exc, DataverseError)
 
 
 class JobTracer:
@@ -363,6 +392,8 @@ class JobTracer:
         self._pending: dict[str, dict] = {}
         self._seen: set[str] = set()
         self.written_failures = 0
+        # Rows Dataverse rejected even without optional fields.
+        self.dropped_failures = 0
         self._finished = False
         self.persist_failures = True
         self.recent_failures: list[dict] = []
@@ -384,6 +415,7 @@ class JobTracer:
         self._seen.clear()
         self.recent_failures.clear()
         self.written_failures = 0
+        self.dropped_failures = 0
         self.job_guid = None
         self.enabled = self._can_trace and not dry_run
         self.job_id = str(uuid.uuid4())
@@ -445,6 +477,8 @@ class JobTracer:
             external = clip(external_id, 200) if external_id else ""
             self.recent_failures.append(
                 {
+                    "phase": phase,
+                    "entity": entity_value,
                     "source_id": source,
                     "external_id": external,
                     "retryable": is_retryable,
@@ -520,10 +554,14 @@ class JobTracer:
     def beat(self) -> None:
         """Refresh ts_lastheartbeat if HEARTBEAT_EVERY_SECONDS have passed.
 
-        Called after every OneKey and Dataverse request, and before each OneKey
-        retry wait, while a job runs, so a live job's heartbeat stays fresh
-        inside long phases and long throttling backoffs. The update is a
-        Dataverse request itself; ``_beating`` stops it from beating again.
+        Called after every OneKey and Dataverse request, and during OneKey
+        retry waits, while a job runs, so a live job's heartbeat stays fresh
+        inside long phases and long OneKey backoffs. The update is a Dataverse
+        request itself; ``_beating`` stops it from beating again.
+
+        The write is sent once, without retries: when Dataverse is throttling,
+        retrying it would hold up the request that triggered it. A failed
+        heartbeat is tried again HEARTBEAT_RETRY_SECONDS later.
         """
         if self._beating or not self.enabled or not self.job_guid or self._finished:
             return
@@ -533,8 +571,11 @@ class JobTracer:
         self._last_beat = now
         self._beating = True
         try:
-            self.dataverse.update(JOBS, self.job_guid, {"ts_lastheartbeat": utc_now()})
+            self.dataverse.update(
+                JOBS, self.job_guid, {"ts_lastheartbeat": utc_now()}, attempts=1
+            )
         except Exception:
+            self._last_beat = now - HEARTBEAT_EVERY_SECONDS + HEARTBEAT_RETRY_SECONDS
             logger.warning(
                 "Could not refresh the heartbeat of job %s", self.job_id, exc_info=True
             )
@@ -565,6 +606,21 @@ class JobTracer:
             return
         try:
             self._flush()
+            if isinstance(results, dict):
+                if self._pending:
+                    # Dataverse was unavailable or throttling, so these rows are
+                    # still unwritten. Without them the next delta would move
+                    # past records that failed, so the job must not cover its
+                    # window, and the queue retries it.
+                    results["success"] = False
+                    results.setdefault("errors", []).append(
+                        f"trace: could not persist {len(self._pending)} failure row(s)"
+                    )
+                if self.dropped_failures:
+                    # Rows Dataverse rejected outright. They would fail again on
+                    # every run, so they must not stop the window advancing;
+                    # each was logged as an error with its source ID.
+                    results["trace_failures_dropped"] = self.dropped_failures
             status = trace_status(
                 results, aborted=aborted, failure_rows=self.written_failures
             )
@@ -607,27 +663,89 @@ class JobTracer:
                     FAILURES, batch, logical_name="ts_integrationfailure"
                 )
                 self.written_failures += len(batch)
+                continue
+            except DataverseAmbiguousWriteError:
+                # A gateway timeout or lost answer: the batch may have been
+                # created. ts_failurekey is unique, so check before resending.
+                missing = self._not_written(batch)
+                self.written_failures += len(batch) - len(missing)
+                batch = missing
             except Exception as exc:
-                if isinstance(exc, DataverseAmbiguousWriteError):
-                    # The batch may have been created; write only what is missing.
-                    missing = self._not_written(batch)
-                    self.written_failures += len(batch) - len(missing)
-                    batch = missing
+                if _transient_write_error(exc):
+                    # An outage or throttling affects the whole batch. Keep it
+                    # for the next checkpoint instead of one request per row.
+                    self._retain(batch)
+                    logger.warning(
+                        "Could not write %d integration failure(s); keeping them for the next checkpoint",
+                        len(batch),
+                        exc_info=True,
+                    )
+                    continue
                 logger.warning(
                     "CreateMultiple failed for %d integration failure(s); writing one by one",
                     len(batch),
                     exc_info=True,
                 )
-                for row in batch:
-                    try:
-                        self.dataverse.create(FAILURES, row)
-                        self.written_failures += 1
-                    except Exception:
-                        logger.warning(
-                            "Could not write integration failure %s",
-                            row.get("ts_failurekey"),
-                            exc_info=True,
-                        )
+            self._create_singly(batch)
+
+    def _retain(self, rows: list[dict]) -> None:
+        self._pending.update((row["ts_failurekey"], row) for row in rows)
+
+    def _create_singly(self, rows: list[dict]) -> None:
+        """Write rows one at a time; stop at the first Dataverse-side failure.
+
+        A rejected row is checked by its unique key first (a row resent after
+        an unknown outcome is already there), then written once more without
+        the optional columns, then logged as lost.
+        """
+        for position, row in enumerate(rows):
+            try:
+                self.dataverse.create(FAILURES, row)
+                self.written_failures += 1
+                continue
+            except Exception as exc:
+                if _transient_write_error(exc):
+                    self._retain(rows[position:])
+                    logger.warning(
+                        "Could not write integration failure %s; keeping %d row(s) for the next checkpoint",
+                        row.get("ts_failurekey"),
+                        len(rows) - position,
+                        exc_info=True,
+                    )
+                    return
+                error = exc
+            if not self._not_written([row]):
+                self.written_failures += 1
+                continue
+            self._create_minimal(row, error)
+
+    def _create_minimal(self, row: dict, error: BaseException) -> None:
+        minimal = {
+            key: value for key, value in row.items() if key not in _OPTIONAL_FAILURE_FIELDS
+        }
+        minimal["ts_errorcategory"] = CAT_UNKNOWN
+        minimal["ts_errormessage"] = clip(row.get("ts_errormessage") or "Unknown error", 500)
+        try:
+            self.dataverse.create(FAILURES, minimal)
+            self.written_failures += 1
+            logger.warning(
+                "Integration failure %s written without optional columns after: %s",
+                row.get("ts_failurekey"),
+                error,
+            )
+        except Exception as exc:
+            if _transient_write_error(exc):
+                self._retain([row])
+                return
+            self.dropped_failures += 1
+            logger.error(
+                "Could not write integration failure %s (source %s); it will not be "
+                "retried: %s",
+                row.get("ts_failurekey"),
+                row.get("ts_sourceid"),
+                error,
+                exc_info=True,
+            )
 
     def _not_written(self, rows: list[dict]) -> list[dict]:
         """Rows of an uncertain CreateMultiple that are not in Dataverse.

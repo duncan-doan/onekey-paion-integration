@@ -75,6 +75,7 @@ def build_updates(
     missing_parents = set()
     missing_child_eids: list[str] = []
     missing_parent_eids: list[str] = []
+    already_linked_eids: list[str] = []
 
     for child_eid, parent_eid in edges:
         child = accounts.get(child_eid)
@@ -102,6 +103,7 @@ def build_updates(
             and str(current_parent).lower() == str(parent_id).lower()
         ):
             stats["already_linked"] += 1
+            already_linked_eids.append(child_eid)
             continue
 
         updates.append(
@@ -116,6 +118,7 @@ def build_updates(
     stats["missing_parent_unique"] = len(missing_parents)
     stats["missing_child_eids"] = missing_child_eids
     stats["missing_parent_eids"] = missing_parent_eids
+    stats["already_linked_eids"] = already_linked_eids
     return updates, stats
 
 

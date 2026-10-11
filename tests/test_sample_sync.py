@@ -56,6 +56,8 @@ class Engine:
     _set_request_hook = DynamicSyncEngine._set_request_hook
 
     def __init__(self, onekey, in_dataverse=()):
+        self.succeeded_ids = set()
+        self.succeeded_records = set()
         self.onekey = onekey
         self.dataverse = FakeDataverse()
         self.tracer = JobTracer(self.dataverse)

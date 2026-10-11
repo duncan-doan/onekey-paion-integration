@@ -27,6 +27,7 @@ from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
 from .job_trace import (
+    ENTITY_BY_NAME,
     JOB_AFFILIATIONS,
     JOB_DELTA,
     JOB_FULL,
@@ -126,6 +127,7 @@ class DynamicSyncEngine:
         )
         self._trace_phase = PHASE_HCO
         self.succeeded_ids: set[str] = set()
+        self.succeeded_records: set[tuple[int, int, str, str]] = set()
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
@@ -165,6 +167,8 @@ class DynamicSyncEngine:
         date_from: str | None = None,
         date_to: str | None = None,
     ) -> None:
+        self.succeeded_ids.clear()
+        self.succeeded_records.clear()
         self.tracer.begin(
             job_type=job_type,
             codebases=codebases,
@@ -281,10 +285,22 @@ class DynamicSyncEngine:
             exc=exc,
         )
 
-    def _note_success(self, *source_ids: str | None) -> None:
+    def _note_success(
+        self,
+        *source_ids: str | None,
+        entity: str | int | None = None,
+        external_id: str | None = None,
+    ) -> None:
+        """Remember successful writes with enough context to resolve failures."""
+        entity_value = ENTITY_BY_NAME.get(entity) if isinstance(entity, str) else entity
         for source_id in source_ids:
             if source_id:
-                self.succeeded_ids.add(str(source_id))
+                source = str(source_id)
+                self.succeeded_ids.add(source)
+                if entity_value is not None:
+                    self.succeeded_records.add(
+                        (self._trace_phase, entity_value, source, str(external_id or ""))
+                    )
 
     def sync_picklists(
         self,
@@ -1037,7 +1053,7 @@ class DynamicSyncEngine:
                 result["updated"] += 1
             result["processed"] += 1
             done += 1
-            self._note_success(workplace_eid)
+            self._note_success(workplace_eid, entity="account", external_id=key_value)
             self.sync_logger.log_record_success(
                 "account",
                 workplace_eid,
@@ -1162,7 +1178,7 @@ class DynamicSyncEngine:
             else:
                 result["updated"] += 1
             result["processed"] += 1
-            self._note_success(workplace_eid, key)
+            self._note_success(workplace_eid, key, entity="customeraddress", external_id=key)
             self.sync_logger.log_record_success(
                 "customeraddress",
                 key,
@@ -1265,6 +1281,9 @@ class DynamicSyncEngine:
             )
         )
 
+        for child_eid in stats.get("already_linked_eids") or []:
+            self._note_success(child_eid, entity="account")
+
         if not updates:
             return result
 
@@ -1284,6 +1303,11 @@ class DynamicSyncEngine:
                 str(exc),
                 exc=exc,
             )
+        failed_eids = {child_eid for child_eid, _ in link_failures}
+        for row in updates:
+            child_eid = str(row[account_key])
+            if child_eid not in failed_eids:
+                self._note_success(child_eid, entity="account")
         result["linked"] = linked
         result["failed"] = failed
         return result
@@ -1366,7 +1390,7 @@ class DynamicSyncEngine:
             from_id = self._account_cache.get(from_eid)
             to_id = self._account_cache.get(to_eid)
 
-            if not from_id:
+            if not from_id and not dry_run:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
@@ -1386,7 +1410,7 @@ class DynamicSyncEngine:
                     log=False,
                 )
                 continue
-            if not to_id:
+            if not to_id and not dry_run:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
@@ -1484,6 +1508,8 @@ class DynamicSyncEngine:
                     external_id,
                     edge.get("fromWorkplaceEid"),
                     edge.get("toWorkplaceEid"),
+                    entity="ts_affiliation",
+                    external_id=external_id,
                 )
                 self.sync_logger.log_record_success(
                     "ts_affiliation",
@@ -1574,7 +1600,7 @@ class DynamicSyncEngine:
             contact_id = self._contact_cache.get(flat["individualEid"])
             account_id = self._account_cache.get(flat["workplaceEid"])
 
-            if not contact_id:
+            if not contact_id and not dry_run:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
@@ -1588,13 +1614,13 @@ class DynamicSyncEngine:
                     external_id,
                     "relate",
                     f"Contact not found for {flat['individualEid']}",
-                    external_id=flat["individualEid"],
+                    external_id=external_id,
                     category="lookup",
                     retryable=False,
                     log=False,
                 )
                 continue
-            if not account_id:
+            if not account_id and not dry_run:
                 result["failed"] += 1
                 self.sync_logger.log_relationship_failed(
                     "ts_affiliation",
@@ -1608,7 +1634,7 @@ class DynamicSyncEngine:
                     external_id,
                     "relate",
                     f"Account not found for {flat['workplaceEid']}",
-                    external_id=flat["workplaceEid"],
+                    external_id=external_id,
                     category="lookup",
                     retryable=False,
                     log=False,
@@ -1694,7 +1720,7 @@ class DynamicSyncEngine:
                 # Only the activity: its failure rows use the activity EID. The
                 # individual and workplace EIDs would resolve the contact and
                 # account rows, which this write did not touch.
-                self._note_success(external_id)
+                self._note_success(external_id, entity="ts_affiliation", external_id=external_id)
                 self.sync_logger.log_record_success(
                     "ts_affiliation",
                     external_id,
@@ -1975,7 +2001,7 @@ class DynamicSyncEngine:
                     result["updated"] += 1
                 result["processed"] += 1
                 done += 1
-                self._note_success(individual_eid)
+                self._note_success(individual_eid, entity="contact", external_id=payload.get(key_name))
                 self.sync_logger.log_record_success(
                     "contact",
                     individual_eid,
@@ -2068,7 +2094,9 @@ class DynamicSyncEngine:
                 "activity_packets": len(all_activities),
                 "inserted": result["by_process_code"].get("I", 0),
                 "updated": result["by_process_code"].get("U", 0),
-                "removed": result["by_process_code"].get("R", 0),
+                # R is REFRESH, "updated or inserted" (Developer Guide
+                # 6.13.5), not a removal: it is upserted like the others.
+                "refreshed": result["by_process_code"].get("R", 0),
             },
             codbase=codebase,
         )

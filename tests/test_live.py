@@ -1,11 +1,11 @@
 """Live tests against a real OneKey environment.
 
-Skipped unless credentials are present in the environment, so the default
-`pytest` run stays offline:
+Skipped unless --live is passed and credentials are present, so the default
+`pytest` run stays offline even with a configured .env:
 
     export ONEKEY_ENV=uat
     export ONEKEY_USERNAME=... ONEKEY_PASSWORD=... ONEKEY_CONNECTOR_ID=494
-    pytest tests/test_live.py -v
+    pytest tests/test_live.py --live -v
 
 These call the real service and count against rate limits, so they are kept few
 and small.
@@ -26,10 +26,13 @@ from onekey import (
     flatten_hco,
 )
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("ONEKEY_USERNAME"),
-    reason="live OneKey credentials not configured; see the module docstring",
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not os.environ.get("ONEKEY_USERNAME"),
+        reason="live OneKey credentials not configured; see the module docstring",
+    ),
+]
 
 # Territory to exercise. WDE is Germany.
 COD_BASE = os.environ.get("ONEKEY_TEST_CODBASE", "WDE")

@@ -2,12 +2,16 @@
 
 import json
 import logging
+import math
 import random
 import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 import requests
 from urllib3.exceptions import NewConnectionError
@@ -28,6 +32,42 @@ _SERVICE_4XX = frozenset({401, 403, 429})
 
 # POST actions that are safe to repeat: they set the same values again.
 _IDEMPOTENT_ACTIONS = ("UpdateMultiple", "UpsertMultiple")
+MAX_BATCH_OPERATIONS = 1000
+
+# Longest Retry-After honoured before the next attempt. Service protection
+# asks for up to five minutes. Retry waits do not refresh a job's heartbeat
+# (the heartbeat is a Dataverse write and would be throttled too), so two
+# capped waits plus timeouts must stay inside the queue worker's 20-minute
+# busy check. A longer request is cut to this; the attempt limit still applies.
+MAX_RETRY_AFTER_SECONDS = 300
+
+
+def _retry_after_seconds(value):
+    """Parse a numeric or HTTP-date Retry-After into seconds, or None."""
+    if value is None:
+        return None
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        try:
+            moment = parsedate_to_datetime(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            delay = max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, delay) if math.isfinite(delay) and delay >= 0 else None
+
+
+def _can_fallback_to_single(exc):
+    """False when writing record by record cannot help: auth or permissions.
+
+    A bulk 5xx is often the batch itself (a SQL or plug-in timeout), so the
+    records are sent singly. The fallback stops at the first single write that
+    fails for a service reason, so an outage costs one more request, not one
+    per record.
+    """
+    return exc.status_code not in (401, 403)
 
 
 def _never_sent(exc: requests.RequestException) -> bool:
@@ -146,10 +186,10 @@ def _same_value(expected, actual) -> bool:
     if isinstance(expected, bool) or isinstance(actual, bool):
         return type(expected) is type(actual) and expected == actual
     if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-        return float(expected) == float(actual)
+        return expected == actual
     # Choice and number columns accept "126870001" and return 126870001.
     if isinstance(expected, str) and isinstance(actual, (int, float)):
-        return bool(_NUMBER.match(expected)) and float(expected) == float(actual)
+        return bool(_NUMBER.match(expected)) and Decimal(expected) == Decimal(str(actual))
     if isinstance(expected, str) and isinstance(actual, str):
         if expected == actual:
             return True
@@ -267,7 +307,9 @@ class DataverseClient:
         self._session = session or requests.Session()
         self.stats = RequestStats()
         # Called with no arguments after every request, success or not. The
-        # sync engine uses it to refresh a running job's heartbeat.
+        # sync engine uses it to refresh a running job's heartbeat. Not called
+        # during retry waits: under throttling the heartbeat write would be
+        # throttled too, and its own waits would stretch the request's.
         self.after_request = None
 
     @classmethod
@@ -304,7 +346,7 @@ class DataverseClient:
         return headers
 
     def _raise_for_status(self, response, url):
-        if response.status_code < 400:
+        if 200 <= response.status_code < 300:
             return
 
         code = message = None
@@ -323,14 +365,17 @@ class DataverseClient:
             url=url,
         )
 
-    def request(self, method, path, idempotent=None, **kwargs):
+    def request(self, method, path, idempotent=None, attempts=None, **kwargs):
         """Issue one authenticated Web API request, retrying transient failures.
 
         Each call is logged at DEBUG and added to ``stats``. A POST is treated as
         a non-idempotent write (``idempotent=False``) unless it is an
         UpdateMultiple/UpsertMultiple action: once it may have reached Dataverse
         it is not repeated, and :class:`DataverseAmbiguousWriteError` is raised.
+        ``attempts`` overrides ``config.max_retries`` for this request; 1 sends
+        it once, for best-effort writes such as a job heartbeat.
         """
+        method = method.upper()
         if idempotent is None:
             idempotent = method != "POST" or path.split("?", 1)[0].endswith(
                 _IDEMPOTENT_ACTIONS
@@ -340,7 +385,7 @@ class DataverseClient:
         status = None
         self.stats.calls += 1
         try:
-            response = self._send(method, path, idempotent, **kwargs)
+            response = self._send(method, path, idempotent, attempts, **kwargs)
             status = response.status_code
             return response
         except Exception as exc:
@@ -360,14 +405,18 @@ class DataverseClient:
             )
             _call_hook(self.after_request)
 
-    def _send(self, method, path, idempotent, **kwargs):
+    def _send(self, method, path, idempotent, attempts=None, **kwargs):
         """The retry loop behind :meth:`request`."""
-        url = path if path.startswith("http") else f"{self.config.api_url}/{path.lstrip('/')}"
+        url = self._request_url(path)
         extra_headers = kwargs.pop("headers", None)
         kwargs.setdefault("timeout", self.config.timeout)
+        # Web API requests should not redirect: in particular, a 307 could
+        # forward a write body containing personal data to a different host.
+        kwargs["allow_redirects"] = False
+        max_attempts = attempts or self.config.max_retries
 
         last_error = None
-        for attempt in range(1, self.config.max_retries + 1):
+        for attempt in range(1, max_attempts + 1):
             self.stats.attempts += 1
             # Rebuild headers each attempt so a renewed token is picked up.
             try:
@@ -384,7 +433,7 @@ class DataverseClient:
                     f"Could not reach Dataverse at {url}: {exc}", url=url
                 )
             else:
-                if response.status_code == 401 and attempt < self.config.max_retries:
+                if response.status_code == 401 and attempt < max_attempts:
                     # Token rejected mid-run; force a refresh and try again.
                     logger.info("Dataverse returned 401, refreshing token: path=%s", _log_path(path))
                     self.tokens.token(force_refresh=True)
@@ -407,29 +456,52 @@ class DataverseClient:
                 except DataverseHTTPError as exc:
                     last_error = exc
 
-                # Dataverse sends Retry-After on throttling; respect it.
-                retry_after = response.headers.get("Retry-After")
-                if retry_after and attempt < self.config.max_retries:
-                    try:
-                        time.sleep(min(float(retry_after), 120))
-                        continue
-                    except ValueError:
-                        pass
+                # Dataverse sends Retry-After on throttling; respect it, up to
+                # MAX_RETRY_AFTER_SECONDS.
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                if retry_after is not None and attempt < max_attempts:
+                    if retry_after > MAX_RETRY_AFTER_SECONDS:
+                        logger.warning(
+                            "Dataverse %s %s asked to wait %.0fs; waiting %ds",
+                            method, _log_path(path), retry_after, MAX_RETRY_AFTER_SECONDS,
+                        )
+                    time.sleep(min(retry_after, MAX_RETRY_AFTER_SECONDS))
+                    continue
 
-            if attempt < self.config.max_retries:
+            if attempt < max_attempts:
                 delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.warning(
                     "Dataverse %s %s retrying: attempt=%d/%d reason=%s delay_s=%.1f",
                     method,
                     _log_path(path),
                     attempt,
-                    self.config.max_retries,
+                    max_attempts,
                     getattr(last_error, "status_code", None) or "connection_error",
                     delay,
                 )
                 time.sleep(delay)
 
         raise last_error
+
+    def _request_url(self, path):
+        """Keep credentials on the configured origin, including paging links."""
+        base = urlsplit(self.config.api_url)
+        try:
+            target = urlsplit(path)
+            if target.scheme or target.netloc:
+                same_origin = (
+                    target.scheme == base.scheme and target.hostname == base.hostname
+                    and (target.port if target.port is not None else 443)
+                    == (base.port if base.port is not None else 443)
+                    and target.username is None and target.password is None
+                    and not target.fragment
+                )
+                if not same_origin:
+                    raise ValueError("different origin")
+                return path
+        except ValueError as exc:
+            raise DataverseHTTPError("Refusing a Dataverse URL outside the configured origin") from exc
+        return f"{self.config.api_url}/{path.lstrip('/')}"
 
     # -- reads ------------------------------------------------------------
 
@@ -477,7 +549,7 @@ class DataverseClient:
 
     def retrieve(self, entity_set, record_id, select=None):
         """Fetch one record by GUID."""
-        params = {"$select": ",".join(select)} if select else None
+        params = {"$select": select if isinstance(select, str) else ",".join(select)} if select else None
         return self.request("GET", f"{entity_set}({record_id})", params=params).json()
 
     def find_one(self, entity_set, filter, select=None):
@@ -510,9 +582,19 @@ class DataverseClient:
             )
         return match.group(1)
 
-    def update(self, entity_set, record_id, data):
-        """Patch an existing record by GUID."""
-        self.request("PATCH", f"{entity_set}({record_id})", json=data)
+    def update(self, entity_set, record_id, data, attempts=None):
+        """Patch an existing record by GUID; it is never created.
+
+        ``If-Match: *`` makes a PATCH to a deleted record fail with 404
+        instead of recreating it. ``attempts`` is passed to :meth:`request`.
+        """
+        self.request(
+            "PATCH",
+            f"{entity_set}({record_id})",
+            json=data,
+            headers={"If-Match": "*"},
+            attempts=attempts,
+        )
         return record_id
 
     def delete(self, entity_set, record_id):
@@ -572,7 +654,7 @@ class DataverseClient:
             return {}
 
         logical, primary_id = entity_meta(entity_set)
-        columns = list(select or [])
+        columns = select.split(",") if isinstance(select, str) else list(select or [])
         for col in (match_field, primary_id):
             if col not in columns:
                 columns.append(col)
@@ -704,7 +786,8 @@ class DataverseClient:
         For tables that reject CreateMultiple/UpdateMultiple: Dataverse still
         runs the writes one by one, but over one HTTP round trip instead of
         one each. ``odata.continue-on-error`` keeps a failed write from
-        stopping the rest. Each write still counts toward service protection.
+        stopping the rest. Each write still counts toward entitlement limits;
+        batching also consumes the combined execution time service limit.
 
         Args:
             operations: ``(method, path, body)`` tuples, at most 1,000.
@@ -718,17 +801,21 @@ class DataverseClient:
         """
         if not operations:
             return []
+        if len(operations) > MAX_BATCH_OPERATIONS:
+            raise DataverseHTTPError(f"$batch supports at most {MAX_BATCH_OPERATIONS} operations")
         boundary = f"batch_{uuid.uuid4().hex}"
         lines = []
         for method, path, body in operations:
+            method = method.upper()
             lines.extend(
                 [
                     f"--{boundary}",
                     "Content-Type: application/http",
                     "Content-Transfer-Encoding: binary",
                     "",
-                    f"{method} {self.config.api_url}/{path.lstrip('/')} HTTP/1.1",
+                    f"{method} {self._request_url(path)} HTTP/1.1",
                     "Content-Type: application/json;type=entry",
+                    *(["If-Match: *"] if method == "PATCH" else []),
                     "",
                     json.dumps(body, ensure_ascii=False, default=str),
                 ]
@@ -982,7 +1069,7 @@ class DataverseClient:
                 _one_by_one(missing, _create_one, len(batch))
                 return
             except DataverseHTTPError as exc:
-                if not fallback_on_error:
+                if not fallback_on_error or not _can_fallback_to_single(exc):
                     raise
                 logger.warning(
                     "CreateMultiple failed for %s, creating one by one: "
@@ -992,8 +1079,10 @@ class DataverseClient:
                 _one_by_one(batch, _create_one, len(batch))
                 return
 
-            # A create rejected inside a $batch is retried alone, which either
-            # succeeds or gives the real error (raised, or kept in record_errors).
+            # A create that failed inside a $batch (rejected, throttled or a
+            # server error) is retried alone through the normal retry loop. The
+            # creates that succeeded keep their ids. A service error that
+            # persists is raised by the first single write that hits it.
             rejected = []
             for (index, match_value, payload), record_id in zip(batch, ids):
                 if record_id:
@@ -1041,7 +1130,7 @@ class DataverseClient:
                 else:
                     self.update_multiple(entity_set, payloads)
             except DataverseHTTPError as exc:
-                if not fallback_on_error:
+                if not fallback_on_error or not _can_fallback_to_single(exc):
                     raise
                 logger.warning(
                     "UpdateMultiple failed for %s, updating one by one: "
@@ -1067,9 +1156,11 @@ class DataverseClient:
                 len(batch),
             )
 
-        for batch in chunked(creates, batch_size):
+        create_size = min(batch_size, MAX_BATCH_OPERATIONS) if entity_set in _NO_CREATE_MULTIPLE else batch_size
+        update_size = min(batch_size, MAX_BATCH_OPERATIONS) if entity_set in _NO_UPDATE_MULTIPLE else batch_size
+        for batch in chunked(creates, create_size):
             _create_batch(batch)
-        for batch in chunked(updates, batch_size):
+        for batch in chunked(updates, update_size):
             _update_batch(batch)
 
         if any(item is None for item in results):

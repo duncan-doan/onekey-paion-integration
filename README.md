@@ -3,6 +3,9 @@
 Loads IQVIA **OneKey** healthcare professional (HCP) and organisation (HCO)
 reference data into **Dynamics 365 / Dataverse**.
 
+See the [code review and API limits](docs/CODE_REVIEW.md) for verified fixes,
+remaining data consistency risks, and connector-specific OneKey limits.
+
 ```
 OneKey workplace  (HCO) ──▶ Dataverse account
 OneKey individual (HCP) ──▶ Dataverse contact
@@ -15,8 +18,8 @@ OneKey individual (HCP) ──▶ Dataverse contact
 | [`onekey/`](onekey/) | IQVIA OneKey API client. Knows nothing about Dynamics. |
 | [`dataverse/`](dataverse/) | Dataverse Web API client. Knows nothing about OneKey. |
 | [`integration/`](integration/) | The only place that knows about both — mapping and sync. |
-| [`scripts/`](scripts/) | The three runnable entry points. |
-| [`tests/`](tests/) | 66 offline tests, 5 live. |
+| [`scripts/`](scripts/) | CLI entry points and maintenance scripts. |
+| [`tests/`](tests/) | Offline regression tests and opt-in live tests. |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md) and vendor reference material. |
 
 See [docs/architecture.md](docs/architecture.md) for why the two API clients
@@ -148,11 +151,12 @@ they collapse to one contact; key on `activityEid` for one per location.
 ## Tests
 
 ```bash
-pytest                  # 66 offline + 5 live (live auto-skip without .env)
+pytest                  # offline; live tests skip even with credentials
 pytest tests/test_onekey.py
+pytest tests/test_live.py --live  # explicit live API calls; loads .env
 ```
 
-All 71 pass.
+Live tests count against OneKey limits and require configured credentials.
 
 ## Azure Function
 

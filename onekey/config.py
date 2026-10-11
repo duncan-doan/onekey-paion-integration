@@ -1,7 +1,9 @@
 """Connection settings for a OneKey connection point."""
 
+import math
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from .exceptions import OneKeyConfigError
 
@@ -38,16 +40,48 @@ class OneKeyConfig:
     verify_ssl: bool = True
     # Seconds to wait between successful population packets (rate-limit hygiene).
     packet_delay: float = 1.0
-    # Records per /pop/refreshMyOnekey packet (OneKey accepts 100-2000). Larger
-    # packets mean fewer round trips and fewer packet_delay waits.
+    # Requested /pop/refreshMyOnekey packet size (protocol range 100-2000).
+    # Connector-specific backend caps can lower the actual packet size.
     page_size: int = 1000
 
     def __post_init__(self):
         for field in ("base_url", "username", "password", "connector_id"):
             if not str(getattr(self, field) or "").strip():
                 raise OneKeyConfigError(f"{field} is required")
-        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        base_url = str(self.base_url).strip().rstrip("/")
+        try:
+            parts = urlsplit(base_url)
+            valid_url = (
+                parts.scheme == "https"
+                and bool(parts.hostname)
+                and parts.username is None
+                and parts.password is None
+                and not parts.query
+                and not parts.fragment
+            )
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise OneKeyConfigError(
+                "base_url must be an HTTPS URL without credentials, query, or fragment"
+            )
+        object.__setattr__(self, "base_url", base_url)
         object.__setattr__(self, "connector_id", str(self.connector_id).strip())
+        if (
+            isinstance(self.max_retries, bool)
+            or not isinstance(self.max_retries, int)
+            or self.max_retries < 1
+        ):
+            raise OneKeyConfigError("max_retries must be a positive integer (total attempts)")
+        for field, allow_zero in (("timeout", False), ("packet_delay", True)):
+            try:
+                value = float(getattr(self, field))
+            except (TypeError, ValueError):
+                raise OneKeyConfigError(f"{field} must be a finite number") from None
+            if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+                constraint = "nonnegative" if allow_zero else "positive"
+                raise OneKeyConfigError(f"{field} must be finite and {constraint}")
+            object.__setattr__(self, field, value)
         if not 100 <= int(self.page_size) <= 2000:
             raise OneKeyConfigError("page_size must be between 100 and 2000")
 

@@ -16,6 +16,7 @@ from dataverse import (
     TokenProvider,
     escape_odata,
 )
+from dataverse.client import MAX_RETRY_AFTER_SECONDS
 from integration import (
     ACCOUNT_KEY_FIELD,
     CONTACT_KEY_FIELD,
@@ -113,6 +114,41 @@ def test_client_secret_is_not_in_the_repr():
     assert "super-secret" not in repr(config)
 
 
+@pytest.mark.parametrize("url", [
+    "http://x.crm4.dynamics.com", "https://user:secret@x.crm4.dynamics.com",
+    "https://x.crm4.dynamics.com?secret=value", "https://x.crm4.dynamics.com/other",
+    "https://x.crm4.dynamics.com:bad", "https://bad host.crm4.dynamics.com",
+])
+def test_config_rejects_unsafe_or_invalid_organization_urls(url):
+    with pytest.raises(DataverseConfigError):
+        DataverseConfig(url, "t", "c", "s")
+
+
+@pytest.mark.parametrize("options", [
+    {"max_retries": 0}, {"max_retries": 1.5}, {"bulk_batch_size": 0},
+    {"timeout": 0}, {"timeout": float("nan")}, {"timeout": float("inf")},
+    {"api_version": "v9.2/accounts"},
+])
+def test_config_rejects_values_that_cannot_produce_a_valid_request(options):
+    with pytest.raises(DataverseConfigError):
+        DataverseConfig("https://x.crm4.dynamics.com", "t", "c", "s", **options)
+
+
+def test_dataverse_attempt_limit_can_be_configured_from_environment(monkeypatch):
+    for name, value in {"URL": "https://x", "TENANT_ID": "t", "CLIENT_ID": "c",
+                        "CLIENT_SECRET": "s", "MAX_RETRIES": "7"}.items():
+        monkeypatch.setenv(f"DV_TEST_{name}", value)
+    assert DataverseConfig.from_env(prefix="DV_TEST_").max_retries == 7
+
+
+def test_invalid_numeric_environment_setting_raises_a_configuration_error(monkeypatch):
+    for name, value in {"URL": "https://x", "TENANT_ID": "t", "CLIENT_ID": "c",
+                        "CLIENT_SECRET": "s", "MAX_RETRIES": "invalid"}.items():
+        monkeypatch.setenv(f"DV_TEST_{name}", value)
+    with pytest.raises(DataverseConfigError, match="numeric environment settings"):
+        DataverseConfig.from_env(prefix="DV_TEST_")
+
+
 # -- auth -----------------------------------------------------------------
 
 
@@ -195,6 +231,24 @@ def test_token_provider_renews_before_expiry(monkeypatch):
     assert len(calls) == 2
 
 
+def test_token_provider_does_not_cache_a_short_lived_token_after_it_expires(monkeypatch):
+    import dataverse.auth as auth_module
+
+    clock = [1000]
+    calls = []
+    monkeypatch.setattr(auth_module.time, "time", lambda: clock[0])
+
+    def fake_get(*args, **kwargs):
+        calls.append(1)
+        return {"access_token": f"token-{len(calls)}", "expires_in": 30}
+
+    monkeypatch.setattr(auth_module, "get_access_token", fake_get)
+    provider = TokenProvider("t", "c", "s", "scope")
+    assert provider.token() == "token-1"
+    clock[0] += 31
+    assert provider.token() == "token-2"
+
+
 # -- client ---------------------------------------------------------------
 
 
@@ -233,11 +287,51 @@ def test_error_body_is_surfaced_in_the_message():
 
 
 def test_retrieve_multiple_follows_the_next_link():
+    next_link = "https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/accounts?$skiptoken=opaque%26cookie"
     client = make_client([
-        FakeResponse(200, {"value": [{"id": 1}], "@odata.nextLink": "https://x/page2"}),
+        FakeResponse(200, {"value": [{"id": 1}], "@odata.nextLink": next_link}),
         FakeResponse(200, {"value": [{"id": 2}]}),
     ])
     assert [r["id"] for r in client.retrieve_multiple("accounts")] == [1, 2]
+    assert client._session.calls[1]["url"] == next_link
+    assert client._session.calls[1]["params"] is None
+
+
+@pytest.mark.parametrize("next_link", [
+    "https://attacker.example/accounts", "http://paion-crm-test.api.crm4.dynamics.com/accounts",
+    "https://paion-crm-test.api.crm4.dynamics.com:8443/accounts", "//attacker.example/accounts",
+    "https://paion-crm-test.api.crm4.dynamics.com:0/accounts",
+    "https://user@paion-crm-test.api.crm4.dynamics.com/accounts",
+])
+def test_paging_does_not_send_credentials_to_an_untrusted_url(next_link):
+    client = make_client([
+        FakeResponse(200, {"value": [{"id": 1}], "@odata.nextLink": next_link}),
+    ])
+    with pytest.raises(DataverseHTTPError, match="outside the configured origin"):
+        client.retrieve_multiple("accounts")
+    assert len(client._session.calls) == 1
+    assert client.tokens.calls == 1
+
+
+def test_redirects_do_not_forward_a_write_body():
+    client = make_client([FakeResponse(307, headers={"Location": "https://attacker.example/"})])
+    with pytest.raises(DataverseHTTPError) as error:
+        client.create("accounts", {"name": "Personal data"})
+    assert error.value.status_code == 307
+    assert client._session.calls[0]["allow_redirects"] is False
+
+
+def test_update_cannot_recreate_a_concurrently_deleted_record():
+    client = make_client([FakeResponse(404, {"error": {"message": "deleted"}})])
+    with pytest.raises(DataverseHTTPError):
+        client.update("accounts", "existing-id", {"name": "X"})
+    assert client._session.calls[0]["headers"]["If-Match"] == "*"
+
+
+def test_retrieve_accepts_select_as_a_comma_separated_string():
+    client = make_client([FakeResponse(200, {"accountid": "A", "name": "X"})])
+    client.retrieve("accounts", "A", select="accountid,name")
+    assert client._session.calls[0]["params"]["$select"] == "accountid,name"
 
 
 def test_retrieve_multiple_honours_max_records():
@@ -405,6 +499,7 @@ def test_bulk_upsert_customeraddress_updates_in_one_batch():
     assert "PATCH https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/customeraddresses(addr-1) HTTP/1.1" in body
     assert "customeraddresses(addr-2)" in body
     assert "customeraddressid" not in body  # the id is in the URL, not the body
+    assert body.count("If-Match: *") == 2
     assert not any("UpdateMultiple" in c["url"] for c in calls)
 
 
@@ -487,6 +582,30 @@ def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
 def test_odata_quotes_are_escaped():
     # O'Brien would otherwise terminate the filter literal early.
     assert escape_odata("O'Brien") == "O''Brien"
+
+
+def test_batch_rejects_more_than_the_dataverse_limit_before_sending():
+    client = make_client([])
+    with pytest.raises(DataverseHTTPError, match="at most 1000"):
+        client.batch_write([("PATCH", "accounts(A)", {"name": "X"})] * 1001, idempotent=True)
+    assert client._session.calls == []
+
+
+def test_batch_upserts_split_at_the_dataverse_batch_limit():
+    records = [{"ts_externalid": str(index), "line1": "Updated"} for index in range(1001)]
+    existing = [{"ts_externalid": str(index), "customeraddressid": str(index)} for index in range(1001)]
+    client = make_client([
+        *[FakeResponse(200, {"value": existing[start:start + 50]}) for start in range(0, 1001, 50)],
+        batch_response(*[(204, None, None)] * 1000),
+        batch_response((204, None, None)),
+    ])
+    results = client.bulk_upsert_by_field(
+        "customeraddresses", "ts_externalid", records, batch_size=1500,
+        fallback_on_error=False,
+    )
+    assert len(results) == 1001
+    batches = [call for call in client._session.calls if call["url"].endswith("/$batch")]
+    assert [call["data"].count(b"PATCH ") for call in batches] == [1000, 1]
 
 
 # -- mapping --------------------------------------------------------------
@@ -635,6 +754,93 @@ def test_create_is_retried_when_it_never_reached_dataverse(no_sleep, never_sent)
 def test_create_is_retried_when_throttled(no_sleep):
     client = make_client([FakeResponse(429, headers={"Retry-After": "1"}), created(GUID_1)])
     assert client.create("accounts", {"name": "X"}) == GUID_1
+
+
+def test_dataverse_waits_for_the_full_retry_after(monkeypatch):
+    delays = []
+    monkeypatch.setattr("dataverse.client.time.sleep", delays.append)
+    client = make_client([FakeResponse(429, headers={"Retry-After": "300"}), created(GUID_1)])
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+    assert sum(delays) == 300
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_longer_retry_after_is_cut_to_the_cap(monkeypatch, status):
+    # Two capped waits plus timeouts stay inside the 20-minute busy check.
+    delays = []
+    monkeypatch.setattr("dataverse.client.time.sleep", delays.append)
+    client = make_client([
+        FakeResponse(status, headers={"Retry-After": "1265"}), created(GUID_1),
+    ])
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+    assert delays == [MAX_RETRY_AFTER_SECONDS]
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        FakeResponse(429, headers={"Retry-After": "120"}),
+        requests.exceptions.ConnectTimeout("connect timed out"),
+    ],
+)
+def test_retry_waits_do_not_run_the_heartbeat_hook(monkeypatch, first):
+    # The heartbeat is a Dataverse write: run during a throttling wait, it is
+    # throttled too, and its own waits stretch the request's.
+    events = []
+    monkeypatch.setattr("dataverse.client.time.sleep", lambda s: events.append("sleep"))
+    client = make_client([first, created(GUID_1)])
+    client.after_request = lambda: events.append("hook")
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+    assert events == ["sleep", "hook"]
+
+
+def test_a_throttled_request_is_not_stretched_by_heartbeat_writes(monkeypatch):
+    from integration.job_trace import HEARTBEAT_EVERY_SECONDS, JobTracer
+
+    clock = [1000.0]
+    monkeypatch.setattr("dataverse.client.time.sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr("integration.job_trace.time.monotonic", lambda: clock[0])
+    throttled = FakeResponse(429, {"error": {"message": "throttled"}}, headers={"Retry-After": "300"})
+    client = make_client([throttled] * 10)
+    tracer = JobTracer(client)
+    tracer.enabled, tracer.job_guid, tracer.job_id = True, "job-guid", "job-1"
+    tracer._last_beat = clock[0] - HEARTBEAT_EVERY_SECONDS  # a heartbeat is due
+    client.after_request = tracer.beat
+
+    with pytest.raises(DataverseHTTPError):
+        client.request("GET", "accounts")
+    # Three attempts and two waits; then one heartbeat, sent once and dropped.
+    assert clock[0] - 1000.0 == 600
+    assert len(client._session.calls) == 4
+    assert client._session.calls[-1]["method"] == "PATCH"
+
+
+@pytest.mark.parametrize("retry_after", ["-1", "NaN", "Infinity", "not a duration"])
+def test_invalid_retry_after_uses_backoff_without_breaking_the_request(monkeypatch, retry_after):
+    delays = []
+    monkeypatch.setattr("dataverse.client.time.sleep", delays.append)
+    client = make_client([FakeResponse(429, headers={"Retry-After": retry_after}), created(GUID_1)])
+    assert client.create("accounts", {"name": "X"}) == GUID_1
+    assert len(delays) == 1 and 1 <= delays[0] <= 1.5
+
+
+def test_retry_after_http_date_is_understood(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    delays = []
+    monkeypatch.setattr("dataverse.client.time.sleep", delays.append)
+    future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=240), usegmt=True)
+    client = make_client([FakeResponse(503, headers={"Retry-After": future}), FakeResponse(200, {})])
+    client.whoami()
+    assert len(delays) == 1 and 238 < delays[0] <= 240
+
+
+def test_lowercase_post_is_not_repeated_after_a_read_timeout(no_sleep):
+    client = make_client([requests.exceptions.ReadTimeout("read timed out")])
+    with pytest.raises(DataverseAmbiguousWriteError):
+        client.request("post", "accounts", json={"name": "X"})
+    assert len(client._session.calls) == 1
 
 
 def test_update_and_update_multiple_are_retried_after_a_read_timeout(no_sleep):
@@ -800,6 +1006,115 @@ def test_record_errors_still_raises_a_server_error(monkeypatch):
         )
 
 
+GUID_3 = "33333333-3333-3333-3333-333333333333"
+
+
+def _existing_accounts(existing):
+    if not existing:
+        return []
+    return [{"accountnumber": "A", "accountid": GUID_1},
+            {"accountnumber": "B", "accountid": GUID_2}]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("existing", [False, True])
+def test_bulk_auth_failures_are_not_retried_record_by_record(no_sleep, status, existing):
+    # A 401 is retried with a fresh token inside the request; 403 is not.
+    attempts = 1 if status == 403 else 3
+    client = make_client([
+        FakeResponse(200, {"value": _existing_accounts(existing)}),
+        *[FakeResponse(status, {"error": {"message": "denied"}}) for _ in range(attempts)],
+    ])
+    with pytest.raises(DataverseHTTPError, match="denied"):
+        client.bulk_upsert_by_field("accounts", "accountnumber", NEW_ACCOUNTS)
+    assert len(client._session.calls) == 1 + attempts
+    assert all("Multiple" in call["url"] for call in client._session.calls[1:])
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_a_failed_bulk_create_is_written_record_by_record(no_sleep, status):
+    # A bulk 5xx is often the batch itself (a SQL or plug-in timeout).
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        *[FakeResponse(status, {"error": {"message": "busy"}}) for _ in range(3)],
+        FakeResponse(200, {"value": []}), created(GUID_1),  # A alone
+        FakeResponse(200, {"value": []}), created(GUID_2),  # B alone
+    ])
+    results = client.bulk_upsert_by_field("accounts", "accountnumber", NEW_ACCOUNTS)
+    assert results == [("A", GUID_1, True), ("B", GUID_2, True)]
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_lasting_service_failure_stops_at_the_first_single_write(no_sleep, status, existing):
+    client = make_client([
+        FakeResponse(200, {"value": _existing_accounts(existing)}),
+        *[FakeResponse(status, {"error": {"message": "service failure"}}) for _ in range(6)],
+    ])
+    with pytest.raises(DataverseHTTPError, match="service failure"):
+        client.bulk_upsert_by_field("accounts", "accountnumber", NEW_ACCOUNTS)
+    # The bulk call's three attempts, then one single write's: not one per record.
+    assert len(client._session.calls) == 1 + 3 + 3
+
+
+def _existing_addresses(existing, count=2):
+    if not existing:
+        return []
+    guids = [GUID_1, GUID_2, GUID_3]
+    return [{"ts_externalid": key, "customeraddressid": guids[n]}
+            for n, key in enumerate("ABC"[:count])]
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_service_failure_inside_a_batch_keeps_the_rest_and_retries_alone(
+    no_sleep, status, existing
+):
+    entity_set = "customeraddresses" if existing else "ts_affiliations"
+    alone = (
+        [FakeResponse(204)]  # PATCH B
+        if existing
+        else [FakeResponse(200, {"value": []}), created(GUID_2, entity_set)]  # find B, create B
+    )
+    client = make_client([
+        FakeResponse(200, {"value": _existing_addresses(existing)}),
+        batch_response((204, GUID_1, None), (status, None, "service failure")),
+        *alone,
+    ])
+    results = client.bulk_upsert_by_field(
+        entity_set, "ts_externalid", [{"ts_externalid": "A"}, {"ts_externalid": "B"}],
+    )
+    # A's result from the batch is kept; only B is sent again.
+    assert [result[1] for result in results] == [GUID_1, GUID_2]
+    assert len(client._session.calls) == 2 + len(alone)
+
+
+@pytest.mark.parametrize("status", [403, 429, 500, 503])
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_lasting_service_failure_inside_a_batch_stops_at_one_single_write(
+    no_sleep, status, existing
+):
+    entity_set = "customeraddresses" if existing else "ts_affiliations"
+    attempts = 1 if status == 403 else 3
+    client = make_client([
+        FakeResponse(200, {"value": _existing_addresses(existing, count=3)}),
+        batch_response(
+            (204, GUID_1, None),
+            (status, None, "service failure"),
+            (status, None, "service failure"),
+        ),
+        *[FakeResponse(status, {"error": {"message": "service failure"}}) for _ in range(attempts)],
+    ])
+    with pytest.raises(DataverseHTTPError, match="service failure"):
+        client.bulk_upsert_by_field(
+            entity_set,
+            "ts_externalid",
+            [{"ts_externalid": "A"}, {"ts_externalid": "B"}, {"ts_externalid": "C"}],
+        )
+    # C is never sent alone: the first single write stops the fallback.
+    assert len(client._session.calls) == 2 + attempts
+
+
 def test_find_many_by_field_sends_no_top():
     # With $top, a value stored twice would push another value off the page.
     client = make_client([FakeResponse(200, {"value": []})])
@@ -915,10 +1230,13 @@ def test_skip_unchanged_is_off_unless_asked():
         (None, "", True),
         (None, "x", False),
         (3, 3.0, True),
+        (9007199254740992, 9007199254740993, False),
+        (9007199254740993, 9007199254740992.0, False),
         (126870001, 126870002, False),
         (True, True, True),
         (True, 1, False),
         ("3", 3, True),
+        ("9007199254740992", 9007199254740993, False),
         ("126870001", 126870001, True),
         ("126870001", 126870002, False),
         ("3a", 3, False),

@@ -4,6 +4,7 @@ import logging
 import time
 
 from .auth import authenticate
+from .exceptions import OneKeyAPIResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,25 @@ INDIVIDUAL = "INDIVIDUAL"
 
 # Status code 3 == "Valid" in the STA code list; the usual filter for live data.
 STATUS_VALID = "3"
+
+# Each entity type's own OneKey ID field. A search by it returns the entity's
+# full contracted detail and must carry no other criterion (Developer Guide
+# 6.3.2). A related ID, such as workplace.workplaceEid in an ACTIVITY search,
+# is an ordinary filter.
+ID_FIELDS = {
+    ACTIVITY: "activity.activityEid",
+    WORKPLACE: "workplace.workplaceEid",
+    INDIVIDUAL: "individual.individualEid",
+}
+
+# A refreshMyOnekey packet answered with success=false was not delivered; the
+# vendor sample waits and asks for it again (Developer Guide 6.13). Requests
+# per packet, and seconds to wait before each repeat (times the attempt).
+_PACKET_ATTEMPTS = 3
+_PACKET_RETRY_SECONDS = 5
+
+# Packets lost in transit that a walk re-fetches by number before giving up.
+_MAX_MISSED_PACKETS = 3
 
 
 def search_field(name, values, method=EXACT, fuzzy_precision=None):
@@ -93,7 +113,7 @@ class OneKeyClient:
             entity_type: :data:`ACTIVITY` (HCPs) or :data:`WORKPLACE` (HCOs).
             fields: Criteria from :func:`search_field`. May contain a literal
                 ``"OR"`` string between two criteria to switch the operator.
-                OneKey caps a single search at 30 criteria.
+                OneKey caps a single search at 30 criteria (START HERE Guide 6.1.2).
             cod_base: OneKey territory code, e.g. ``WDE``. Pass this *or*
                 ``iso_cod2``, never both.
             iso_cod2: ISO 3166-1 alpha-2 country, e.g. ``DE``.
@@ -168,7 +188,17 @@ class OneKeyClient:
         if not cod_base and not iso_cod2:
             raise ValueError("One of cod_base or iso_cod2 is required.")
 
-        payload = {"entityType": entity_type, "fields": list(fields)}
+        criteria = list(fields)
+        search_fields = [field for field in criteria if isinstance(field, dict)]
+        if len(search_fields) > 30:
+            raise ValueError("OneKey accepts at most 30 search criteria.")
+        own_id = ID_FIELDS.get(entity_type)
+        if own_id and len(criteria) != 1 and any(
+            field.get("name") == own_id for field in search_fields
+        ):
+            raise ValueError(f"A search by {own_id} must have no other criterion.")
+
+        payload = {"entityType": entity_type, "fields": criteria}
         if cod_base:
             payload["codBase"] = (
                 [cod_base] if isinstance(cod_base, str) else list(cod_base)
@@ -338,11 +368,7 @@ class OneKeyClient:
         against ``/pop/refreshMyOnekey`` first and skip IDs not in that set —
         search can still return out-of-contract entities.
         """
-        field_name = {
-            ACTIVITY: "activity.activityEid",
-            WORKPLACE: "workplace.workplaceEid",
-            INDIVIDUAL: "individual.individualEid",
-        }[entity_type]
+        field_name = ID_FIELDS[entity_type]
 
         if not cod_base and not iso_cod2:
             # OneKey ids are prefixed with their codBase, e.g. WDER00117070.
@@ -385,9 +411,12 @@ class OneKeyClient:
             iso_cod2: ISO alpha-2 country, as an alternative to ``cod_base``.
             date_from: ISO-8601 start, e.g. ``2026-01-01T00:00:00Z``.
             date_to: ISO-8601 end.
-            page_size: Records per packet. OneKey accepts 100-2000. Defaults
-                to the session config's ``page_size`` (``ONEKEY_PAGE_SIZE``,
-                1000), or 200 without one.
+            page_size: Requested records per packet, 100-2000. OneKey cuts a
+                larger request down to the connector's own cap (commonly 250,
+                START HERE Guide 6.1.14), so asking for more costs nothing
+                while asking for less adds packets. Defaults to the session
+                config's ``page_size`` (``ONEKEY_PAGE_SIZE``, 1000), or 200
+                without one.
             max_records: Stop after roughly this many records. Useful for
                 smoke tests; leave None to walk the whole population.
 
@@ -398,16 +427,24 @@ class OneKeyClient:
         """
         if not cod_base and not iso_cod2:
             raise ValueError("One of cod_base or iso_cod2 is required.")
+        if cod_base and iso_cod2:
+            raise ValueError("Pass cod_base or iso_cod2, not both.")
         if page_size is None:
             page_size = getattr(getattr(self.session, "config", None), "page_size", None) or 200
         if not 100 <= page_size <= 2000:
             raise ValueError("page_size must be between 100 and 2000.")
+        if max_records is not None and max_records <= 0:
+            return
 
-        payload = {"resultSize": int(page_size)}
+        # The territory must be repeated on every continuation: OneKey rejects
+        # a continuation that omits it with a 403, not the 400 the missing
+        # parameter would suggest.
+        request = {"resultSize": int(page_size)}
         if cod_base:
-            payload["codBase"] = cod_base
+            request["codBase"] = cod_base
         if iso_cod2:
-            payload["isoCod2"] = iso_cod2
+            request["isoCod2"] = iso_cod2
+        payload = dict(request)
         if date_from:
             payload["isoDateFrom"] = date_from
         if date_to:
@@ -425,41 +462,57 @@ class OneKeyClient:
         )
         while True:
             packet += 1
-            envelope = self.session.post_json("/pop/refreshMyOnekey", payload)
-            results = envelope.get("results") or []
-            if isinstance(results, dict):
-                results = list(results.values())
-
-            for record in results:
-                yield record
-                yielded += 1
-                if max_records is not None and yielded >= max_records:
-                    logger.info(
-                        "OneKey population walk stopped at max_records: records=%d packet=%d",
-                        max_records,
+            results, envelope = self._population_packet(payload)
+            complete = envelope.get("isTransactionComplete")
+            transaction_id = envelope.get("transactionUniqueIdentifier")
+            if not isinstance(complete, bool):
+                raise OneKeyAPIResponseError(
+                    "OneKey population omitted a boolean isTransactionComplete"
+                )
+            packets = []
+            received = self._packet_number(envelope)
+            if received is not None and received != packet:
+                # The transaction id is the same for the whole walk; a final
+                # packet may come back without it.
+                packets.extend(
+                    self._recover_packets(
                         packet,
+                        received,
+                        transaction_id or payload.get("transactionUniqueIdentifier"),
+                        request,
                     )
-                    return
+                )
+                packet = received
+            if not complete and (not results or not transaction_id):
+                # A silent stop would let the caller mark a partial population
+                # successful and advance its delta checkpoint.
+                raise OneKeyAPIResponseError(
+                    "OneKey population is incomplete but returned no records or transaction id"
+                )
+            packets.append(results)
+
+            for records in packets:
+                for record in records:
+                    yield record
+                    yielded += 1
+                    if max_records is not None and yielded >= max_records:
+                        logger.info(
+                            "OneKey population walk stopped at max_records: records=%d packet=%d",
+                            max_records,
+                            packet,
+                        )
+                        return
 
             logger.info(
                 "OneKey packet %d: records=%d total=%d complete=%s | codbase=%s",
                 packet,
                 len(results),
                 yielded,
-                bool(envelope.get("isTransactionComplete")),
+                complete,
                 cod_base or iso_cod2,
             )
 
-            if envelope.get("isTransactionComplete") or not results:
-                return
-
-            transaction_id = envelope.get("transactionUniqueIdentifier")
-            if not transaction_id:
-                logger.warning(
-                    "OneKey population walk stopped, no transaction id: records=%d packet=%d",
-                    yielded,
-                    packet,
-                )
+            if complete:
                 return
 
             # Pace packets to stay under OneKey rate limits.
@@ -468,17 +521,90 @@ class OneKeyClient:
                 time.sleep(delay)
 
             # Replaying the transaction id is what advances the cursor.
-            # The territory must be repeated on every continuation: OneKey
-            # rejects a continuation that omits it with a 403, not the 400 the
-            # missing parameter would suggest.
-            payload = {
-                "resultSize": int(page_size),
-                "transactionUniqueIdentifier": transaction_id,
-            }
-            if cod_base:
-                payload["codBase"] = cod_base
-            if iso_cod2:
-                payload["isoCod2"] = iso_cod2
+            payload = {**request, "transactionUniqueIdentifier": transaction_id}
+
+    def _population_packet(self, payload):
+        """Request one refreshMyOnekey packet; return (results, envelope).
+
+        A packet answered with ``success: false`` was not delivered, so it is
+        requested again, as the vendor sample does. A malformed result list
+        fails instead of truncating the walk.
+        """
+        for attempt in range(1, _PACKET_ATTEMPTS + 1):
+            envelope = self.session.post_json("/pop/refreshMyOnekey", payload)
+            if envelope.get("success") is not False:
+                break
+            message = str(envelope.get("statusMessage") or "success=false")[:300]
+            if attempt == _PACKET_ATTEMPTS:
+                raise OneKeyAPIResponseError(
+                    f"OneKey population packet was not delivered after {attempt} "
+                    f"attempts: {message}",
+                    status=str(envelope.get("status") or ""),
+                )
+            logger.warning(
+                "OneKey population packet not delivered, requesting it again: "
+                "attempt=%d/%d message=%r",
+                attempt,
+                _PACKET_ATTEMPTS,
+                message,
+            )
+            time.sleep(_PACKET_RETRY_SECONDS * attempt)
+
+        results = envelope.get("results")
+        if results is None:
+            results = []
+        if isinstance(results, dict):
+            results = list(results.values())
+        if not isinstance(results, list) or any(not isinstance(r, dict) for r in results):
+            raise OneKeyAPIResponseError("OneKey population returned invalid results")
+        return results, envelope
+
+    @staticmethod
+    def _packet_number(envelope):
+        """The envelope's transactionPacketIdentifier as an int, or None."""
+        value = envelope.get("transactionPacketIdentifier")
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise OneKeyAPIResponseError(
+                f"OneKey population returned packet identifier {value!r}"
+            ) from None
+
+    def _recover_packets(self, expected, received, transaction_id, request):
+        """Fetch the packets OneKey sent but this walk never received.
+
+        A response lost in transit is retried, and OneKey answers the retry
+        with the packet after it. Developer Guide 6.13.4 ("Retrieve a specific
+        packet") lets a client ask again for a delivered packet by number.
+        Returns each recovered packet's results, in order.
+        """
+        if received < expected or not transaction_id or received - expected > _MAX_MISSED_PACKETS:
+            raise OneKeyAPIResponseError(
+                f"OneKey population packet sequence broke: expected {expected}, "
+                f"received {received}"
+            )
+        recovered = []
+        for number in range(expected, received):
+            logger.warning(
+                "OneKey packet %d was lost in transit; requesting it again by number",
+                number,
+            )
+            results, envelope = self._population_packet(
+                {
+                    **request,
+                    "transactionUniqueIdentifier": transaction_id,
+                    "transactionPacketIdentifier": number,
+                }
+            )
+            returned = self._packet_number(envelope)
+            if returned is not None and returned != number:
+                raise OneKeyAPIResponseError(
+                    f"OneKey returned packet {returned} when packet {number} was requested"
+                )
+            recovered.append(results)
+        return recovered
 
     def close(self):
         self.session.close()
