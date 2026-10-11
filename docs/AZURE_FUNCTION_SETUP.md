@@ -2,8 +2,11 @@
 
 This app is a Python v4 Function App. The timers do not run the country sync
 themselves. They sync the choice options once, then enqueue one message per
-codebase on `onekey-queue`, and `scheduled_onekey_worker` runs that message. A
-failed message is retried, then moved to `onekey-queue-poison`.
+codebase: full syncs on `onekey-full`, daily work on `onekey-retry`. Each queue
+has its own worker; the retry worker replays the country's pending failures,
+then queues its delta on `onekey-delta`. A failed message is retried, then
+moved to that queue's poison queue (`onekey-full-poison`, `onekey-retry-poison`,
+`onekey-delta-poison`).
 How messages, workers and instances fit together is in
 [QUEUE_ARCHITECTURE.md](QUEUE_ARCHITECTURE.md).
 
@@ -22,26 +25,28 @@ country runs again (see [Retries and overlap](#retries-and-overlap)).
 | Function | Trigger | Schedule (UTC) | What it does |
 | --- | --- | --- | --- |
 | `sample_ok_to_dv` | Timer | 12:00 on the 1st | Upserts a few HCOs. Runs even when `SYNC_SCHEDULE` is off, but skips while its codebase is syncing. |
-| `scheduled_onekey_delta` | Timer | 00:00 on days 2–31 | Syncs the choice options, then enqueues one delta message per codebase. |
-| `scheduled_onekey_full` | Timer | 00:00 on the 1st | Syncs the choice options, then enqueues one full-sync message per codebase. |
-| `scheduled_onekey_worker` | Queue `onekey-queue` | — | Runs that one codebase. |
+| `scheduled_onekey_delta` | Timer | 00:00 on days 2–31 | Syncs the choice options, then enqueues one retry message per codebase on `onekey-retry`. |
+| `scheduled_onekey_full` | Timer | 00:00 on the 1st | Syncs the choice options, then enqueues one full-sync message per codebase on `onekey-full`. |
+| `scheduled_onekey_full_worker` | Queue `onekey-full` | — | Runs that codebase's full sync. |
+| `scheduled_onekey_retry_worker` | Queue `onekey-retry` | — | Replays that codebase's pending failures, then puts its delta on `onekey-delta`. |
+| `scheduled_onekey_delta_worker` | Queue `onekey-delta` | — | Runs that codebase's delta. |
 
 Schedules are NCRONTAB in UTC. Flex Consumption does not support the
 `WEBSITE_TIME_ZONE` or `TZ` settings, so 00:00 is always midnight UTC.
 
-A scheduled delta message looks like:
+A scheduled retry message looks like:
 
 ```json
-{"choices":false,"codebase":"WUK","date_to":null,"mode":"delta","retry_limit":100,"version":1}
+{"choices":false,"codebase":"WUK","date_to":null,"mode":"retry","retry_limit":100,"version":1}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `mode` | `delta` or `full`. |
+| `mode` | `full`, `retry` or `delta`, matching the queue. May be left out; the queue supplies it. A message on another mode's queue goes to the poison queue. |
 | `codebase` | One OneKey territory. |
-| `date_to` | Leave `null`. The worker reads changes up to the moment it runs. Set it only to replay an old window by hand (delta only). |
-| `retry_limit` | Pending failures this codebase retries before its delta. |
-| `choices` | `false` when the timer already synced the choice options. Defaults to `true`. |
+| `date_to` | Leave `null`. The delta reads changes up to the moment it runs. Set it only to replay an old window by hand (delta only). |
+| `retry_limit` | Pending failures one retry replays. |
+| `choices` | `false` when the timer already synced the choice options. Defaults to `true`. The retry passes it on to the delta it queues. |
 
 ### The delta window
 
@@ -71,8 +76,8 @@ sync that is running.
 
 ## What one job runs
 
-`scheduled_onekey_worker` calls the same engine as the CLI. One message is one
-country, and that run does the whole flow for that country:
+The workers call the same engine as the CLI. One message is one country, and
+a full or delta run does the whole flow for that country:
 
 1. Picklists: that country's code-list lookup tables. The choice options do
    not depend on the country, so the timer syncs them once before it
@@ -85,11 +90,13 @@ country, and that run does the whole flow for that country:
 6. HCP contacts
 7. HCP–HCO activity relationships (`ts_affiliation`)
 
-A `full` message loads the population. A `delta` message first replays that
+A `full` message loads the population. A `retry` message replays that
 country's pending `ts_integrationfailure` rows (matched by the OneKey ID
-prefix, so parallel workers never claim the same row), then runs the same
-phases for records changed since the last completed job. `sample_ok_to_dv` is
-the small connectivity check. It is not this flow.
+prefix, so parallel workers never claim the same row), then queues the
+country's `delta`, which runs the same phases for records changed since the
+last completed job. The retry and the delta never run at the same time, so the
+delta is not skipped as busy. `sample_ok_to_dv` is the small connectivity
+check. It is not this flow.
 
 ## Which countries run
 
@@ -100,8 +107,8 @@ the setting is empty.
 
 | `ONEKEY_CODBASE` | Messages on the 1st | Messages on other days |
 | --- | --- | --- |
-| `WUK` | 1 full | 1 delta |
-| `WUK,WDE,WFR` | 3 full, one each | 3 delta, one each |
+| `WUK` | 1 full | 1 retry, then 1 delta |
+| `WUK,WDE,WFR` | 3 full, one each | 3 retry, then 3 delta, one each |
 
 Change the setting and the next timer tick uses the new list. No redeploy.
 A code listed twice is enqueued once. Each message is one country, so a
@@ -110,7 +117,8 @@ failure retries only that country.
 ### How many countries run at once
 
 Flex Consumption starts an instance per queued message, up to the app's
-maximum instance count (100 by default), so every country starts at midnight.
+maximum instance count (100 by default) for each worker, so every country
+starts at midnight.
 All workers write to Dataverse as one application user, and Dataverse limits
 each user to 6,000 requests and 20 minutes of execution per 5 minutes, and 52
 requests at a time. Beyond two or three workers you get throttling (429) waits,
@@ -123,10 +131,11 @@ az functionapp scale config set \
   --maximum-instance-count 3
 ```
 
-The cap applies to each function group, so the timers and the sample are
-capped at 3 as well, which they never reach. The remaining countries wait in
-the queue; the delta window still starts where the previous delta stopped
-reading, so waiting loses nothing.
+The cap applies to each function group, and each worker is its own group: up
+to 3 full syncs, 3 retries and 3 deltas can run at once. The timers and the
+sample are capped at 3 as well, which they never reach. The remaining
+countries wait in their queue; the delta window still starts where the
+previous delta stopped reading, so waiting loses nothing.
 
 ## Prerequisites
 
@@ -165,8 +174,8 @@ az functionapp create \
   --runtime-version 3.14
 ```
 
-`az functionapp create` sets `AzureWebJobsStorage`. Both queues use that same
-storage account.
+`az functionapp create` sets `AzureWebJobsStorage`. All the queues use that
+same storage account.
 
 For a worker that stays warm, create a Linux Premium plan instead and pass it
 to `az functionapp create --plan`:
@@ -183,12 +192,15 @@ az functionapp plan create \
 ## 2. Create the queues
 
 ```bash
-az storage queue create --name onekey-queue --account-name stonekeypaion
-az storage queue create --name onekey-queue-poison --account-name stonekeypaion
+for q in onekey-full onekey-retry onekey-delta; do
+  az storage queue create --name $q --account-name stonekeypaion
+  az storage queue create --name $q-poison --account-name stonekeypaion
+done
 ```
 
 The output bindings create them on first use, so this step only makes them
-visible before the first run.
+visible before the first run. Azure always poisons a message into
+`<queue>-poison`, so the poison queues keep that name.
 
 ### Retries and overlap
 
@@ -196,15 +208,16 @@ visible before the first run.
 | --- | --- | --- |
 | `batchSize`, `newBatchThreshold` | 1, 0 | Each instance runs one country at a time. |
 | `visibilityTimeout` | 30 min | How long a **failed** message waits before it is retried. It is not a run limit: the host keeps a running message hidden for as long as the run takes, whatever this value. Keep it short; raising it with `functionTimeout` would delay every retry by hours. |
-| `maxDequeueCount` | 5 | Deliveries before Azure moves a message to `onekey-queue-poison`. |
+| `maxDequeueCount` | 5 | Deliveries before Azure moves a message to its queue's poison queue. Applies to all three queues. |
 | `maxPollingInterval` | 30 s | Longest wait before a new message is noticed. |
 
 | Situation | What the worker does |
 | --- | --- |
-| Malformed message | Writes it to `onekey-queue-poison` at once. Retrying cannot fix it. |
+| Malformed message, or a `mode` that belongs to another queue | Writes it to the queue's poison queue at once. Retrying cannot fix it. |
 | Delta fails | Raises; Azure retries after 30 minutes, up to 5 deliveries. |
-| Full sync fails | Retries once. On the second failed delivery it goes to `onekey-queue-poison`, because every retry restarts hours of work. A busy delivery (below) counts as a delivery. |
-| Another live job is syncing the same codebase | Delta: skipped and completed, since the next delta starts where the last covering job stopped. Full: deferred; Azure retries after 30 minutes. |
+| Retry fails | Retries once, and the delta waits. On the second failed delivery it goes to `onekey-retry-poison` and the delta is queued anyway; the failure rows stay Pending for the next retry. |
+| Full sync fails | Retries once. On the second failed delivery it goes to `onekey-full-poison`, because every retry restarts hours of work. A busy delivery (below) counts as a delivery. |
+| Another live job is syncing the same codebase | Retry or delta: skipped and completed, and a skipped retry queues no delta, since the next delta starts where the last covering job stopped. Full: deferred; Azure retries after 30 minutes. |
 
 A job counts as live while its `ts_integrationjob` row is Running and its
 `ts_lastheartbeat` is under 20 minutes old. A running job refreshes the
@@ -277,7 +290,8 @@ az functionapp function list \
 ```
 
 Expect `sample_ok_to_dv`, `scheduled_onekey_delta`, `scheduled_onekey_full`,
-and `scheduled_onekey_worker`. Then:
+`scheduled_onekey_full_worker`, `scheduled_onekey_retry_worker` and
+`scheduled_onekey_delta_worker`. Then:
 
 ```bash
 az functionapp config appsettings set \
@@ -287,40 +301,45 @@ az functionapp config appsettings set \
 ```
 
 Confirm a run in Application Insights, or in the Function App's log stream.
-A healthy delta logs `scheduled_delta_enqueued` from the timer and
-`scheduled_queue_complete` from the worker (`scheduled_queue_skipped` when the
-codebase was busy, `scheduled_queue_poisoned` when the message went to the
+A healthy daily run logs `scheduled_delta_enqueued queue=onekey-retry` from
+the timer, then from the workers `scheduled_queue_complete queue=onekey-retry`,
+`scheduled_queue_chained` (the retry queued the delta) and
+`scheduled_queue_complete queue=onekey-delta` (`scheduled_queue_skipped` when
+the codebase was busy, `scheduled_queue_poisoned` when the message went to the
 poison queue). The same run writes `ts_integrationjob` and any row-level errors
 to `ts_integrationfailure`.
 
 ## Running one country by hand
 
-Put a message on `onekey-queue`. The bindings use Base64, so encode the body;
-a plain-text message cannot be decoded and lands in the poison queue.
+Put a message on the queue for the work you want: `onekey-full` for a full
+sync, `onekey-retry` for retry then delta, or `onekey-delta` for the delta
+alone. The queue sets the mode, so `{"codebase":"WUK"}` is enough. The
+bindings use Base64, so encode the body; a plain-text message cannot be
+decoded and lands in the poison queue.
 
 ```bash
 CS=$(az functionapp config appsettings list --name fa-onekey-paion \
   --resource-group rg-onekey --query "[?name=='AzureWebJobsStorage'].value" -o tsv)
-az storage message put --queue-name onekey-queue --connection-string "$CS" \
-  --content "$(printf '%s' '{"mode":"delta","codebase":"WUK"}' | base64)"
+az storage message put --queue-name onekey-retry --connection-string "$CS" \
+  --content "$(printf '%s' '{"codebase":"WUK"}' | base64)"
 ```
 
-In the portal: Storage account → Queues → `onekey-queue` → **Add message**,
+In the portal: Storage account → Queues → `onekey-retry` → **Add message**,
 and tick **Encode the message body in Base64**.
 
 ## Poison messages
 
-A message lands in `onekey-queue-poison` with its original body when it is
-malformed, when a full sync fails twice, or when a delta fails on its fifth
-delivery. Read it, fix the cause, and submit the same JSON back to
-`onekey-queue` to retry that codebase. Deleting it drops that work; for a
-delta that is safe, since the next delta covers the window.
+A message lands in `<queue>-poison` with its original body when it is
+malformed or on the wrong queue, when a full sync or retry fails twice, or when
+a delta fails on its fifth delivery. Read it, fix the cause, and submit the
+same JSON back to the queue it came from (the poison queue's name without
+`-poison`) to retry that codebase. Deleting it drops that work; for a retry or
+delta that is safe, since the next day's retry and delta cover it.
 
 ```bash
-az storage message peek \
-  --queue-name onekey-queue-poison \
-  --account-name stonekeypaion \
-  --num-messages 5
+for q in onekey-full-poison onekey-retry-poison onekey-delta-poison; do
+  az storage message peek --queue-name $q --account-name stonekeypaion --num-messages 5
+done
 ```
 
 ## Local run

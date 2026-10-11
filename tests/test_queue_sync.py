@@ -10,11 +10,14 @@ from integration.queue_sync import (
     OUTCOME_DONE,
     OUTCOME_POISON,
     OUTCOME_SKIPPED,
+    QUEUES,
+    RETRY_MAX_DELIVERIES,
     QueueMessageError,
     QueueWorkFailed,
     SyncQueueMessage,
     dispatch,
     handle_message,
+    poison_queue,
     scheduled_messages,
 )
 from integration.scheduled_sync import IF_BUSY_RAISE, IF_BUSY_SKIP, SyncBusy
@@ -46,6 +49,17 @@ def test_message_round_trip():
     assert SyncQueueMessage.decode(original.encode()) == original
 
 
+def test_each_mode_has_its_queue_and_azure_poison_name():
+    assert QUEUES == {"full": "onekey-full", "delta": "onekey-delta", "retry": "onekey-retry"}
+    assert poison_queue("onekey-retry") == "onekey-retry-poison"
+
+
+def test_a_message_without_a_mode_takes_the_queue_mode():
+    assert SyncQueueMessage.decode('{"codebase":"wde"}', mode="full").mode == "full"
+    # A mode in the body is kept, so handle_message can reject the wrong queue.
+    assert SyncQueueMessage.decode('{"mode":"delta","codebase":"WDE"}', mode="full").mode == "delta"
+
+
 def test_message_without_choices_defaults_to_syncing_them():
     item = SyncQueueMessage.decode('{"mode":"delta","codebase":"WUK"}')
     assert item.choices is True
@@ -63,6 +77,8 @@ def test_message_without_choices_defaults_to_syncing_them():
         '{"mode":"full","codebase":"WUK","version":2}',
         '{"mode":"full","codebase":"WUK","unexpected":true}',
         '{"mode":"full","codebase":"WUK","date_to":"2026-10-07"}',
+        '{"mode":"retry","codebase":"WUK","date_to":"2026-10-07"}',
+        '{"codebase":"WUK"}',
         '{"mode":"delta","codebase":"WUK","choices":"no"}',
     ],
 )
@@ -74,14 +90,14 @@ def test_invalid_message_is_rejected(payload):
 # -- dispatch ----------------------------------------------------------------
 
 
-def fake_runner(monkeypatch, result):
+def fake_runner(monkeypatch, result, name="run_from_env"):
     seen = {}
 
-    def fake_run_from_env(**kwargs):
+    def fake_run(**kwargs):
         seen.update(kwargs)
         return result
 
-    monkeypatch.setattr("integration.scheduled_sync.run_from_env", fake_run_from_env)
+    monkeypatch.setattr(f"integration.scheduled_sync.{name}", fake_run)
     return seen
 
 
@@ -97,14 +113,37 @@ def test_dispatch_runs_one_codebase_and_skips_a_busy_delta(monkeypatch):
         )
     )
     assert result["success"] is True
+    # The retry already ran from onekey-retry, so the delta runs alone.
     assert seen == {
         "codebases": ["WDE"],
         "full": False,
+        "retry": False,
         "date_to": "2026-10-07T08:00:00Z",
-        "retry_limit": 10,
         "if_busy": IF_BUSY_SKIP,
         "sync_choices": False,
     }
+
+
+def test_dispatch_runs_a_retry_alone_and_skips_a_busy_codebase(monkeypatch):
+    seen = fake_runner(
+        monkeypatch, {"success": True, "retry": {"jobs": []}}, name="retry_from_env"
+    )
+    monkeypatch.setattr(
+        "integration.scheduled_sync.run_from_env", lambda **kwargs: pytest.fail("ran a sync")
+    )
+    dispatch(SyncQueueMessage(mode="retry", codebase="WDE", retry_limit=10))
+    assert seen == {"codebases": ["WDE"], "limit": 10, "if_busy": IF_BUSY_SKIP}
+
+
+def test_a_failed_retry_reports_its_jobs(monkeypatch):
+    fake_runner(
+        monkeypatch,
+        {"success": False, "retry": {"jobs": ["r-1", "r-2"], "errors": ["claim lost"]}},
+        name="retry_from_env",
+    )
+    with pytest.raises(QueueWorkFailed, match="retry sync failed for codebase WUK: job=r-1,r-2 errors=claim lost") as caught:
+        dispatch(SyncQueueMessage(mode="retry", codebase="WUK"))
+    assert caught.value.full_sync is False
 
 
 def test_dispatch_defers_a_busy_full_sync(monkeypatch):
@@ -178,6 +217,66 @@ def test_skipped_and_done_outcomes(monkeypatch):
     outcome = handle_message('{"mode":"delta","codebase":"WUK"}', 1)
     assert outcome.status == OUTCOME_DONE
     assert outcome.result == {"success": True, "delta": {}}
+    assert outcome.next_delta is None
+
+
+def test_a_message_from_another_queue_is_poisoned(monkeypatch):
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item: pytest.fail("ran"))
+    outcome = handle_message('{"mode":"full","codebase":"WUK"}', 1, mode="delta")
+    assert outcome.status == OUTCOME_POISON
+    assert outcome.item.codebase == "WUK"
+    assert outcome.reason == "full message on onekey-delta; put it on onekey-full"
+
+
+def test_the_queue_mode_runs_a_message_without_one(monkeypatch):
+    ran = []
+    monkeypatch.setattr(
+        queue_sync, "dispatch", lambda item: ran.append(item.mode) or {"success": True}
+    )
+    assert handle_message('{"codebase":"WUK"}', 1, mode="full").status == OUTCOME_DONE
+    assert ran == ["full"]
+
+
+# -- retry then delta --------------------------------------------------------------
+
+
+def test_a_finished_retry_queues_its_delta(monkeypatch):
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item: {"success": True, "retry": {}})
+    outcome = handle_message(
+        '{"mode":"retry","codebase":"wnl","choices":false}', 1, mode="retry"
+    )
+    assert outcome.status == OUTCOME_DONE
+    assert SyncQueueMessage.decode(outcome.next_delta) == SyncQueueMessage(
+        mode="delta", codebase="WNL", choices=False
+    )
+
+
+def test_a_busy_retry_queues_no_delta(monkeypatch):
+    monkeypatch.setattr(
+        queue_sync, "dispatch", lambda item: {"success": True, "skipped": True}
+    )
+    outcome = handle_message('{"mode":"retry","codebase":"WNL"}', 1, mode="retry")
+    assert outcome.status == OUTCOME_SKIPPED
+    assert outcome.next_delta is None
+
+
+def test_a_failed_retry_is_retried_once_then_poisoned_with_its_delta(monkeypatch):
+    monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
+    body = '{"mode":"retry","codebase":"WNL"}'
+    # The first failure raises, so the delta waits for the retry's next delivery.
+    with pytest.raises(QueueWorkFailed):
+        handle_message(body, 1, mode="retry")
+    outcome = handle_message(body, RETRY_MAX_DELIVERIES, mode="retry")
+    assert outcome.status == OUTCOME_POISON
+    assert outcome.reason.startswith(f"retry failed on delivery {RETRY_MAX_DELIVERIES}")
+    assert SyncQueueMessage.decode(outcome.next_delta).mode == "delta"
+
+
+def test_a_poisoned_full_sync_queues_no_delta(monkeypatch):
+    monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
+    outcome = handle_message('{"mode":"full","codebase":"WUK"}', FULL_MAX_DELIVERIES, mode="full")
+    assert outcome.status == OUTCOME_POISON
+    assert outcome.next_delta is None
 
 
 # -- delta messages that ran as a full sync --------------------------------------

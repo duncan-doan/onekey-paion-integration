@@ -5,8 +5,9 @@ The delta starts where the last Full or Delta integration job of the codebase
 that covered its window stopped reading (the earlier of its ts_watermarkto and
 ts_startedon). Each codebase retries only its own failed IDs, which stay in
 ts_integrationfailure so the next run retries them even if OneKey does not
-change those records again. Unlike the queue worker, the CLI does not check
-whether the codebase is already syncing.
+change those records again. The Azure queues run the retry and the delta as
+two chained messages; the CLI runs both in one process and, unlike the queue
+workers, does not check whether the codebase is already syncing.
 
 Usage:
     python scripts/run_scheduled_sync.py --dry-run --codbase WUK

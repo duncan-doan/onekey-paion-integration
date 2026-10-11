@@ -6,6 +6,10 @@ Daily delta:
    whole window stopped reading, up to now.
 3. Mark pending rows Resolved when that delta upserts the same source ID.
 
+The CLI runs the three steps in one go (run_retry_then_delta). In Azure the
+retry queue runs step 1 (retry_from_env) and then queues the delta, which runs
+steps 2 and 3 (run_from_env with retry=False).
+
 Monthly full: pull the whole population, then resolve pending rows the same
 way. A completed full sync becomes the start of the next delta window.
 A codebase with no completed Full or Delta job yet gets a full sync instead
@@ -266,6 +270,57 @@ def _retry_each_codebase(
     return merged
 
 
+def _delta_start(dataverse, codebases: list[str]) -> str | None:
+    """Where the next delta starts, or None when no job has covered a window yet."""
+    anchor = last_window_start(dataverse, codebases)
+    if anchor is None:
+        return None
+    return _iso(_parse_iso(anchor) - WINDOW_OVERLAP)
+
+
+def _promote_to_full(
+    engine,
+    *,
+    codebases: list[str],
+    dry_run: bool,
+    trigger: int,
+    sync_choices: bool,
+) -> dict:
+    """Run the full sync for a codebase that no Full or Delta job has read yet."""
+    logger.warning(
+        "No completed Full or Delta job for %s; running a full sync instead of a delta",
+        job_codebase(codebases),
+    )
+    result = run_full(
+        engine,
+        codebases=codebases,
+        dry_run=dry_run,
+        trigger=trigger,
+        sync_choices=sync_choices,
+    )
+    result["promoted_to_full"] = True
+    return result
+
+
+def run_retry(
+    engine,
+    *,
+    codebases: list[str],
+    dry_run: bool = False,
+    trigger: int = TRIGGER_TIMER,
+    limit: int = 100,
+) -> dict:
+    """Replay each codebase's pending failures: step 1 of the daily job on its own."""
+    retry = _retry_each_codebase(
+        engine,
+        codebases,
+        limit=limit,
+        dry_run=dry_run,
+        trigger=trigger,
+    )
+    return {"success": bool(retry["success"]), "retry": retry}
+
+
 def run_retry_then_delta(
     engine,
     *,
@@ -291,27 +346,19 @@ def run_retry_then_delta(
 
     Without ``date_from`` and without a Full or Delta job that covered its
     window, nothing has read these codebases yet: a delta would only see recent
-    changes, so this runs the full sync instead and returns its result with
-    ``promoted_to_full`` set.
+    changes, so this runs the full sync instead, without the retry, and returns
+    its result with ``promoted_to_full`` set.
     """
     if not date_from:
-        anchor = last_window_start(engine.dataverse, codebases)
-        if anchor is None:
-            logger.warning(
-                "No completed Full or Delta job for %s; running a full sync "
-                "instead of a delta",
-                job_codebase(codebases),
-            )
-            result = run_full(
+        date_from = _delta_start(engine.dataverse, codebases)
+        if date_from is None:
+            return _promote_to_full(
                 engine,
                 codebases=codebases,
                 dry_run=dry_run,
                 trigger=trigger,
                 sync_choices=sync_choices,
             )
-            result["promoted_to_full"] = True
-            return result
-        date_from = _iso(_parse_iso(anchor) - WINDOW_OVERLAP)
 
     retry = _retry_each_codebase(
         engine,
@@ -320,7 +367,55 @@ def run_retry_then_delta(
         dry_run=dry_run,
         trigger=trigger,
     )
-    # The retry leaves its parent job on the tracer; the delta is not a retry.
+    result = run_delta(
+        engine,
+        codebases=codebases,
+        date_from=date_from,
+        date_to=date_to,
+        dry_run=dry_run,
+        trigger=trigger,
+        sync_addresses=sync_addresses,
+        sync_hierarchy=sync_hierarchy,
+        sync_hco_relations=sync_hco_relations,
+        sync_activity_affiliations=sync_activity_affiliations,
+        sync_picklists=sync_picklists,
+        sync_choices=sync_choices,
+    )
+    return {**result, "retry": retry}
+
+
+def run_delta(
+    engine,
+    *,
+    codebases: list[str],
+    date_from: str | None = None,
+    date_to: str | None = None,
+    dry_run: bool = False,
+    trigger: int = TRIGGER_TIMER,
+    sync_addresses: bool = True,
+    sync_hierarchy: bool = True,
+    sync_hco_relations: bool = True,
+    sync_activity_affiliations: bool = True,
+    sync_picklists: bool = True,
+    sync_choices: bool = True,
+) -> dict:
+    """Pull the delta and resolve IDs it fixed: steps 2 and 3 of the daily job.
+
+    The window is worked out as in run_retry_then_delta, including the full
+    sync for a codebase that no job has read yet (``promoted_to_full``).
+    """
+    if not date_from:
+        date_from = _delta_start(engine.dataverse, codebases)
+        if date_from is None:
+            return _promote_to_full(
+                engine,
+                codebases=codebases,
+                dry_run=dry_run,
+                trigger=trigger,
+                sync_choices=sync_choices,
+            )
+
+    # A retry leaves its parent job on the tracer; the delta is not a retry.
     engine.tracer.trigger = trigger
     engine.tracer.retry_of_job_id = None
     engine.succeeded_ids.clear()
@@ -350,7 +445,6 @@ def run_retry_then_delta(
         )
     return {
         "success": bool(delta.get("success")),
-        "retry": retry,
         "delta": delta,
         "resolved_by_delta": resolved,
     }
@@ -425,10 +519,34 @@ def delta_from_setting(date_to: str | None = None) -> str | None:
     return _iso(start)
 
 
+def _busy(engine, codebases: list[str], if_busy: str | None, job: str) -> dict | None:
+    """Apply ``if_busy`` when a live job is syncing one of the codebases.
+
+    Returns the skipped result for ``"skip"``, raises SyncBusy for ``"raise"``,
+    and returns None when nothing is running or ``if_busy`` is None.
+    """
+    if not if_busy:
+        return None
+    running = active_job(engine.dataverse, codebases)
+    if not running:
+        return None
+    if if_busy == IF_BUSY_SKIP:
+        logger.warning(
+            "Skipped %s sync of %s: job %s is still running (heartbeat %s)",
+            job,
+            running["codebase"],
+            running.get("ts_jobid"),
+            running.get("ts_lastheartbeat"),
+        )
+        return {"success": True, "skipped": True, "busy_job": running.get("ts_jobid")}
+    raise SyncBusy(running["codebase"], running)
+
+
 def run_from_env(
     *,
     codebases: list[str] | None = None,
     full: bool = False,
+    retry: bool = True,
     date_from: str | None = None,
     date_to: str | None = None,
     dry_run: bool = False,
@@ -441,7 +559,9 @@ def run_from_env(
 ) -> dict:
     """Build the OneKey and Dataverse clients from the environment and run the job.
 
-    ``full`` runs the monthly full sync; otherwise retry then delta.
+    ``full`` runs the monthly full sync; otherwise retry then delta, or the
+    delta alone with ``retry=False`` (the delta queue, whose retry already ran
+    from the retry queue).
 
     The delta starts at ``date_from`` when given (CLI ``--date-from``), else at
     the SYNC_DELTA_FROM setting when set, else where the last covering job
@@ -454,27 +574,24 @@ def run_from_env(
     """
     selected = codebases or ["WUK"]
     with engine_from_env(config_dir, bulk_batch_size) as engine:
-        if if_busy and not dry_run:
-            running = active_job(engine.dataverse, selected)
-            if running:
-                if if_busy == IF_BUSY_SKIP:
-                    logger.warning(
-                        "Skipped %s sync of %s: job %s is still running (heartbeat %s)",
-                        "full" if full else "delta",
-                        running["codebase"],
-                        running.get("ts_jobid"),
-                        running.get("ts_lastheartbeat"),
-                    )
-                    return {
-                        "success": True,
-                        "skipped": True,
-                        "busy_job": running.get("ts_jobid"),
-                    }
-                raise SyncBusy(running["codebase"], running)
+        if not dry_run:
+            skipped = _busy(engine, selected, if_busy, "full" if full else "delta")
+            if skipped:
+                return skipped
         if full:
             return run_full(
                 engine,
                 codebases=selected,
+                dry_run=dry_run,
+                trigger=trigger,
+                sync_choices=sync_choices,
+            )
+        if not retry:
+            return run_delta(
+                engine,
+                codebases=selected,
+                date_from=date_from or delta_from_setting(date_to),
+                date_to=date_to,
                 dry_run=dry_run,
                 trigger=trigger,
                 sync_choices=sync_choices,
@@ -488,6 +605,36 @@ def run_from_env(
             trigger=trigger,
             retry_limit=retry_limit,
             sync_choices=sync_choices,
+        )
+
+
+def retry_from_env(
+    *,
+    codebases: list[str] | None = None,
+    dry_run: bool = False,
+    trigger: int = TRIGGER_TIMER,
+    limit: int = 100,
+    config_dir: str | None = None,
+    bulk_batch_size: int | None = None,
+    if_busy: str | None = None,
+) -> dict:
+    """Build the clients from the environment and replay pending failures only.
+
+    ``if_busy`` works as in run_from_env. The retry queue skips a busy
+    codebase: its failure rows stay Pending for the next run.
+    """
+    selected = codebases or ["WUK"]
+    with engine_from_env(config_dir, bulk_batch_size) as engine:
+        if not dry_run:
+            skipped = _busy(engine, selected, if_busy, "retry")
+            if skipped:
+                return skipped
+        return run_retry(
+            engine,
+            codebases=selected,
+            dry_run=dry_run,
+            trigger=trigger,
+            limit=limit,
         )
 
 

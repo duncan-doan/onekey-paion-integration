@@ -10,41 +10,50 @@ the code packages are in [architecture.md](architecture.md).
 ```mermaid
 flowchart LR
     subgraph Timers["Timer functions, 00:00 UTC"]
-        TD["scheduled_onekey_delta<br/>days 2-31"]
         TF["scheduled_onekey_full<br/>1st of the month"]
+        TD["scheduled_onekey_delta<br/>days 2-31"]
     end
     MAN["Manual message<br/>portal or az CLI"]
-    Q[["onekey-queue<br/>one message per country"]]
-    P[["onekey-queue-poison"]]
-    SC{{"Scale controller<br/>Azure"}}
-    W["scheduled_onekey_worker<br/>1 to 3 instances"]
-    OK[("IQVIA OneKey<br/>/pop/refreshMyOnekey<br/>/ok/searchCodeList")]
-    DV[("Dataverse<br/>accounts, contacts, addresses,<br/>affiliations, lookups,<br/>ts_integrationjob")]
+    QF[["onekey-full"]]
+    QR[["onekey-retry"]]
+    QD[["onekey-delta"]]
+    WF["scheduled_onekey_full_worker"]
+    WR["scheduled_onekey_retry_worker"]
+    WD["scheduled_onekey_delta_worker"]
+    PF[["onekey-full-poison"]]
+    PR[["onekey-retry-poison"]]
+    PD[["onekey-delta-poison"]]
+    OK[("IQVIA OneKey")]
+    DV[("Dataverse<br/>records, lookups,<br/>ts_integrationjob")]
 
-    TD -->|"1 sync choice options once"| DV
-    TF -->|"1 sync choice options once"| DV
-    TD -->|"2 enqueue"| Q
-    TF -->|"2 enqueue"| Q
-    MAN --> Q
-    SC -.->|"watches queue length,<br/>starts and stops instances"| W
-    Q -->|"3 one message per instance"| W
-    W -->|"read"| OK
-    W -->|"upsert + job trace"| DV
-    W -->|"cannot be fixed by retrying"| P
+    TF -->|"one per country"| QF
+    TD -->|"one per country"| QR
+    MAN -.-> QF & QR & QD
+    QF --> WF
+    QR --> WR
+    WR -->|"retry over: queue the delta"| QD
+    QD --> WD
+    WF & WR & WD -->|"read"| OK
+    WF & WR & WD -->|"upsert + job trace"| DV
+    WF -.->|"will not be retried"| PF
+    WR -.-> PR
+    WD -.-> PD
 ```
 
-The timers decide **what** to sync and finish in seconds. The worker does the
-sync, one country per message, for seconds (delta) to hours (full).
+The timers decide **what** to sync and finish in seconds; each also syncs the
+choice options once before it enqueues. Each kind of work has its own queue
+and worker, one country per message: a full sync (minutes to hours), a retry
+of the country's pending failures, then its delta (seconds to minutes).
 
 ## Components
 
 | Component | What it is | Where |
 | --- | --- | --- |
-| Timer functions | `scheduled_onekey_delta` (00:00 UTC, days 2-31) and `scheduled_onekey_full` (00:00 UTC, the 1st). Each syncs the choice options once, then puts one message per country in `ONEKEY_CODBASE` on the queue. Idle unless `SYNC_SCHEDULE` is true. | `function_app.py` |
-| `onekey-queue` | Azure Storage queue in the app's storage account. A to-do list of countries to sync. | `AzureWebJobsStorage` |
-| Message | Small JSON, Base64-encoded on the queue: `{"mode":"delta","codebase":"WDE","choices":false,…}`. Azure adds an id, insertion time and a **dequeue count**. | `integration/queue_sync.py` (`SyncQueueMessage`) |
-| `onekey-queue-poison` | Messages that will not be retried any more. Nothing reads it; a person resends or deletes them. | same account |
-| Worker | `scheduled_onekey_worker`, the Python function that runs one message. | `function_app.py`, `integration/queue_sync.py` (`handle_message`, `dispatch`) |
+| Timer functions | `scheduled_onekey_full` (00:00 UTC, the 1st) puts one message per country in `ONEKEY_CODBASE` on `onekey-full`; `scheduled_onekey_delta` (00:00 UTC, days 2-31) puts one on `onekey-retry`. Each syncs the choice options once first. Idle unless `SYNC_SCHEDULE` is true. | `function_app.py` |
+| Queues | `onekey-full`, `onekey-retry`, `onekey-delta`: Azure Storage queues in the app's storage account, each a to-do list of countries for one kind of work. `onekey-delta` is filled by the retry worker. | `AzureWebJobsStorage`, `integration/queue_sync.py` (`QUEUES`) |
+| Message | Small JSON, Base64-encoded on the queue: `{"mode":"retry","codebase":"WDE","choices":false,…}`. `mode` may be left out; the queue supplies it. A message whose `mode` belongs to another queue is poisoned. Azure adds an id, insertion time and a **dequeue count**. | `integration/queue_sync.py` (`SyncQueueMessage`) |
+| Poison queues | `onekey-full-poison`, `onekey-retry-poison`, `onekey-delta-poison`: messages that will not be retried any more. Azure names them `<queue>-poison` and the workers write to the same ones. Nothing reads them; a person resends or deletes them. | same account |
+| Workers | `scheduled_onekey_full_worker`, `scheduled_onekey_retry_worker`, `scheduled_onekey_delta_worker`: one Python function per queue, each running one message. | `function_app.py`, `integration/queue_sync.py` (`handle_message`, `dispatch`) |
 | Instance | A machine Azure starts on demand (2 GB, 1 vCPU) running the Functions host and this code. Runs **one message at a time**. | Flex Consumption plan |
 | Host | The Functions runtime on each instance. Fetches a message, calls the worker, then deletes or returns the message. | Azure |
 | Scale controller | Azure component outside the app. Counts waiting messages and decides how many worker instances to run, up to the cap. | Azure |
@@ -56,20 +65,20 @@ sync, one country per message, for seconds (delta) to hours (full).
 sequenceDiagram
     autonumber
     participant T as Timer
-    participant Q as onekey-queue
+    participant Q as Work queue
     participant S as Scale controller
     participant H as Host on an instance
     participant W as Worker code
     participant D as Dataverse
 
-    T->>Q: put {"mode":"delta","codebase":"WDE"}
+    T->>Q: put {"mode":"full","codebase":"WDE"} on onekey-full
     S->>Q: how many messages are waiting?
     S->>H: start an instance, if under the cap
     H->>Q: take 1 message (it is hidden, dequeue count + 1)
-    H->>W: scheduled_onekey_worker(message)
+    H->>W: scheduled_onekey_full_worker(message)
     W->>D: busy check: Running WDE job with heartbeat under 20 min?
     alt busy
-        W-->>H: delta: return "skipped" / full: raise SyncBusy
+        W-->>H: retry or delta: return "skipped" / full: raise SyncBusy
     else free
         W->>D: create ts_integrationjob (Running)
         loop phases
@@ -89,60 +98,102 @@ While the worker runs, the host keeps the message hidden (it renews the lease
 every few minutes), so no other instance can take it, however long the sync
 takes.
 
+### Daily chain: retry, then delta
+
+The delta timer only fills `onekey-retry`. The retry worker queues the
+country's delta when its retry is over, so the two never run at the same time:
+the busy check counts a running retry, and a delta started beside it would be
+skipped.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as scheduled_onekey_delta
+    participant R as onekey-retry
+    participant WR as retry worker
+    participant QD as onekey-delta
+    participant WD as delta worker
+
+    T->>R: one message per country
+    R->>WR: {"mode":"retry","codebase":"WDE"}
+    WR->>WR: busy check, then replay WDE's pending failures
+    alt done, or failed on its 2nd delivery (poisoned)
+        WR->>QD: {"mode":"delta","codebase":"WDE"}
+        QD->>WD: delta from the last covering job to now
+    else country busy
+        WR-->>R: skipped, no delta: tomorrow's covers the window
+    else failed on its 1st delivery
+        WR-->>R: raise: retried in 30 min, the delta waits
+    end
+```
+
 ### Message states
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Visible: timer or manual put
+    [*] --> Visible: timer, retry worker or manual put
     Visible --> Hidden: an instance takes it, dequeue count + 1
     Hidden --> Deleted: worker returned, done or skipped
     Hidden --> Visible: worker raised, visible again after 30 min
     Hidden --> Visible: instance died, lease expires within about 10 min
-    Hidden --> Poison: malformed, or a full sync failed twice
+    Hidden --> Poison: malformed, wrong queue, or a full sync or retry failed twice
     Hidden --> Poison: 5th delivery failed
     Deleted --> [*]
 ```
 
 | Outcome | Who decides | What happens |
 | --- | --- | --- |
-| Sync succeeded, or delta skipped as busy | worker returns | Host deletes the message |
+| Work succeeded, or a retry or delta skipped as busy | worker returns | Host deletes the message. A finished retry also queues the delta; a skipped one does not |
 | Delta failed | worker raises | Visible again after `visibilityTimeout` (30 min); poison after `maxDequeueCount` (5) deliveries |
-| Full sync failed | worker | Retried once; on the 2nd failed delivery the worker writes it to the poison queue itself (`FULL_MAX_DELIVERIES`), because each retry repeats hours of work |
+| Retry failed | worker | Retried once, while the delta waits; on the 2nd failed delivery the worker writes it to `onekey-retry-poison` itself (`RETRY_MAX_DELIVERIES`) and queues the delta anyway. Its rows stay Pending for the next run |
+| Full sync failed | worker | Retried once; on the 2nd failed delivery the worker writes it to `onekey-full-poison` itself (`FULL_MAX_DELIVERIES`), because each retry repeats hours of work |
 | Full sync, country busy | worker raises `SyncBusy` | Visible again after 30 min; counts as a delivery |
-| Malformed message | worker | Straight to the poison queue; retrying cannot fix it |
+| Malformed message, or a `mode` for another queue | worker | Straight to the poison queue; retrying cannot fix it |
 | Instance killed mid-run (restart, deployment, scale-in, 12 h timeout) | nobody | Lease expires, message reappears, another instance runs it from the first phase |
+
+`maxDequeueCount` and `visibilityTimeout` in `host.json` apply to all three
+queues; the per-queue limits above live in `integration/queue_sync.py`.
 
 ## Instances and scaling
 
-Flex Consumption scales **per function**: the worker gets its own instances,
-separate from each timer. The scale controller wants one instance per waiting
-message, because each instance takes one message at a time (`batchSize: 1`,
+Flex Consumption scales **per function**: each of the three workers gets its
+own instances, separate from each other and from the timers. The scale
+controller wants one instance per waiting message on that worker's queue,
+because each instance takes one message at a time (`batchSize: 1`,
 `newBatchThreshold: 0`).
 
-**Maximum instance count** is the ceiling on that number. It is a limit, not
-what is running: with nothing on the queue there are zero instances and no cost.
+**Maximum instance count** is the ceiling on that number, for **each** worker.
+It is a limit, not what is running: with nothing on the queues there are zero
+instances and no cost.
 
 ```mermaid
 flowchart LR
-    Q[["onekey-queue: WUK WDE WNL WDK WNO WSE WFI"]]
+    Q[["onekey-full: WUK WDE WNL WDK WNO WSE WFI"]]
     Q --> I1["instance 1: WUK"]
     Q --> I2["instance 2: WDE"]
     Q --> I3["instance 3: WNL"]
     I3 -.->|"finished, takes the next"| N["WDK, then WNO, WSE, WFI"]
 ```
 
-| Messages waiting | Cap 100 (Azure default) | Cap 3 (this project) |
+| Messages waiting on one queue | Cap 100 (Azure default) | Cap 3 (this project) |
 | --- | --- | --- |
 | 0 | 0 instances | 0 instances |
 | 1 | 1 | 1 |
 | 7 (all countries) | 7 at once | 3 at once, 4 wait in the queue |
 
+With a cap of 3, up to 9 instances can run when all three queues have work:
+3 full syncs, 3 retries and 3 deltas. In practice the full syncs run on the
+1st, when no delta is scheduled, and a country's retry and delta run one after
+the other. Retries and deltas only overlap a full sync that is still running
+on the 2nd, and then only for the countries that full sync has finished.
+
 **Why 3:** every instance writes to Dataverse as the same application user, which
 is limited to 6,000 requests and 20 minutes of execution per 5 minutes, and 52
 requests at a time. Beyond two or three workers you get throttling (429) waits,
-not speed, and every country hits OneKey at the same moment. Waiting messages
-lose nothing: a delta reads from where the previous one stopped, not from when
-it was enqueued.
+not speed, and every country hits OneKey at the same moment. Lower the cap to 2
+if retries and deltas overlapping a long full sync start to throttle. Waiting
+messages lose nothing: a delta reads from where the previous one stopped, not
+from when it was enqueued.
 
 Set or check the cap:
 
@@ -154,8 +205,8 @@ az functionapp show -g RG-ONEKEY-D365-TEST -n FUNC-ONEKEY-D365-TEST \
 ```
 
 Portal: Function App → **Settings → Scale and concurrency** → **Maximum
-instance count** → 3 → **Save**. The cap applies to each function separately;
-the timers only ever need one instance.
+instance count** → 3 → **Save**. The cap applies to each function separately,
+so to each worker; the timers only ever need one instance.
 
 ### What an instance does
 
@@ -174,8 +225,9 @@ the timers only ever need one instance.
 | Case | Protection |
 | --- | --- |
 | Same message | Hidden while one instance runs it |
-| Different countries | Nothing shared: accounts and contacts are keyed by OneKey ID, which carries the country (`WUKE…`, `WDEH…`); lookup rows by `{codBase}.{list}.{code}`; each worker retries only its own country's failures; choice options are synced once by the timer before enqueueing |
-| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a delta is skipped and a full sync is deferred |
+| Different countries | Nothing shared: accounts and contacts are keyed by OneKey ID, which carries the country (`WUKE…`, `WDEH…`); lookup rows by `{codBase}.{list}.{code}`; each retry replays only its own country's failures; choice options are synced once by the timer before enqueueing |
+| Retry and delta of one country | Chained, never queued together: the retry worker queues the delta when the retry is over |
+| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred |
 | Remaining gap | Two messages for one country starting within about a second can both pass the check. The timer removes duplicate codes, and upserts on `ts_externalid` keep records from duplicating. The CLI (`scripts/run_scheduled_sync.py`) does not run the busy check |
 
 ### Heartbeat
@@ -198,12 +250,16 @@ only the heartbeat age tells a live job from a dead one.
 A killed job therefore blocks its country for at most 20 minutes, and its row
 needs no clean-up.
 
-## What the worker runs
+## What the workers run
 
-| `mode` | Steps |
+| Queue (`mode`) | Steps |
 | --- | --- |
-| `delta` | Retry this country's pending failures → read OneKey changes in the window → phases → resolve pending failures it fixed |
-| `full` | Read the whole population → phases → resolve pending failures it fixed |
+| `onekey-full` (`full`) | Read the whole population → phases → resolve pending failures it fixed |
+| `onekey-retry` (`retry`) | Replay this country's pending failures (up to `retry_limit`, default 100) → queue the delta |
+| `onekey-delta` (`delta`) | Read OneKey changes in the window → phases → resolve pending failures it fixed |
+
+The CLI (`scripts/run_scheduled_sync.py`) still runs retry then delta in one
+process.
 
 Phases, in order: lookup tables for the country, HCO accounts, addresses,
 parent hierarchy, HCO–HCO affiliations, HCP contacts, HCP–HCO affiliations.
@@ -217,7 +273,7 @@ parent hierarchy, HCO–HCO affiliations, HCP contacts, HCP–HCO affiliations.
    15 minutes
 4. No such job: a **full sync** runs instead (logged as `mode=delta ran=full`)
 
-The window ends when the worker runs, after the retry step.
+The window ends when the delta worker runs, after the retry.
 
 ## Configuration
 
@@ -225,10 +281,11 @@ The window ends when the worker runs, after the retry step.
 | --- | --- | --- |
 | `host.json` `functionTimeout` | `12:00:00` | Longest single run |
 | `host.json` `queues.batchSize` / `newBatchThreshold` | 1 / 0 | One message per instance |
-| `host.json` `queues.visibilityTimeout` | 30 min | Delay before a **failed** message is retried. Not a run limit |
-| `host.json` `queues.maxDequeueCount` | 5 | Deliveries before the host poisons a message |
+| `host.json` `queues.visibilityTimeout` | 30 min | Delay before a **failed** message is retried, on every queue. Not a run limit |
+| `host.json` `queues.maxDequeueCount` | 5 | Deliveries before the host poisons a message, on every queue |
 | `host.json` `queues.maxPollingInterval` | 30 s | Longest wait before a new message is noticed |
-| Maximum instance count | 3 | Countries running at once |
+| `FULL_MAX_DELIVERIES` / `RETRY_MAX_DELIVERIES` | 2 / 2 | Deliveries before the worker poisons a failed full sync / retry (`integration/queue_sync.py`) |
+| Maximum instance count | 3 | Countries running at once, per worker |
 | `ONEKEY_CODBASE` | `WUK,WDE,WNL,WDK,WNO,WSE,WFI` | Countries the timers enqueue |
 | `SYNC_SCHEDULE` | `true` | Timers enqueue; `false` stops them |
 | `SYNC_DELTA_FROM` | unset | Fixed delta start for every country while set |
@@ -241,21 +298,31 @@ Changing an app setting restarts the app, which stops any sync that is running.
 ```bash
 RG=RG-ONEKEY-D365-TEST; ACCOUNT=rgonekeyd365testae59
 
-# run one country now
-az storage message put -q onekey-queue --account-name $ACCOUNT --auth-mode key -o none \
-  --content "$(printf '%s' '{"mode":"full","codebase":"WDE"}' | base64)"
+# run one country now: a full sync, or retry then delta, or the delta alone
+put() { az storage message put -q "$1" --account-name $ACCOUNT --auth-mode key -o none \
+  --content "$(printf '%s' "$2" | base64)"; }
+put onekey-full  '{"codebase":"WDE"}'
+put onekey-retry '{"codebase":"WDE"}'
+put onekey-delta '{"codebase":"WDE"}'
 
 # see waiting and given-up messages (running ones are hidden)
-az storage message peek -q onekey-queue        --account-name $ACCOUNT --auth-mode key --num-messages 32
-az storage message peek -q onekey-queue-poison --account-name $ACCOUNT --auth-mode key --num-messages 32
+for q in onekey-full onekey-retry onekey-delta; do
+  for name in $q $q-poison; do
+    echo "== $name"
+    az storage message peek -q $name --account-name $ACCOUNT --auth-mode key --num-messages 32
+  done
+done
 
 # stop: no new work, then empty the queues
 az functionapp config appsettings set -g $RG -n FUNC-ONEKEY-D365-TEST --settings SYNC_SCHEDULE=false
-az storage message clear -q onekey-queue        --account-name $ACCOUNT --auth-mode key
-az storage message clear -q onekey-queue-poison --account-name $ACCOUNT --auth-mode key
+for q in onekey-full onekey-retry onekey-delta; do
+  az storage message clear -q $q        --account-name $ACCOUNT --auth-mode key
+  az storage message clear -q $q-poison --account-name $ACCOUNT --auth-mode key
+done
 ```
 
-Application Insights, one line per stage of each message:
+Application Insights, one line per stage of each message. Every worker line
+carries `queue=`; `scheduled_queue_chained` marks a retry queuing its delta:
 
 ```kusto
 traces
@@ -265,9 +332,20 @@ traces
 | order by timestamp desc
 ```
 
+### Moving from `onekey-queue`
+
+Before this layout, one worker read `onekey-queue`. Nothing reads it now. Before
+deploying, set `SYNC_SCHEDULE=false`, let `onekey-queue` empty or clear it, then
+deploy and set `SYNC_SCHEDULE=true` again. Resend anything still wanted from
+`onekey-queue-poison` to its new queue, then delete both old queues. The
+bindings create the new queues on first use.
+
 ## Known limits
 
 - A retried run starts again from the first phase; there is no phase resume.
+- A retry whose instance is killed on every delivery is poisoned by Azure
+  without running the worker, so it queues no delta. The next day's delta
+  starts from the last covering job, so no window is lost.
 - Records that leave the OneKey population are not deactivated in Dataverse.
 - Log sampling is on in `host.json`; some worker trace lines can be missing.
   Add `Trace` to `excludedTypes` to keep all of them.

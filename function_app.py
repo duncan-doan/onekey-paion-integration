@@ -4,12 +4,14 @@ sample_ok_to_dv upserts a few OneKey HCOs and their related data to Dataverse,
 through the same engine phases as the full sync. It is a small end-to-end
 check: a failure there is a connectivity, configuration or mapping problem.
 
-scheduled_onekey_delta (daily) and scheduled_onekey_full (monthly) sync the
-choice options once, then enqueue one work item per codebase.
-scheduled_onekey_worker runs the real sync for one codebase and lets Azure
-retry failures before moving them to onekey-queue-poison. Sync runs are
-traced to ts_integrationjob / ts_integrationfailure. See
-integration.queue_sync for what each delivery does.
+scheduled_onekey_full (monthly) and scheduled_onekey_delta (daily) sync the
+choice options once, then enqueue one work item per codebase: full syncs on
+onekey-full, and retries on onekey-retry. Each queue has its own worker:
+scheduled_onekey_full_worker runs the full sync, scheduled_onekey_retry_worker
+replays pending failures and then queues the codebase on onekey-delta, and
+scheduled_onekey_delta_worker pulls the delta. Azure retries failures before
+moving them to <queue>-poison. Sync runs are traced to ts_integrationjob /
+ts_integrationfailure. See integration.queue_sync for what each delivery does.
 
 App Settings required (the same names the CLI scripts read from .env):
     ONEKEY_ENV or ONEKEY_BASE_URL, ONEKEY_USERNAME, ONEKEY_PASSWORD,
@@ -142,17 +144,20 @@ def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None
     )
 
 
-def _enqueue(job: str, codebases: list[str], work: func.Out[typing.List[str]]) -> None:
-    """Sync the choice options once, then put one message per codebase on the queue."""
-    from integration.queue_sync import scheduled_messages
+def _enqueue(
+    job: str, mode: str, codebases: list[str], work: func.Out[typing.List[str]]
+) -> None:
+    """Sync the choice options once, then put one message per codebase on the mode's queue."""
+    from integration.queue_sync import QUEUES, scheduled_messages
     from integration.scheduled_sync import sync_choice_picklists
 
     choices_synced = sync_choice_picklists()
-    messages = scheduled_messages(job, codebases, choices=not choices_synced)
+    messages = scheduled_messages(mode, codebases, choices=not choices_synced)
     work.set(messages)
     logging.info(
-        "scheduled_%s_enqueued codebases=%s messages=%d choices_synced=%s",
+        "scheduled_%s_enqueued queue=%s codebases=%s messages=%d choices_synced=%s",
         job,
+        QUEUES[mode],
         ",".join(codebases),
         len(messages),
         choices_synced,
@@ -167,28 +172,29 @@ def _enqueue(job: str, codebases: list[str], work: func.Out[typing.List[str]]) -
 
 @app.queue_output(
     arg_name="work",
-    queue_name="onekey-queue",
+    queue_name="onekey-retry",
     connection="AzureWebJobsStorage",
 )
 @app.timer_trigger(schedule="0 0 0 2-31 * *", arg_name="timer", run_on_startup=False)
 def scheduled_onekey_delta(
     timer: func.TimerRequest, work: func.Out[typing.List[str]]
 ) -> None:
-    """Daily at midnight, except the 1st: enqueue retry-and-delta work.
+    """Daily at midnight, except the 1st: enqueue one retry per codebase.
 
-    Each worker's window runs from where the last covering Full or Delta
+    The retry worker queues the codebase's delta when its retry is over. Each
+    delta's window runs from where the last covering Full or Delta
     ts_integrationjob of its codebase stopped reading, up to the moment the
-    worker runs. Stays idle unless App Setting SYNC_SCHEDULE is true.
+    delta worker runs. Stays idle unless App Setting SYNC_SCHEDULE is true.
     """
     codebases = _scheduled_codebases("delta", timer)
     if codebases is None:
         return
-    _enqueue("delta", codebases, work)
+    _enqueue("delta", "retry", codebases, work)
 
 
 @app.queue_output(
     arg_name="work",
-    queue_name="onekey-queue",
+    queue_name="onekey-full",
     connection="AzureWebJobsStorage",
 )
 @app.timer_trigger(schedule="0 0 0 1 * *", arg_name="timer", run_on_startup=False)
@@ -202,45 +208,60 @@ def scheduled_onekey_full(
     codebases = _scheduled_codebases("full", timer)
     if codebases is None:
         return
-    _enqueue("full", codebases, work)
+    _enqueue("full", "full", codebases, work)
 
 
-@app.queue_output(
-    arg_name="poison",
-    queue_name="onekey-queue-poison",
-    connection="AzureWebJobsStorage",
-)
-@app.queue_trigger(
-    arg_name="message",
-    queue_name="onekey-queue",
-    connection="AzureWebJobsStorage",
-)
-def scheduled_onekey_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
-    """Process one codebase; an exception lets Azure retry then poison it.
+# Each worker's poison output is its trigger queue's name plus "-poison": that
+# is where Azure itself moves a message after maxDequeueCount deliveries, so
+# each queue keeps one place for work that will not be retried.
 
-    Work that retrying cannot fix (a malformed message, a full sync that
-    already failed FULL_MAX_DELIVERIES times) goes to onekey-queue-poison
-    straight away.
+
+def _work(
+    mode: str,
+    message: func.QueueMessage,
+    poison: func.Out[str],
+    delta: typing.Optional[func.Out[str]] = None,
+) -> None:
+    """Run one delivery from the mode's queue; an exception lets Azure retry then poison it.
+
+    Work that retrying cannot fix (a malformed message, a message for another
+    queue, work that failed on its last allowed delivery) goes to the poison
+    queue straight away. A retry that is over, done or poisoned, also puts its
+    codebase on ``delta``.
     """
     from integration.queue_sync import (
         OUTCOME_POISON,
         OUTCOME_SKIPPED,
+        QUEUES,
         handle_message,
+        job_ids,
         ran_mode,
     )
 
+    queue = QUEUES[mode]
     body = message.get_body()
     logging.info(
-        "scheduled_queue_start id=%s dequeue_count=%s",
+        "scheduled_queue_start queue=%s id=%s dequeue_count=%s",
+        queue,
         message.id,
         message.dequeue_count,
     )
-    outcome = handle_message(body, int(message.dequeue_count or 1))
+    outcome = handle_message(body, int(message.dequeue_count or 1), mode=mode)
     item = outcome.item
+    if outcome.next_delta:
+        delta.set(outcome.next_delta)
+        logging.info(
+            "scheduled_queue_chained queue=%s id=%s codebase=%s next=%s",
+            queue,
+            message.id,
+            item.codebase,
+            QUEUES["delta"],
+        )
     if outcome.status == OUTCOME_POISON:
         poison.set(body.decode("utf-8", errors="replace"))
         logging.error(
-            "scheduled_queue_poisoned id=%s mode=%s codebase=%s reason=%s",
+            "scheduled_queue_poisoned queue=%s id=%s mode=%s codebase=%s reason=%s",
+            queue,
             message.id,
             item.mode if item else None,
             item.codebase if item else None,
@@ -250,13 +271,72 @@ def scheduled_onekey_worker(message: func.QueueMessage, poison: func.Out[str]) -
     ran = ran_mode(item, outcome.result)
     detail = (outcome.result or {}).get(ran) or {}
     logging.info(
-        "scheduled_queue_%s id=%s mode=%s ran=%s codebase=%s job=%s status=%s busy_job=%s",
+        "scheduled_queue_%s queue=%s id=%s mode=%s ran=%s codebase=%s job=%s status=%s "
+        "busy_job=%s",
         "skipped" if outcome.status == OUTCOME_SKIPPED else "complete",
+        queue,
         message.id,
         item.mode,
         ran,
         item.codebase,
-        detail.get("job_id"),
+        job_ids(detail),
         detail.get("trace_status"),
         (outcome.result or {}).get("busy_job"),
     )
+
+
+@app.queue_output(
+    arg_name="poison",
+    queue_name="onekey-full-poison",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_trigger(
+    arg_name="message",
+    queue_name="onekey-full",
+    connection="AzureWebJobsStorage",
+)
+def scheduled_onekey_full_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
+    """Run one codebase's full sync, with FULL_MAX_DELIVERIES deliveries."""
+    _work("full", message, poison)
+
+
+@app.queue_output(
+    arg_name="delta",
+    queue_name="onekey-delta",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_output(
+    arg_name="poison",
+    queue_name="onekey-retry-poison",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_trigger(
+    arg_name="message",
+    queue_name="onekey-retry",
+    connection="AzureWebJobsStorage",
+)
+def scheduled_onekey_retry_worker(
+    message: func.QueueMessage, poison: func.Out[str], delta: func.Out[str]
+) -> None:
+    """Replay one codebase's pending failures, then queue its delta.
+
+    The delta is queued only once the retry is over (done, or poisoned after
+    RETRY_MAX_DELIVERIES), so the two never run at the same time. A codebase
+    found busy gets neither; the next day's retry and delta cover it.
+    """
+    _work("retry", message, poison, delta)
+
+
+@app.queue_output(
+    arg_name="poison",
+    queue_name="onekey-delta-poison",
+    connection="AzureWebJobsStorage",
+)
+@app.queue_trigger(
+    arg_name="message",
+    queue_name="onekey-delta",
+    connection="AzureWebJobsStorage",
+)
+def scheduled_onekey_delta_worker(message: func.QueueMessage, poison: func.Out[str]) -> None:
+    """Pull one codebase's delta; Azure gives it maxDequeueCount deliveries."""
+    _work("delta", message, poison)

@@ -160,10 +160,11 @@ Live tests count against OneKey limits and require configured credentials.
 
 ## Azure Function
 
-Scheduled syncs run as a Python Function App. Timers enqueue one codebase at a
-time; the queue worker does the sync and Azure retries failures onto
-`onekey-queue-poison`. Setup, plan choice, and app settings are in
-[docs/AZURE_FUNCTION_SETUP.md](docs/AZURE_FUNCTION_SETUP.md).
+Scheduled syncs run as a Python Function App. Timers enqueue one message per
+codebase: full syncs on `onekey-full`, daily work on `onekey-retry`, whose
+worker replays pending failures and then queues the delta on `onekey-delta`.
+Azure retries failures onto each queue's `-poison` queue. Setup, plan choice,
+and app settings are in [docs/AZURE_FUNCTION_SETUP.md](docs/AZURE_FUNCTION_SETUP.md).
 
 ## Environments
 

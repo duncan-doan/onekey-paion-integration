@@ -16,7 +16,10 @@ from integration.scheduled_sync import (
     active_job,
     delta_window,
     last_window_start,
+    retry_from_env,
+    run_delta,
     run_from_env,
+    run_retry,
     run_retry_then_delta,
     sync_choice_picklists,
     window_end,
@@ -140,6 +143,16 @@ def fake_engine(monkeypatch):
         "run_full",
         lambda engine, **kwargs: ran.append(("full", kwargs)) or {"success": True},
     )
+    monkeypatch.setattr(
+        scheduled_sync,
+        "run_delta",
+        lambda engine, **kwargs: ran.append(("delta only", kwargs)) or {"success": True},
+    )
+    monkeypatch.setattr(
+        scheduled_sync,
+        "run_retry",
+        lambda engine, **kwargs: ran.append(("retry", kwargs)) or {"success": True},
+    )
     engine.ran = ran
     return engine
 
@@ -172,6 +185,25 @@ def test_cli_runs_do_not_check_for_a_busy_codebase(fake_engine):
     assert fake_engine.ran[0][0] == "delta"
 
 
+def test_the_delta_queue_runs_the_delta_without_the_retry(fake_engine):
+    run_from_env(codebases=["WUK"], retry=False, if_busy=IF_BUSY_SKIP)
+    assert [kind for kind, _ in fake_engine.ran] == ["delta only"]
+
+
+def test_the_retry_queue_replays_failures_only(fake_engine):
+    retry_from_env(codebases=["WUK"], limit=25, if_busy=IF_BUSY_SKIP)
+    assert fake_engine.ran == [
+        ("retry", {"codebases": ["WUK"], "dry_run": False, "trigger": scheduled_sync.TRIGGER_TIMER, "limit": 25})
+    ]
+
+
+def test_a_busy_retry_is_skipped(fake_engine):
+    fake_engine.dataverse.rows = [{"ts_jobid": "job-0", "ts_lastheartbeat": "x"}]
+    result = retry_from_env(codebases=["WUK"], if_busy=IF_BUSY_SKIP)
+    assert result == {"success": True, "skipped": True, "busy_job": "job-0"}
+    assert fake_engine.ran == []
+
+
 # -- per-codebase retry --------------------------------------------------------
 
 
@@ -197,6 +229,18 @@ def test_each_codebase_retries_only_its_own_failures(monkeypatch):
     assert retried == ["WUK", "WDE"]
     assert result["retry"]["selected"] == 4
     assert result["retry"]["jobs"] == ["retry-WUK", "retry-WDE"]
+    assert result["delta"] == {"success": True}
+
+
+def test_run_retry_replays_without_a_delta(monkeypatch):
+    def fake_retry(engine, *, codebase, limit, dry_run, trigger):
+        return {"success": codebase != "WDE", "selected": 1, "jobs": [], "errors": []}
+
+    monkeypatch.setattr(scheduled_sync, "retry_pending_failures", fake_retry)
+    engine = SimpleNamespace(sync_delta=lambda **kwargs: pytest.fail("ran the delta"))
+    result = run_retry(engine, codebases=["WUK", "WDE"])
+    assert result["success"] is False
+    assert result["retry"]["selected"] == 2
 
 
 # -- choice picklists ----------------------------------------------------------
@@ -343,3 +387,22 @@ def test_an_explicit_start_keeps_the_delta_without_a_job(monkeypatch):
     assert [name for name, _ in calls] == ["retry", "delta"]
     assert calls[1][1]["date_from"] == "2026-08-08T00:00:00Z"
     assert engine.dataverse.queries == []
+
+
+def test_the_delta_alone_works_out_its_window_without_retrying(monkeypatch):
+    engine, calls = promotion_engine(
+        monkeypatch,
+        [{"ts_jobid": "d-1", "ts_startedon": "2026-10-09T00:00:20Z",
+          "ts_watermarkto": "2026-10-09T00:00:10Z", "ts_errorsummary": None}],
+    )
+    result = run_delta(engine, codebases=["WNL"])
+    assert [name for name, _ in calls] == ["delta"]
+    assert calls[0][1]["date_from"] == "2026-10-08T23:45:10Z"
+    assert set(result) == {"success", "delta", "resolved_by_delta"}
+
+
+def test_the_delta_alone_runs_a_full_sync_for_a_new_codebase(monkeypatch):
+    engine, calls = promotion_engine(monkeypatch, [])
+    result = run_delta(engine, codebases=["WNL"])
+    assert [name for name, _ in calls] == ["full"]
+    assert result["promoted_to_full"] is True
