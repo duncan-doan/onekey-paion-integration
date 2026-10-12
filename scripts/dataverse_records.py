@@ -22,6 +22,7 @@ Addresses are not written; see integration/mapping.py for why.
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,7 +64,12 @@ def parse_args():
                          help="OneKey id prefix to match (default: WDE)")
     deleter.add_argument("--type", choices=["hco", "hcp", "both"], default="both")
     deleter.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # An empty or short prefix matches every OneKey-sourced record: require at
+    # least a codebase, the W + two letters every OneKey id starts with.
+    if args.command == "delete" and not re.fullmatch(r"W[A-Z]{2}[A-Z0-9]*", args.prefix or ""):
+        parser.error("--prefix must start with a codebase such as WDE")
+    return args
 
 
 def cmd_whoami(client):

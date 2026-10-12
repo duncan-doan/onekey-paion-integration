@@ -1,2 +1,6 @@
-azure-functions
-requests>=2.28
+azure-functions>=1.17,<2
+requests>=2.28,<3
+# dataverse/auth.py replaces urllib3.util.connection.allowed_gai_family to keep
+# connections on IPv4 (IPv6 handshakes hang on this network). That is an
+# internal, so stay on the major version it was tested with (2.x).
+urllib3>=2,<3

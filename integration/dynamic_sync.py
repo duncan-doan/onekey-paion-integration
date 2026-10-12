@@ -76,6 +76,8 @@ class SyncPaused(RuntimeError):
         super().__init__(message)
         self.phase = phase
         self.stats = stats
+        # Set by _sync_delta_codebase: the counts of the phases it finished.
+        self.delta_result: dict | None = None
 
 
 def _ctx(engine, **context) -> dict:
@@ -863,25 +865,12 @@ class DynamicSyncEngine:
                         sync_hco_relations=sync_hco_relations,
                         sync_activity_affiliations=sync_activity_affiliations,
                     )
-                    self._merge_entity(results["accounts"], delta_result["accounts"])
-                    self._merge_entity(results["addresses"], delta_result["addresses"])
-                    self._merge_hierarchy(results["hierarchy"], delta_result["hierarchy"])
-                    self._merge_entity(
-                        results["affiliations"], delta_result["affiliations"]
-                    )
-                    self._merge_entity(
-                        results["activity_affiliations"],
-                        delta_result.get("activity_affiliations") or _empty_entity_stats(),
-                    )
-                    self._merge_entity(results["contacts"], delta_result["contacts"])
-                    for code in ["I", "U", "R"]:
-                        results["by_process_code"][code] += delta_result.get(
-                            "by_process_code", {}
-                        ).get(code, 0)
-                    for kind, count in (delta_result.get("unjoined") or {}).items():
-                        results["unjoined"][kind] = results["unjoined"].get(kind, 0) + count
+                    self._merge_delta_result(results, delta_result)
                     self._checkpoint(results)
                 except SyncPaused as exc:
+                    # The phases that finished before the pause still count.
+                    if exc.delta_result is not None:
+                        self._merge_delta_result(results, exc.delta_result)
                     self._record_pause(results, codebase, exc)
                 except Exception as e:
                     logger.exception(msg(f"Codebase {codebase} failed", _ctx(self)))
@@ -922,6 +911,16 @@ class DynamicSyncEngine:
     def _merge_hierarchy(target: dict, source: dict) -> None:
         for key in _EMPTY_HIERARCHY:
             target[key] += source.get(key, 0)
+
+    def _merge_delta_result(self, results: dict, delta_result: dict) -> None:
+        """Add one codebase's _sync_delta_codebase counts to the delta's results."""
+        for key in ("accounts", "addresses", "affiliations", "activity_affiliations", "contacts"):
+            self._merge_entity(results[key], delta_result.get(key) or _empty_entity_stats())
+        self._merge_hierarchy(results["hierarchy"], delta_result.get("hierarchy") or {})
+        for code in ["I", "U", "R"]:
+            results["by_process_code"][code] += delta_result.get("by_process_code", {}).get(code, 0)
+        for kind, count in (delta_result.get("unjoined") or {}).items():
+            results["unjoined"][kind] = results["unjoined"].get(kind, 0) + count
 
     def _bulk_upsert(
         self, entity_set: str, key_name: str, payloads: list[dict]
@@ -2212,82 +2211,86 @@ class DynamicSyncEngine:
             codbase=codebase,
         )
 
-        flattened_hcos: list[dict] = []
-        if workplaces:
-            flattened_hcos = [flatten_hco(r) for r in workplaces]
-            hco_result, flattened_hcos, _ = self._sync_hcos(
-                codebase,
-                dry_run=dry_run,
-                flattened=flattened_hcos,
+        try:
+            flattened_hcos: list[dict] = []
+            if workplaces:
+                flattened_hcos = [flatten_hco(r) for r in workplaces]
+                hco_result, flattened_hcos, _ = self._sync_hcos(
+                    codebase,
+                    dry_run=dry_run,
+                    flattened=flattened_hcos,
+                )
+                result["accounts"] = hco_result
+
+                if sync_addresses:
+                    result["addresses"] = self._sync_addresses(
+                        flattened_hcos, dry_run=dry_run
+                    )
+                if sync_hierarchy:
+                    result["hierarchy"] = self._sync_hierarchy(
+                        flattened_hcos,
+                        dry_run=dry_run,
+                        allowed_workplace_eids=self._contracted_workplace_eids or None,
+                    )
+                if sync_hco_relations:
+                    result["affiliations"] = self._sync_hco_relations(
+                        workplaces,
+                        dry_run=dry_run,
+                        allowed_workplace_eids=self._contracted_workplace_eids or None,
+                    )
+
+            if activities_by_individual:
+                composed = []
+                skipped = 0
+                for individual_eid, activity_record in activities_by_individual.items():
+                    activity = activity_record.get("activity") or {}
+                    workplace_eid = activity.get("workplaceEid")
+                    if individual_eid not in individuals:
+                        skipped += 1
+                        continue
+                    if not workplace_eid or workplace_eid not in workplace_index:
+                        skipped += 1
+                        continue
+                    composed.append(
+                        compose_hcp_result(
+                            individuals.get(individual_eid),
+                            activity_record,
+                            workplace_index.get(workplace_eid),
+                        )
+                    )
+                result["unjoined"]["activities"] = skipped
+                result["contacts"] = self._sync_hcps(
+                    codebase,
+                    dry_run=dry_run,
+                    composed=composed,
+                )
+
+            # A contact is built from its INDIVIDUAL, main ACTIVITY and WORKPLACE
+            # results; OneKey sends them as separate results with the ACTIVITY's
+            # own individual and workplace empty (checked on UAT). A change that
+            # arrives without the other two in this window is not applied until
+            # the next full sync. Counted on the job so production shows how often.
+            result["unjoined"]["individuals"] = sum(
+                1 for eid in individuals if eid not in activities_by_individual
             )
-            result["accounts"] = hco_result
-
-            if sync_addresses:
-                result["addresses"] = self._sync_addresses(
-                    flattened_hcos, dry_run=dry_run
-                )
-            if sync_hierarchy:
-                result["hierarchy"] = self._sync_hierarchy(
-                    flattened_hcos,
-                    dry_run=dry_run,
-                    allowed_workplace_eids=self._contracted_workplace_eids or None,
-                )
-            if sync_hco_relations:
-                result["affiliations"] = self._sync_hco_relations(
-                    workplaces,
-                    dry_run=dry_run,
-                    allowed_workplace_eids=self._contracted_workplace_eids or None,
-                )
-
-        if activities_by_individual:
-            composed = []
-            skipped = 0
-            for individual_eid, activity_record in activities_by_individual.items():
-                activity = activity_record.get("activity") or {}
-                workplace_eid = activity.get("workplaceEid")
-                if individual_eid not in individuals:
-                    skipped += 1
-                    continue
-                if not workplace_eid or workplace_eid not in workplace_index:
-                    skipped += 1
-                    continue
-                composed.append(
-                    compose_hcp_result(
-                        individuals.get(individual_eid),
-                        activity_record,
-                        workplace_index.get(workplace_eid),
+            if any(result["unjoined"].values()):
+                logger.warning(
+                    msg(
+                        "Delta changes not applied to contacts",
+                        _ctx(self, codbase=codebase),
+                        activities_without_individual_or_workplace=result["unjoined"]["activities"],
+                        individuals_without_activity=result["unjoined"]["individuals"],
                     )
                 )
-            result["unjoined"]["activities"] = skipped
-            result["contacts"] = self._sync_hcps(
-                codebase,
-                dry_run=dry_run,
-                composed=composed,
-            )
 
-        # A contact is built from its INDIVIDUAL, main ACTIVITY and WORKPLACE
-        # results; OneKey sends them as separate results with the ACTIVITY's
-        # own individual and workplace empty (checked on UAT). A change that
-        # arrives without the other two in this window is not applied until
-        # the next full sync. Counted on the job so production shows how often.
-        result["unjoined"]["individuals"] = sum(
-            1 for eid in individuals if eid not in activities_by_individual
-        )
-        if any(result["unjoined"].values()):
-            logger.warning(
-                msg(
-                    "Delta changes not applied to contacts",
-                    _ctx(self, codbase=codebase),
-                    activities_without_individual_or_workplace=result["unjoined"]["activities"],
-                    individuals_without_activity=result["unjoined"]["individuals"],
+            if sync_activity_affiliations and all_activities:
+                result["activity_affiliations"] = self._sync_activity_affiliations(
+                    all_activities, dry_run=dry_run
                 )
-            )
 
-        if sync_activity_affiliations and all_activities:
-            result["activity_affiliations"] = self._sync_activity_affiliations(
-                all_activities, dry_run=dry_run
-            )
-
+        except SyncPaused as exc:
+            exc.delta_result = result
+            raise
         return result
 
     def _lookup_contacts_bulk(self, individual_eids) -> dict[str, str]:

@@ -363,3 +363,25 @@ def test_without_a_deadline_the_run_finishes(tmp_path):
     result = engine.sync_full(["WUK"], sync_picklists=False)
     assert "paused" not in result
     assert result["accounts"]["processed"] == 250
+
+
+def test_a_paused_delta_keeps_the_counts_of_the_phases_it_finished(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("integration.dynamic_sync.time.monotonic", lambda: clock[0])
+    dataverse = BulkDataverse()
+    original = dataverse.bulk_upsert_by_field
+
+    def slow_upsert(*args, **kwargs):
+        clock[0] += 100
+        return original(*args, **kwargs)
+
+    dataverse.bulk_upsert_by_field = slow_upsert
+    engine, _ = _engine(tmp_path, dataverse)
+    engine.deadline = 50  # spent by the accounts batch; contacts never start
+    result = engine.sync_delta(
+        ["WUK"], "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", sync_picklists=False
+    )
+    assert result["paused"] is True
+    assert result["accounts"]["processed"] == 2
+    assert result["contacts"]["processed"] == 0
+    assert result["records_written"] == 2

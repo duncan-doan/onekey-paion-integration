@@ -141,7 +141,7 @@ unlimited entitlement; verify the tenant allocation and usage reports. See
 **Verification**
 
 Run `.venv/bin/python -m pytest -q` for the full offline regression suite.
-Final result: **510 passed, 5 live tests skipped**. Python compilation and
+Final result: **511 passed, 5 live tests skipped**. Python compilation and
 the whitespace check with `cr-at-eol` (preserving existing CRLF files) passed.
 Regression coverage includes incomplete population streams, lost-packet
 recovery, `success:false` packet retries, capped retry hints and heartbeat
@@ -186,3 +186,6 @@ reads, and Dataverse GETs through a client that refused any other method.
 | Tests wrote into `logs/` | One `sync_*.log` per run | Tests default `SYNC_LOG_DIR` to a temporary directory |
 | Full syncs cut off at 60 minutes | Flex scale-in; WDE needs hours on a first load | Queue workers stop between batches after `SYNC_TIME_BUDGET_MINUTES` (45) and queue the next part; poisoned if a part wrote nothing, if skip-unchanged is off, or after 12 parts |
 | OneKey quota with three workers | 1.0 s default pacing gave over 60 calls a minute | `ONEKEY_PACKET_DELAY` default 2.5 s |
+| Paused delta under-reported its work | Phases a delta finished before pausing were dropped from the job's counts | The pause carries those counts and they are merged |
+| Unbounded dependencies | `requirements.txt` allowed any future major version, and `dataverse/auth.py` patches a `urllib3` internal (IPv4 only) | `azure-functions<2`, `requests<3`, `urllib3>=2,<3` |
+| `dataverse_records.py delete` | `--prefix ""` matched every OneKey-sourced account and contact, with no confirmation | The prefix must start with a codebase (`W` and two letters) |
