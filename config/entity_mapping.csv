@@ -5,7 +5,7 @@ mapping_id,source_platform,source_entity,source_field,source_field_path,target_p
 # Target: Dataverse account entity,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 # ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 HCO-001,OneKey,Workplace,workplaceEid,workplace.workplaceEid,Dataverse,account,ts_externalid,string,20,TRUE,TRUE,FALSE,,,direct,,Primary key for upsert; alternate key required in Dataverse,,,,,,,,,,,,,,,,,
-HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,TRUE,FALSE,FALSE,,,coalesce:usualName,noname,Primary name; fallback to usualName then noname. Truncate to 160.,,,,,,,,,,,,,,,,,
+HCO-002,OneKey,Workplace,officialName,workplace.officialName,Dataverse,account,name,string,160,TRUE,FALSE,FALSE,,,coalesce:usualName,noname,Primary name; fallback to usualName. When both are empty: workplace type then postal city and code then one HCP (main activity first; else alphabetical). noname only if all three are missing. Truncate to 160.,,,,,,,,,,,,,,,,,
 HCO-003,OneKey,Workplace,typeCode,workplace.typeCode,Dataverse,account,ts_type_ref,lookup,,FALSE,FALSE,TRUE,ts_hcotype_ref,ts_externalid,lookup_by_key,,Lookup key from lookup_table_mapping.csv (list TET),,,,,,,,,,,,,,,,,
 HCO-004,OneKey,Workplace,typeLabel,workplace.typeCorporateLabel,Dataverse,account,description,string,2000,FALSE,FALSE,FALSE,,,template:HCO type: {value},,Part of description field,,,,,,,,,,,,,,,,,
 HCO-005,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dataverse,account,industrycode,picklist,,FALSE,FALSE,FALSE,,,map:H=11|S=12|N=13|O=14,,H=Hospital S=Surgery N=NHS Est. Maps to Dataverse industrycode picklist,,,,,,,,,,,,,,,,,

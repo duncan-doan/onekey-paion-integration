@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .hco_name import nameless_account_name
 from .lookup_sync import odata_lookup_bind, render_external_id
 from .picklist_gaps import PicklistGapCollector
 
@@ -113,13 +114,13 @@ class TransformEngine:
         if parent_account_id:
             payload["parentaccountid@odata.bind"] = f"/accounts({parent_account_id})"
 
-        if not (payload.get("name") or "").strip():
-            name_mapping = self.config.get_field_mappings("account")
-            default_name = next(
-                (fm.default_value for fm in name_mapping if fm.target_field == "name"),
-                None,
-            )
-            payload["name"] = (default_name or "noname")[:160]
+        official = str(source.get("officialName") or "").strip()
+        usual = str(source.get("usualName") or "").strip()
+        if not official and not usual:
+            # HCO-002's default keeps validation from rejecting a blank name.
+            # The displayed name is the workplace type, postal city and code,
+            # and one HCP. noname remains only when all three parts are blank.
+            payload["name"] = nameless_account_name(source, limit=160)
 
         return {k: v for k, v in payload.items() if v is not None}
 
