@@ -25,11 +25,12 @@ appear in a later delta, so step 1 is what retries it.
 
 Queue workers run one codebase at a time and check active_job first. This is
 a best-effort busy check; simultaneous starts still need an atomic lease. A
-scheduled run does not wait for its own retry jobs: a codebase's retry ends
-before its delta is queued, so a retry job of the same run still Running was
-left by a killed delivery. A killed delta or full sync still blocks its own
-redelivery: one stopped by the 60-minute scale-in limit would only be stopped
-again.
+scheduled run does not wait for its own jobs: it chains each codebase's work
+(retry, then delta, then each continuation part), so a job of the same run
+still Running for that codebase was left by a delivery the platform killed.
+The delivery that takes over marks it Abandoned (abandon_own_jobs). The time
+budget (SYNC_TIME_BUDGET_MINUTES) keeps the new delivery under the 60-minute
+scale-in limit.
 """
 
 from __future__ import annotations
@@ -47,10 +48,12 @@ from integration.job_trace import (
     JOB_DELTA,
     JOB_FULL,
     JOBS,
+    STATUS_ABANDONED,
     STATUS_PARTIAL,
     STATUS_RUNNING,
     STATUS_SUCCEEDED,
     TRIGGER_TIMER,
+    clip,
     job_codebase,
     run_marker,
 )
@@ -222,14 +225,13 @@ def active_job(
 
     Live means its heartbeat is newer than ACTIVE_JOB_HEARTBEAT. A job killed
     by a timeout or a platform restart stays Running, but its heartbeat
-    stops, so it no longer blocks the next run. Retry jobs of ``own_run`` are
-    ignored (see the module docstring), so a killed retry blocks neither its
-    redelivery nor the delta queued after it.
+    stops, so it no longer blocks the next run. Jobs of ``own_run`` are
+    ignored (see the module docstring), so a killed delivery blocks neither
+    its redelivery nor the work queued after it.
     """
     fresh = (now or datetime.now(timezone.utc)) - ACTIVE_JOB_HEARTBEAT
-    own_retries = (
-        f" and not (contains(ts_name, '{escape_odata(run_marker(own_run))}')"
-        " and _ts_retryofjob_value ne null)"
+    own_jobs = (
+        f" and not contains(ts_name, '{escape_odata(run_marker(own_run))}')"
         if own_run
         else ""
     )
@@ -241,7 +243,7 @@ def active_job(
                 f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
                 f" and ts_status eq {STATUS_RUNNING}"
                 f" and ts_lastheartbeat ge {_iso(fresh)}"
-                f"{own_retries}"
+                f"{own_jobs}"
             ),
             order_by="ts_lastheartbeat desc",
             top=1,
@@ -250,6 +252,99 @@ def active_job(
         if rows:
             return {**rows[0], "codebase": codebase}
     return None
+
+
+def abandon_own_jobs(dataverse, codebases: list[str], run_id: str) -> list[str]:
+    """Mark the Running jobs of ``run_id`` for these codebases Abandoned.
+
+    They were left by a delivery the platform killed (see the module
+    docstring). Each keeps its counts; it ends at its last heartbeat, when it
+    stopped, and its error summary says it was abandoned. Returns their
+    ts_jobid. A row that cannot be updated stays Running and is logged; it no
+    longer blocks this run either way.
+    """
+    marker = run_marker(run_id)
+    abandoned = []
+    for codebase in codebases:
+        rows = dataverse.retrieve_multiple(
+            JOBS,
+            select=[
+                "ts_integrationjobid",
+                "ts_jobid",
+                "ts_startedon",
+                "ts_lastheartbeat",
+                "ts_errorsummary",
+            ],
+            filter=(
+                f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
+                f" and ts_status eq {STATUS_RUNNING}"
+                f" and contains(ts_name, '{escape_odata(marker)}')"
+            ),
+        )
+        for row in rows or []:
+            started = _parse_iso(row.get("ts_startedon"))
+            stopped = _parse_iso(row.get("ts_lastheartbeat")) or started
+            note = (
+                f"Abandoned: the delivery running it was stopped (last heartbeat "
+                f"{row.get('ts_lastheartbeat') or 'none'}); a later delivery of "
+                f"{marker} took over"
+            )
+            earlier = (row.get("ts_errorsummary") or "").strip()
+            payload = {
+                "ts_status": STATUS_ABANDONED,
+                "ts_errorsummary": clip(f"{note} | {earlier}" if earlier else note, 2000),
+            }
+            if stopped:
+                payload["ts_completedon"] = _iso(stopped)
+            if started and stopped:
+                payload["ts_durationseconds"] = max(0, int((stopped - started).total_seconds()))
+            try:
+                dataverse.update(JOBS, row["ts_integrationjobid"], payload)
+            except Exception:  # noqa: BLE001 — the takeover goes on without it
+                logger.warning(
+                    "Could not mark job %s Abandoned", row.get("ts_jobid"), exc_info=True
+                )
+                continue
+            logger.warning(
+                "Job %s of %s for %s marked Abandoned: its delivery was stopped",
+                row.get("ts_jobid"),
+                marker,
+                codebase,
+            )
+            abandoned.append(row.get("ts_jobid"))
+    return abandoned
+
+
+def run_tries(dataverse, codebase: str, run_id: str, since: datetime) -> int:
+    """Jobs ``run_id`` started for the codebase at or after ``since``.
+
+    Every delivery that starts work writes one, so counted from when a
+    message was queued this is how many deliveries of it got past the busy
+    check. Retry jobs are left out.
+    """
+    rows = dataverse.retrieve_multiple(
+        JOBS,
+        select=["ts_jobid"],
+        filter=(
+            f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
+            f" and contains(ts_name, '{escape_odata(run_marker(run_id))}')"
+            " and _ts_retryofjob_value eq null"
+            f" and ts_startedon ge {_iso(since)}"
+        ),
+    )
+    return len(rows or [])
+
+
+def run_tries_from_env(codebase: str, run_id: str, since: datetime) -> int:
+    """run_tries on a Dataverse client built from the environment."""
+    from dataverse import DataverseClient, DataverseConfig
+
+    load_env()
+    dataverse = DataverseClient(DataverseConfig.from_env())
+    try:
+        return run_tries(dataverse, codebase, run_id, since)
+    finally:
+        dataverse.close()
 
 
 def _retry_each_codebase(
@@ -558,11 +653,17 @@ def _busy(
     """Apply ``if_busy`` when a live job is syncing one of the codebases.
 
     Returns the skipped result for ``"skip"``, raises SyncBusy for ``"raise"``,
-    and returns None when nothing is running or ``if_busy`` is None. Retry
-    jobs of the same scheduled run (``run_id``) do not count.
+    and returns None when nothing is running or ``if_busy`` is None. Jobs of
+    the same scheduled run (``run_id``) do not count: they are marked
+    Abandoned and this delivery takes over.
     """
     if not if_busy:
         return None
+    if run_id:
+        try:
+            abandon_own_jobs(engine.dataverse, codebases, run_id)
+        except Exception:  # noqa: BLE001 — active_job ignores them anyway
+            logger.warning("Could not look for stopped jobs of run %s", run_id, exc_info=True)
     running = active_job(engine.dataverse, codebases, own_run=run_id)
     if not running:
         return None

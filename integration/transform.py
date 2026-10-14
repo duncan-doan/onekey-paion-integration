@@ -50,6 +50,7 @@ class TransformEngine:
         self.config = config
         self.picklist_gaps = PicklistGapCollector()
         self.catalog_resolver = None
+        self.country_resolver = None
         self._current_entity: str = ""
         self._current_eid: str = ""
     
@@ -616,11 +617,12 @@ class TransformEngine:
         return self._catalog_payload(mapping, source)
 
     def _country_payload(self, mapping: "FieldMapping", source: dict) -> dict | None:
-        """Bind ``ts_country`` with its alternate key.
+        """Bind ``ts_country`` by row id, or by its alternate key.
 
         ``lookup_key_field`` is ``ts_onekeycode`` (OneKey ``codBase``, such as
-        ``WDE``). Returns ``None`` when this mapping is not the country
-        lookup, and ``{}`` when the code is blank.
+        ``WDE``). With ``country_resolver`` set, the bind uses the country
+        row's id so skip unchanged can compare it. Returns ``None`` when this
+        mapping is not the country lookup, and ``{}`` when the code is blank.
         """
         if not mapping.is_lookup or (mapping.lookup_entity or "").lower() != "ts_country":
             return None
@@ -629,10 +631,12 @@ class TransformEngine:
             return {}
         key_field = (mapping.lookup_key_field or "ts_onekeycode").strip()
         code = str(value).strip()
-        # ts_onekeycode is an alternate key, so the bind is the code itself.
-        return {
-            "ts_Country@odata.bind": odata_lookup_bind("ts_countries", key_field, code)
-        }
+        if self.country_resolver is not None:
+            bind = self.country_resolver(key_field, code)
+        else:
+            # ts_onekeycode is an alternate key, so the bind is the code itself.
+            bind = odata_lookup_bind("ts_countries", key_field, code)
+        return {"ts_Country@odata.bind": bind}
 
     def _catalog_payload(self, mapping: "FieldMapping", source: dict) -> dict | None:
         """Bind a code-list lookup using the configured external-id template.

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from integration import scheduled_sync
-from integration.job_trace import JOBS, STATUS_RUNNING
+from integration.job_trace import JOBS, STATUS_ABANDONED, STATUS_RUNNING
 from integration.scheduled_sync import (
     ACTIVE_JOB_HEARTBEAT,
     IF_BUSY_RAISE,
@@ -116,12 +116,11 @@ def test_active_job_looks_for_a_fresh_running_job_per_codebase():
     assert f"ts_lastheartbeat ge {fresh}" in text
 
 
-def test_active_job_ignores_only_the_retry_jobs_of_the_callers_run():
+def test_active_job_ignores_every_job_of_the_callers_run():
     jobs = Jobs()
     active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7")
     assert jobs.queries[0][1]["filter"].endswith(
-        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
-        " and _ts_retryofjob_value ne null)"
+        " and not contains(ts_name, 'run=delta-20261012T000001Z-7')"
     )
 
 
@@ -178,6 +177,8 @@ def test_busy_full_sync_raises(fake_engine):
     with pytest.raises(SyncBusy, match="Codebase WUK is busy: job job-0"):
         run_from_env(codebases=["WUK"], full=True, if_busy=IF_BUSY_RAISE)
     assert fake_engine.ran == []
+    # A message without a run takes nothing over: only the busy check ran.
+    assert len(fake_engine.dataverse.queries) == 1
 
 
 def test_idle_codebase_runs_and_passes_the_choices_flag(fake_engine):
@@ -431,8 +432,101 @@ def test_a_redelivered_message_is_not_blocked_by_its_own_run(fake_engine):
     retry_from_env(codebases=["WDE"], if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
     run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
     filters = [kwargs["filter"] for _, kwargs in fake_engine.dataverse.queries]
-    assert len(filters) == 2
-    assert all("not (contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in filters)
+    busy = [text for text in filters if "ts_lastheartbeat ge" in text]
+    assert len(busy) == 2
+    assert all("not contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in busy)
+
+
+# -- taking over from a stopped delivery of the same run ------------------------------
+
+RUN = "full-20261014T131500Z-7"
+STOPPED = {
+    "ts_integrationjobid": "guid-1",
+    "ts_jobid": "job-killed",
+    "ts_startedon": "2026-10-14T14:41:00Z",
+    "ts_lastheartbeat": "2026-10-14T15:25:00Z",
+    "ts_errorsummary": "WDE: 2 failure(s)",
+}
+
+
+class JobTable(Jobs):
+    """Jobs stub: own-run Running rows for the takeover, live rows for the busy check."""
+
+    def __init__(self, own=None, live=None):
+        super().__init__()
+        self.own = own or []
+        self.live = live or []
+        self.updates = []
+
+    def retrieve_multiple(self, entity_set, **kwargs):
+        self.queries.append((entity_set, kwargs))
+        if "ts_lastheartbeat ge" in (kwargs.get("filter") or ""):
+            return list(self.live)
+        return list(self.own)
+
+    def update(self, entity_set, record_id, payload):
+        self.updates.append((entity_set, record_id, payload))
+
+
+def test_a_redelivered_full_sync_takes_over_its_stopped_job(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    fake_engine.dataverse = JobTable(own=[STOPPED])
+    run_from_env(codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN)
+    assert [kind for kind, _ in fake_engine.ran] == ["full"]
+    takeover = fake_engine.dataverse.queries[0][1]["filter"]
+    assert takeover == (
+        f"ts_codebase eq 'WDE' and ts_status eq {STATUS_RUNNING}"
+        f" and contains(ts_name, 'run={RUN}')"
+    )
+    [(entity_set, record_id, payload)] = fake_engine.dataverse.updates
+    assert (entity_set, record_id) == (JOBS, "guid-1")
+    assert payload["ts_status"] == STATUS_ABANDONED
+    # It ends when its heartbeat stopped, 44 minutes after it started.
+    assert payload["ts_completedon"] == "2026-10-14T15:25:00Z"
+    assert payload["ts_durationseconds"] == 44 * 60
+    assert payload["ts_errorsummary"].startswith(
+        "Abandoned: the delivery running it was stopped (last heartbeat 2026-10-14T15:25:00Z)"
+    )
+    assert f"run={RUN} took over" in payload["ts_errorsummary"]
+    assert payload["ts_errorsummary"].endswith(" | WDE: 2 failure(s)")
+
+
+def test_a_live_job_of_another_run_still_blocks_a_full_sync(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    fake_engine.dataverse = JobTable(live=[{"ts_jobid": "job-cli", "ts_lastheartbeat": "x"}])
+    with pytest.raises(SyncBusy, match="job job-cli"):
+        run_from_env(codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN)
+    assert fake_engine.dataverse.updates == []
+    assert fake_engine.ran == []
+
+
+def test_the_takeover_goes_on_when_the_stopped_job_cannot_be_marked(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    table = JobTable(own=[STOPPED])
+
+    def refuse(entity_set, record_id, payload):
+        raise RuntimeError("HTTP 503")
+
+    table.update = refuse
+    fake_engine.dataverse = table
+    assert scheduled_sync.abandon_own_jobs(table, ["WDE"], RUN) == []
+    run_from_env(codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN)
+    assert [kind for kind, _ in fake_engine.ran] == ["full"]
+
+
+def test_the_takeover_reports_the_jobs_it_abandoned():
+    table = JobTable(own=[STOPPED])
+    assert scheduled_sync.abandon_own_jobs(table, ["WDE"], RUN) == ["job-killed"]
+
+
+def test_run_tries_counts_the_runs_jobs_since_the_message_was_queued():
+    jobs = Jobs([{"ts_jobid": "a"}, {"ts_jobid": "b"}])
+    since = datetime(2026, 10, 14, 15, 26, 40, 500000, tzinfo=timezone.utc)
+    assert scheduled_sync.run_tries(jobs, "wde", RUN, since) == 2
+    assert jobs.queries[0][1]["filter"] == (
+        f"ts_codebase eq 'WDE' and contains(ts_name, 'run={RUN}')"
+        " and _ts_retryofjob_value eq null and ts_startedon ge 2026-10-14T15:26:40Z"
+    )
 
 
 def test_a_paused_promoted_full_sync_reports_it_at_the_top(monkeypatch):

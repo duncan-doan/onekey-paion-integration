@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from integration import queue_sync
+from integration import queue_sync, scheduled_sync
 from integration.queue_sync import (
     FULL_MAX_DELIVERIES,
     OUTCOME_DONE,
@@ -222,6 +222,58 @@ def test_busy_full_sync_is_deferred_not_poisoned(monkeypatch):
     monkeypatch.setattr(queue_sync, "dispatch", busy)
     with pytest.raises(SyncBusy):
         handle_message('{"mode":"full","codebase":"WUK"}', FULL_MAX_DELIVERIES + 1)
+
+
+RUN_FULL = SyncQueueMessage(
+    mode="full", codebase="WDE", run_id="full-20261014T131500Z-7"
+).encode()
+
+
+def test_busy_deliveries_do_not_use_up_a_full_syncs_tries(monkeypatch):
+    # Delivery 1 found WDE busy and started no job; delivery 2 is the first try.
+    monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
+    counted = []
+    monkeypatch.setattr(
+        scheduled_sync,
+        "run_tries_from_env",
+        lambda codebase, run_id, since: counted.append((codebase, run_id, since)) or 1,
+    )
+    queued = datetime(2026, 10, 14, 15, 26, 40)  # Azure's queue time, read as UTC
+    with pytest.raises(QueueWorkFailed):
+        handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
+    assert counted == [
+        ("WDE", "full-20261014T131500Z-7", queued.replace(tzinfo=timezone.utc))
+    ]
+    # The second try fails too, so it is poisoned.
+    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", lambda *args: 2)
+    outcome = handle_message(
+        RUN_FULL, FULL_MAX_DELIVERIES + 1, mode="full", inserted_at=queued
+    )
+    assert outcome.status == OUTCOME_POISON
+
+
+def test_the_delivery_count_stands_when_the_tries_cannot_be_counted(monkeypatch):
+    monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
+    queued = datetime(2026, 10, 14, 15, 26, 40, tzinfo=timezone.utc)
+
+    def unavailable(*args):
+        raise RuntimeError("Dataverse unavailable")
+
+    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", unavailable)
+    outcome = handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
+    assert outcome.status == OUTCOME_POISON
+    # No job at all means tracing failed, so the jobs tell nothing.
+    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", lambda *args: 0)
+    outcome = handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
+    assert outcome.status == OUTCOME_POISON
+    # A manual message has no run to count by.
+    monkeypatch.setattr(
+        scheduled_sync, "run_tries_from_env", lambda *args: pytest.fail("counted")
+    )
+    outcome = handle_message(
+        '{"mode":"full","codebase":"WDE"}', FULL_MAX_DELIVERIES, mode="full", inserted_at=queued
+    )
+    assert outcome.status == OUTCOME_POISON
 
 
 def test_skipped_and_done_outcomes(monkeypatch):

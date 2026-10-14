@@ -92,9 +92,10 @@ def pending_filter(
     ``steps`` keeps only the rows of those PHASE_STEPS names (``contacts``,
     ``hierarchy``…), so a limit counts rows of those steps alone.
 
-    Nothing marks a killed job Abandoned, so a parent stuck at Running with a
-    heartbeat older than STALE_JOB_AFTER counts as finished; otherwise its
-    failures would never be retried. Likewise a row left Retried for
+    A killed job is marked Abandoned only when its own run takes over (see
+    scheduled_sync), so a parent stuck at Running with a heartbeat older
+    than STALE_JOB_AFTER counts as finished; otherwise its failures would
+    never be retried. Likewise a row left Retried for
     CLAIM_EXPIRES_AFTER belongs to a retry run that stopped, and is selected
     again.
     """

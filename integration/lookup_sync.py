@@ -300,6 +300,53 @@ class CatalogResolver:
         return f"/{table.entity_set}({record_id})"
 
 
+class CountryResolver:
+    """Bind ``ts_country`` by the country row's id.
+
+    ``/ts_countries(ts_onekeycode='WDE')`` sets the same link, but skip
+    unchanged cannot compare a bind by alternate key, so every account,
+    contact and affiliation would be written again on every run. The
+    country table is read once, on the first lookup. A code it does not hold
+    keeps the alternate-key bind.
+    """
+
+    ENTITY_SET = "ts_countries"
+    PRIMARY_ID = "ts_countryid"
+
+    def __init__(self, dv):
+        self.dv = dv
+        self._ids: dict[str, dict[str, str]] = {}
+
+    def bind(self, key_field: str, code: str) -> str:
+        record_id = self._load(key_field).get(code.strip().upper())
+        if record_id:
+            return f"/{self.ENTITY_SET}({record_id})"
+        return odata_lookup_bind(self.ENTITY_SET, key_field, code)
+
+    def _load(self, key_field: str) -> dict[str, str]:
+        if key_field in self._ids:
+            return self._ids[key_field]
+        ids: dict[str, str] = {}
+        self._ids[key_field] = ids
+        if not hasattr(self.dv, "retrieve_multiple"):
+            return ids
+        try:
+            rows = self.dv.retrieve_multiple(
+                self.ENTITY_SET,
+                select=[key_field, self.PRIMARY_ID],
+            )
+        except Exception as exc:  # noqa: BLE001 — the alternate-key bind still works
+            logger.error("Could not read %s: %s", self.ENTITY_SET, exc)
+            return ids
+        for row in rows or []:
+            code = str(row.get(key_field) or "").strip().upper()
+            record_id = str(row.get(self.PRIMARY_ID) or "").strip()
+            if code and record_id:
+                ids[code] = record_id
+        logger.info("Countries loaded: %d", len(ids))
+        return ids
+
+
 def _primary_id(entity_set: str) -> tuple[str, str]:
     from dataverse.client import entity_meta
 

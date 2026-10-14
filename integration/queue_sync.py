@@ -59,8 +59,8 @@ QUEUES = {
 MODES = set(QUEUES)
 
 # A failed full sync starts again from the first phase and runs for hours.
-# Give it this many deliveries instead of host.json's maxDequeueCount (5).
-# Busy deliveries count too: the worker only sees the dequeue count.
+# Give it this many tries instead of host.json's maxDequeueCount (5). A
+# delivery that found the codebase busy is not a try (full_sync_tries).
 FULL_MAX_DELIVERIES = 2
 
 # A failed retry leaves its rows Pending for the next run, and the delta waits
@@ -316,9 +316,10 @@ def dispatch(message: SyncQueueMessage) -> dict:
 
     A delta or retry whose codebase is busy is skipped: the next delta starts
     from the last window that was covered and pending rows stay Pending, so
-    nothing is lost. A busy full sync raises SyncBusy and is retried later. A
-    delta for a codebase with no completed job runs as a full sync
-    (``promoted_to_full`` in the result).
+    nothing is lost. A busy full sync raises SyncBusy and is retried later.
+    Jobs of the message's own run are not busy: a delivery that was stopped
+    left them Running, and this one takes over. A delta for a codebase with
+    no completed job runs as a full sync (``promoted_to_full`` in the result).
     """
     from integration.env import time_budget_seconds
     from integration.scheduled_sync import (
@@ -379,14 +380,48 @@ def _delivery_limit(item: SyncQueueMessage, exc: BaseException) -> int | None:
     return None
 
 
+def full_sync_tries(
+    item: SyncQueueMessage, dequeue_count: int, inserted_at: datetime | None
+) -> int:
+    """How many deliveries of a full sync message started the work.
+
+    A busy full sync raises SyncBusy before it starts a job, and Azure counts
+    that delivery too. Every try writes a job named with its run, so the
+    run's jobs for the codebase since the message was queued are its tries.
+    Without a run, a queue time or any such job (tracing failed), the dequeue
+    count stands.
+    """
+    if item.mode != "full" or not item.run_id or inserted_at is None:
+        return dequeue_count
+    from integration.scheduled_sync import run_tries_from_env
+
+    if inserted_at.tzinfo is None:
+        inserted_at = inserted_at.replace(tzinfo=timezone.utc)
+    try:
+        tries = run_tries_from_env(item.codebase, item.run_id, inserted_at)
+    except Exception:  # noqa: BLE001 — fall back to the dequeue count
+        logger.warning(
+            "Could not count the tries of %s; using the delivery count",
+            item.codebase,
+            exc_info=True,
+        )
+        return dequeue_count
+    return min(tries, dequeue_count) if tries else dequeue_count
+
+
 def handle_message(
-    body: str | bytes, dequeue_count: int, mode: str | None = None
+    body: str | bytes,
+    dequeue_count: int,
+    mode: str | None = None,
+    inserted_at: datetime | None = None,
 ) -> WorkOutcome:
     """Run one delivery of a queue message.
 
     ``mode`` is the mode of the queue the message came from: a body without
-    a mode takes it, and a body with another mode is poisoned. Returns the
-    outcome, or raises to make Azure retry the message.
+    a mode takes it, and a body with another mode is poisoned.
+    ``inserted_at`` is when the message was queued, to tell a full sync's
+    tries from its busy deliveries (full_sync_tries). Returns the outcome, or
+    raises to make Azure retry the message.
     """
     from integration.scheduled_sync import SyncBusy
 
@@ -415,6 +450,17 @@ def handle_message(
     except Exception as exc:
         limit = _delivery_limit(item, exc)
         if limit and dequeue_count >= limit:
+            tries = full_sync_tries(item, dequeue_count, inserted_at)
+            if tries < limit:
+                logger.warning(
+                    "Full sync for %s failed on delivery %d, try %d of %d; "
+                    "earlier deliveries found it busy, so retrying",
+                    item.codebase,
+                    dequeue_count,
+                    tries,
+                    limit,
+                )
+                raise
             work = "Retry" if item.mode == "retry" else "Full sync"
             logger.exception(
                 "%s for %s failed on delivery %d; not retrying",

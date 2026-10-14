@@ -147,8 +147,8 @@ stateDiagram-v2
 | Work succeeded, or a retry or delta skipped as busy | worker returns | Host deletes the message. A finished retry also queues the delta; a skipped one does not |
 | Delta failed | worker raises | Visible again after `visibilityTimeout` (30 min); poison after `maxDequeueCount` (5) deliveries |
 | Retry failed | worker | Retried once, while the delta waits; on the 2nd failed delivery the worker writes it to `onekey-retry-poison` itself (`RETRY_MAX_DELIVERIES`) and queues the delta anyway. Its rows stay Pending for the next run |
-| Full sync failed | worker | Retried once; on the 2nd failed delivery the worker writes it to `onekey-full-poison` itself (`FULL_MAX_DELIVERIES`), because each retry repeats hours of work |
-| Full sync, country busy | worker raises `SyncBusy` | Visible again after 30 min; counts as a delivery |
+| Full sync failed | worker | Retried once; on the 2nd failed try the worker writes it to `onekey-full-poison` itself (`FULL_MAX_DELIVERIES`), because each retry repeats hours of work. A try is a delivery that started a job: the worker counts the run's jobs for that country since the message was queued, so busy deliveries do not count (it falls back to the delivery count when it cannot read them) |
+| Full sync, country busy | worker raises `SyncBusy` | Visible again after 30 min; Azure counts the delivery towards `maxDequeueCount` (5), the worker does not count it as a try |
 | Full sync or delta still running after `SYNC_TIME_BUDGET_MINUTES` | worker | Stops between batches, finishes its job as not covering its window, and queues part N+1 on its own queue; the message is deleted. See [Time budget and continuations](#time-budget-and-continuations) |
 | Malformed message, or a `mode` for another queue | worker | Straight to the poison queue; retrying cannot fix it |
 | Instance killed mid-run (restart, deployment, scale-in, 12 h timeout) | nobody | Lease expires, message reappears, another instance runs it from the first phase |
@@ -250,7 +250,7 @@ so to each worker; the timers only ever need one instance.
 | Same message | Hidden while one instance runs it |
 | Different countries | Nothing shared: accounts and contacts are keyed by OneKey ID, which carries the country (`WUKE…`, `WDEH…`); lookup rows by `{codBase}.{list}.{code}`; each retry replays only its own country's failures; choice options are synced once by the timer before enqueueing |
 | Retry and delta of one country | Chained, never queued together: the retry worker queues the delta when the retry is over |
-| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred. Retry jobs of the message's own run do not count: a country's retry ends before its delta is queued, so such a job was left by a killed delivery. A killed delta or full sync still blocks its own redelivery, since one stopped by the 60-minute scale-in limit would only be stopped again |
+| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred. Jobs of the message's own run do not count: a run chains a country's work (retry, delta, continuation parts), so such a job was left by a killed delivery. The new delivery marks it **Abandoned** (ended at its last heartbeat) and takes over at once; the time budget keeps it under the 60-minute scale-in limit |
 | Remaining gap | Two messages for one country starting within about a second can both pass the check. The timer removes duplicate codes, and upserts on `ts_externalid` keep records from duplicating. The CLI (`scripts/run_scheduled_sync.py`) does not run the busy check |
 
 ### Heartbeat
@@ -308,7 +308,7 @@ The window ends when the delta worker runs, after the retry.
 | `host.json` `queues.visibilityTimeout` | 30 min | Delay before a **failed** message is retried, on every queue. Not a run limit |
 | `host.json` `queues.maxDequeueCount` | 5 | Deliveries before the host poisons a message, on every queue |
 | `host.json` `queues.maxPollingInterval` | 30 s | Longest wait before a new message is noticed |
-| `FULL_MAX_DELIVERIES` / `RETRY_MAX_DELIVERIES` | 2 / 2 | Deliveries before the worker poisons a failed full sync / retry (`integration/queue_sync.py`) |
+| `FULL_MAX_DELIVERIES` / `RETRY_MAX_DELIVERIES` | 2 / 2 | Tries before the worker poisons a failed full sync / retry; busy full-sync deliveries are not tries (`integration/queue_sync.py`) |
 | Maximum instance count | 3 | Countries running at once, per worker |
 | `ONEKEY_CODBASE` | `WUK,WDE,WNL,WDK,WNO,WSE,WFI` | Countries the timers enqueue |
 | `SYNC_SCHEDULE` | `true` | Timers enqueue; `false` stops them |

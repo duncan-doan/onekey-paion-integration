@@ -267,7 +267,12 @@ def _work(
         message.dequeue_count,
     )
     started = datetime.now(timezone.utc)
-    outcome = handle_message(body, int(message.dequeue_count or 1), mode=mode)
+    outcome = handle_message(
+        body,
+        int(message.dequeue_count or 1),
+        mode=mode,
+        inserted_at=message.insertion_time,
+    )
     item = outcome.item
     progress = run_progress(item, started, datetime.now(timezone.utc)) if item else None
     if progress:

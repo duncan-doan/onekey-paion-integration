@@ -23,7 +23,7 @@ from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
-from .lookup_sync import CatalogResolver, sync_lookup_tables
+from .lookup_sync import CatalogResolver, CountryResolver, sync_lookup_tables
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
@@ -140,6 +140,8 @@ class DynamicSyncEngine:
         self.transformer = TransformEngine(self.config)
         self.catalogs = CatalogResolver(dataverse_client)
         self.transformer.catalog_resolver = self.catalogs.ensure
+        self.countries = CountryResolver(dataverse_client)
+        self.transformer.country_resolver = self.countries.bind
         self.mapping_validator = MappingValidator(self.config)
         self.dataverse_validator = DataverseValidator(dataverse_client)
         self.sync_logger = sync_logger or SyncLogger()
