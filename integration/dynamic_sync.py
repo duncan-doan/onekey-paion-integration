@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .dynamic_mapping import load_mapping_config, MappingConfig
+from .hco_name import hcp_name_by_workplace
 from .env import skip_unchanged
 from .transform import TransformEngine
 from .validation import MappingValidator, DataverseValidator, ValidationResult
@@ -161,6 +162,8 @@ class DynamicSyncEngine:
         self._contracted_individual_eids: set[str] = set()
         # Cache for contact lookups (individualEid -> contactid)
         self._contact_cache: dict[str, str] = {}
+        # One HCP name per nameless workplace, from the same population extract.
+        self._hcp_name_by_workplace: dict[str, str] = {}
         # time.monotonic() after which a run stops between batches, or None.
         # Queue workers set it: Flex Consumption stops an execution 60
         # minutes into a scale-in, so a run ends cleanly before that and a
@@ -495,9 +498,13 @@ class DynamicSyncEngine:
                     # One population walk feeds both halves: a walk is hundreds
                     # of paced packets, and two would read two snapshots.
                     packets = None
+                    self._hcp_name_by_workplace = {}
                     if not hco_only and not hcp_only:
                         packets = self._collect_population_packets(
                             codebase, max_records=max_records
+                        )
+                        self._hcp_name_by_workplace = hcp_name_by_workplace(
+                            packets[1], packets[2]
                         )
 
                     if not hcp_only:
@@ -950,6 +957,18 @@ class DynamicSyncEngine:
         )
         return results, rejected, unchanged
 
+    def _stamp_nameless_hcp_names(self, flattened: list[dict]) -> None:
+        """Attach one HCP name to workplaces that have no name of their own."""
+        names = self._hcp_name_by_workplace
+        if not names:
+            return
+        for row in flattened:
+            if str(row.get("officialName") or "").strip() or str(row.get("usualName") or "").strip():
+                continue
+            picked = names.get(str(row.get("workplaceEid") or ""))
+            if picked:
+                row["hcpName"] = picked
+
     def _sync_hcos(
         self,
         codebase: str,
@@ -995,16 +1014,29 @@ class DynamicSyncEngine:
         else:
             if raw_workplaces is None:
                 raw_workplaces = []
+                individuals = []
+                activities = []
                 started = self.sync_logger.phase_started("extract", codbase=codebase)
                 for record in self.onekey.iter_population(
                     cod_base=codebase, max_records=max_records
                 ):
-                    if (record.get("entityType") or "").upper() == "WORKPLACE":
+                    entity_type = (record.get("entityType") or "").upper()
+                    if entity_type == "WORKPLACE":
                         raw_workplaces.append(record)
+                    elif entity_type == "INDIVIDUAL":
+                        individuals.append(record)
+                    elif entity_type == "ACTIVITY":
+                        activities.append(record)
+                if not self._hcp_name_by_workplace:
+                    self._hcp_name_by_workplace = hcp_name_by_workplace(
+                        individuals, activities
+                    )
                 self.sync_logger.phase_finished(
                     "extract", started, {"workplaces": len(raw_workplaces)}, codbase=codebase
                 )
             flattened = [flatten_hco(r) for r in raw_workplaces]
+
+        self._stamp_nameless_hcp_names(flattened)
 
         contracted = {
             eid
@@ -2273,6 +2305,9 @@ class DynamicSyncEngine:
                     ):
                         activities_by_individual[individual_eid] = record
 
+        self._hcp_name_by_workplace = hcp_name_by_workplace(
+            individuals.values(), all_activities
+        )
         self.sync_logger.phase_finished(
             "extract",
             started,
