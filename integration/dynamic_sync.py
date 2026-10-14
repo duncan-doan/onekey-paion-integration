@@ -1769,11 +1769,16 @@ class DynamicSyncEngine:
 
         if dry_run:
             result["processed"] = len(prepared)
+            role_count = sum(
+                len(self.transformer.affiliation_role_rows(flat, "dry-run", entity_set))
+                for _, _, _, flat in prepared
+            )
             logger.info(
                 msg(
                     "Dry run, would upsert activity affiliations",
                     _ctx(self),
                     records=len(prepared),
+                    roles=role_count,
                 )
             )
             return result
@@ -1781,6 +1786,7 @@ class DynamicSyncEngine:
         if not prepared:
             return result
 
+        role_rows: list[dict] = []
         done = 0
         for batch in chunked(prepared, self.bulk_batch_size):
             self._check_deadline("activity affiliations", "activity_affiliations", result)
@@ -1835,10 +1841,83 @@ class DynamicSyncEngine:
                     record_id,
                     _operation(created, match in unchanged),
                 )
+                role_rows.extend(
+                    self.transformer.affiliation_role_rows(flat, record_id, entity_set)
+                )
 
             self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
 
+        roles = self._upsert_affiliation_roles(role_rows)
+        logger.info(
+            msg(
+                "Affiliation roles written",
+                _ctx(self),
+                processed=roles["processed"],
+                created=roles["created"],
+                updated=roles["updated"],
+                failed=roles["failed"],
+            )
+        )
         return result
+
+    def _upsert_affiliation_roles(self, rows: list[dict]) -> dict:
+        """Upsert TIH role rows onto the affiliations just written.
+
+        The child table has no alternate key. ``ts_name``
+        (``{activityEid} - {role code}``) is the match column.
+        """
+        result = _empty_entity_stats()
+        if not rows:
+            return result
+        entity_set = self._role_entity_set()
+        done = 0
+        for batch in chunked(rows, self.bulk_batch_size):
+            try:
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    entity_set, "ts_name", batch
+                )
+            except Exception as exc:
+                result["failed"] += len(batch)
+                self._fail(
+                    "ts_affiliationrole",
+                    "",
+                    "upsert",
+                    str(exc),
+                    exc=exc,
+                )
+                raise
+            for match, record_id, created in bulk_results:
+                if not record_id:
+                    result["failed"] += 1
+                    self._fail(
+                        "ts_affiliationrole",
+                        match,
+                        "upsert",
+                        str(rejected.get(match) or "Dataverse rejected the role row"),
+                        external_id=match,
+                        exc=rejected.get(match),
+                    )
+                    continue
+                if created:
+                    result["created"] += 1
+                elif match in unchanged:
+                    result["skipped"] += 1
+                else:
+                    result["updated"] += 1
+                result["processed"] += 1
+                done += 1
+                self.sync_logger.log_record_success(
+                    "ts_affiliationrole",
+                    match,
+                    record_id,
+                    _operation(created, match in unchanged),
+                )
+            self.sync_logger.log_progress("affiliation_roles", done, len(rows))
+        return result
+
+    def _role_entity_set(self) -> str:
+        ed = self.config.get_entity("Dataverse", "ts_affiliationrole")
+        return ed.entity_set if ed and ed.entity_set else "ts_affiliationroles"
 
     def _collect_population_hcps(
         self,

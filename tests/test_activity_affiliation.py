@@ -87,11 +87,29 @@ def test_role_lookup_uses_full_external_id():
     role = next(
         fm for fm in engine.config.field_mappings if fm.mapping_id == "AFF-007"
     )
-    engine.begin_record("ts_affiliation_role", "WUKM0000000101")
+    engine.begin_record("ts_affiliationrole", "WUKM0000000101")
     payload = engine._catalog_payload(role, {"role": "28", "codBase": "WUK"})
     assert payload == {
         "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')"
     }
+
+
+def test_affiliation_role_rows_bind_parent_and_role():
+    engine = create_transform_engine(load_mapping_config())
+    flat = flatten_activity_for_affiliation(_activity_record(codBase="WUK"))
+    rows = engine.affiliation_role_rows(flat, "affiliation-guid")
+    assert rows == [
+        {
+            "ts_name": "WUKM0000000101 - 28",
+            "ts_Affiliation@odata.bind": "/ts_affiliations(affiliation-guid)",
+            "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')",
+        },
+        {
+            "ts_name": "WUKM0000000101 - AD",
+            "ts_Affiliation@odata.bind": "/ts_affiliations(affiliation-guid)",
+            "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.AD')",
+        },
+    ]
 
 
 def test_transform_w2w_affiliation_compound_key_has_both_ends():

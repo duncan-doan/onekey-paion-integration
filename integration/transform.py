@@ -83,9 +83,9 @@ class TransformEngine:
             if fm.target_field == "parentaccountid":
                 continue
 
-            catalog = self._catalog_payload(fm, source)
-            if catalog is not None:
-                payload.update(catalog)
+            bound = self._bound_lookup(fm, source)
+            if bound is not None:
+                payload.update(bound)
                 continue
 
             value = self._extract_value(source, fm.source_field)
@@ -148,9 +148,9 @@ class TransformEngine:
             if fm.target_field == "parentcustomerid":
                 continue
 
-            catalog = self._catalog_payload(fm, source)
-            if catalog is not None:
-                payload.update(catalog)
+            bound = self._bound_lookup(fm, source)
+            if bound is not None:
+                payload.update(bound)
                 continue
 
             value = self._extract_value(source, fm.source_field)
@@ -233,6 +233,9 @@ class TransformEngine:
         for fm in mappings:
             if not fm.target_field:
                 continue
+            country = self._country_payload(fm, source)
+            if country:
+                payload.update(country)
             if fm.is_lookup:
                 continue
 
@@ -317,6 +320,9 @@ class TransformEngine:
         for fm in mappings:
             if not fm.target_field:
                 continue
+            country = self._country_payload(fm, source)
+            if country:
+                payload.update(country)
             if fm.is_lookup:
                 continue
 
@@ -385,6 +391,46 @@ class TransformEngine:
             payload["ts_name"] = source.get("ts_name") or external_id
 
         return {k: v for k, v in payload.items() if v is not None}
+
+    def affiliation_role_rows(
+        self,
+        source: dict,
+        affiliation_id: str,
+        affiliation_set: str = "ts_affiliations",
+    ) -> list[dict]:
+        """One ``ts_affiliationrole`` payload per TIH code on an activity.
+
+        ``AFF-007``..``AFF-016`` each map a code to ``ts_role``, which looks
+        up ``ts_role_ref``. ``ts_name`` is ``{activityEid} - {code}`` so a
+        rerun updates the same child row. The parent affiliation is the row
+        just written.
+        """
+        if not affiliation_id:
+            return []
+        activity_eid = str(source.get("activityEid") or "").strip()
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for fm in self.config.get_field_mappings("ts_affiliationrole"):
+            if not fm.mapping_id.startswith("AFF-") or fm.target_field != "ts_role":
+                continue
+            if fm.source_field not in source:
+                continue
+            catalog = self._catalog_payload(fm, source)
+            if not catalog:
+                continue
+            code = str(self._extract_value(source, fm.source_field) or "").strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            name = f"{activity_eid} - {code}" if activity_eid else code
+            rows.append(
+                {
+                    "ts_name": name[:100],
+                    "ts_Affiliation@odata.bind": f"/{affiliation_set}({affiliation_id})",
+                    **catalog,
+                }
+            )
+        return rows
 
     def transform_address(
         self,
@@ -560,6 +606,32 @@ class TransformEngine:
         if isinstance(value, str):
             return value.strip().lower() in ("true", "1", "yes", "y")
         return bool(value)
+
+    def _bound_lookup(self, mapping: "FieldMapping", source: dict) -> dict | None:
+        """Bind a country or code-list lookup, or return None to keep the normal transform."""
+        country = self._country_payload(mapping, source)
+        if country is not None:
+            return country
+        return self._catalog_payload(mapping, source)
+
+    def _country_payload(self, mapping: "FieldMapping", source: dict) -> dict | None:
+        """Bind ``ts_country`` with its alternate key.
+
+        ``lookup_key_field`` is ``ts_onekeycode`` (OneKey ``codBase``, such as
+        ``WDE``). Returns ``None`` when this mapping is not the country
+        lookup, and ``{}`` when the code is blank.
+        """
+        if not mapping.is_lookup or (mapping.lookup_entity or "").lower() != "ts_country":
+            return None
+        value = self._extract_value(source, mapping.source_field)
+        if value is None or not str(value).strip():
+            return {}
+        key_field = (mapping.lookup_key_field or "ts_onekeycode").strip()
+        code = str(value).strip()
+        # ts_onekeycode is an alternate key, so the bind is the code itself.
+        return {
+            "ts_Country@odata.bind": odata_lookup_bind("ts_countries", key_field, code)
+        }
 
     def _catalog_payload(self, mapping: "FieldMapping", source: dict) -> dict | None:
         """Bind a code-list lookup using the configured external-id template.
