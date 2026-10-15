@@ -32,6 +32,12 @@ VAL-COD-006,codebase,WNO,Norway,NO,Norway,Norway codebase
 VAL-COD-007,codebase,WFI,Finland,FI,Finland,Finland codebase
 # Preferred language mapping for HCP,,,,,,
 VAL-PLN-001,preflanguage,en,English,126870001,English,English UK
+VAL-PLN-002,preflanguage,de,German,1031,German,Reuses the ts_preferredlanguage option already set on contacts
+VAL-PLN-003,preflanguage,nl,Dutch,1043,Dutch,Reuses the ts_preferredlanguage option already set on contacts
+VAL-PLN-004,preflanguage,sv,Swedish,1053,Swedish,Reuses the ts_preferredlanguage option already set on contacts
+VAL-PLN-005,preflanguage,no,Norwegian,1044,Norwegian,Reuses the ts_preferredlanguage option already set on contacts
+VAL-PLN-006,preflanguage,da,Danish,1030,Danish,Reuses the ts_preferredlanguage option already set on contacts
+VAL-PLN-007,preflanguage,fi,Finnish,1035,Finnish,Reuses the ts_preferredlanguage option already set on contacts
 # Language Code Mapping (for portal LCID if needed),,,,,,
 VAL-LNG-001,language,en_GB,English (UK),1033,English,English UK
 VAL-LNG-002,language,de,German,1031,German,German

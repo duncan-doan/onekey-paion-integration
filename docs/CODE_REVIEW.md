@@ -141,7 +141,7 @@ unlimited entitlement; verify the tenant allocation and usage reports. See
 **Verification**
 
 Run `.venv/bin/python -m pytest -q` for the full offline regression suite.
-Final result: **511 passed, 5 live tests skipped**. Python compilation and
+Final result: **542 passed, 5 live tests skipped**. Python compilation and
 the whitespace check with `cr-at-eol` (preserving existing CRLF files) passed.
 Regression coverage includes incomplete population streams, lost-packet
 recovery, `success:false` packet retries, capped retry hints and heartbeat
@@ -189,3 +189,6 @@ reads, and Dataverse GETs through a client that refused any other method.
 | Paused delta under-reported its work | Phases a delta finished before pausing were dropped from the job's counts | The pause carries those counts and they are merged |
 | Unbounded dependencies | `requirements.txt` allowed any future major version, and `dataverse/auth.py` patches a `urllib3` internal (IPv4 only) | `azure-functions<2`, `requests<3`, `urllib3>=2,<3` |
 | `dataverse_records.py delete` | `--prefix ""` matched every OneKey-sourced account and contact, with no confirmation | The prefix must start with a codebase (`W` and two letters) |
+| English contacts got no preferred language; the deploy's test job failed | `0a6e48e` moved `en` to the `preflanguage` value type, but HCP-011 and the `ts_preferredlanguage` picklist target still used `language` | HCP-011 decodes `preflanguage`, which has a row for every code OneKey sends (en, de, nl, sv, no, da, fi) on the option values contacts already hold, and the picklist target syncs `preflanguage`; tests pin every code and the target |
+| Nameless account names changed on every delta | A delta builds the HCP part of the name from its window, which may miss the workplace's activities or hold a different HCP than the full sync chose | In a delta, a nameless account that already exists keeps its name; a new one gets the built name; the full sync names them all |
+| Failing tests did not stop a deploy | The deploy job needed only `build` | It needs `test` too |

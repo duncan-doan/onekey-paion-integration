@@ -166,6 +166,9 @@ class DynamicSyncEngine:
         self._contact_cache: dict[str, str] = {}
         # One HCP name per nameless workplace, from the same population extract.
         self._hcp_name_by_workplace: dict[str, str] = {}
+        # True when those names come from a delta window, which may hold only
+        # some of a workplace's activities (see _keep_existing_nameless_names).
+        self._hcp_names_partial = False
         # time.monotonic() after which a run stops between batches, or None.
         # Queue workers set it: Flex Consumption stops an execution 60
         # minutes into a scale-in, so a run ends cleanly before that and a
@@ -501,6 +504,7 @@ class DynamicSyncEngine:
                     # of paced packets, and two would read two snapshots.
                     packets = None
                     self._hcp_name_by_workplace = {}
+                    self._hcp_names_partial = False
                     if not hco_only and not hcp_only:
                         packets = self._collect_population_packets(
                             codebase, max_records=max_records
@@ -1132,6 +1136,9 @@ class DynamicSyncEngine:
 
         if not prepared:
             return result, flattened, raw_workplaces
+
+        if self._hcp_names_partial:
+            self._keep_existing_nameless_names(prepared)
 
         key_name = prepared[0][1]
 
@@ -2310,6 +2317,7 @@ class DynamicSyncEngine:
         self._hcp_name_by_workplace = hcp_name_by_workplace(
             individuals.values(), all_activities
         )
+        self._hcp_names_partial = True
         self.sync_logger.phase_finished(
             "extract",
             started,
@@ -2465,6 +2473,29 @@ class DynamicSyncEngine:
         found = self._lookup_accounts_bulk([workplace_eid])
         return found.get(workplace_eid)
     
+    def _keep_existing_nameless_names(self, prepared: list[tuple]) -> None:
+        """Leave out the built name of nameless workplaces that already exist.
+
+        A delta sees only the activities changed in its window, so the HCP
+        part of a built name (integration.hco_name) may be missing, or be a
+        different HCP than the full sync chose; writing it would rename the
+        account back and forth. Existing accounts keep their name until the
+        next full sync, and a new one gets the name built from the window.
+        """
+        nameless = [
+            workplace_eid
+            for workplace_eid, _, _, _, hco in prepared
+            if workplace_eid
+            and not str(hco.get("officialName") or "").strip()
+            and not str(hco.get("usualName") or "").strip()
+        ]
+        if not nameless:
+            return
+        existing = self._lookup_accounts_bulk(nameless)
+        for workplace_eid, _, _, payload, _ in prepared:
+            if workplace_eid in existing:
+                payload.pop("name", None)
+
     def _lookup_accounts_bulk(self, workplace_eids) -> dict[str, str]:
         """Resolve many workplace EIDs to account GUIDs; update the cache."""
         field_name = self.config.require_key_field("account")

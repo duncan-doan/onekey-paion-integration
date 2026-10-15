@@ -236,3 +236,34 @@ def test_hierarchy_links_are_not_written_singly_after_an_auth_failure():
     with pytest.raises(DataverseHTTPError):
         apply_updates(dataverse, _links(3), 100, match_field="ts_externalid", failures=[])
     assert dataverse.updates == []
+
+
+# The preferredLanguageEID codes OneKey sends for each country (UAT, Oct 2026).
+ONEKEY_LANGUAGES = {"en": 126870001, "de": 1031, "nl": 1043, "sv": 1053, "no": 1044, "da": 1030, "fi": 1035}
+
+
+@pytest.mark.parametrize("code, option", sorted(ONEKEY_LANGUAGES.items()))
+def test_every_onekey_language_decodes_to_its_option(code, option):
+    engine = create_transform_engine(load_mapping_config())
+    contact = engine.transform_hcp(
+        {"individualEid": "WUKI1", "lastName": "Doe", "preferredLanguageEID": code}
+    )
+    assert contact["ts_preferredlanguage"] == option
+
+
+def test_the_language_choice_syncs_the_same_rows_the_contact_decodes():
+    # The option sync must create every value the decode can write.
+    config = load_mapping_config()
+    rule = next(
+        fm.transform_rule
+        for fm in config.get_field_mappings("contact")
+        if fm.target_field == "ts_preferredlanguage"
+    )
+    decode_type = rule.split(":", 1)[1]
+    targets = Path(__file__).resolve().parent.parent / "config" / "picklist_targets.csv"
+    synced = [
+        line.split(",")[0]
+        for line in targets.read_text(encoding="utf-8").splitlines()
+        if ",ts_preferredlanguage," in line
+    ]
+    assert synced == [decode_type]

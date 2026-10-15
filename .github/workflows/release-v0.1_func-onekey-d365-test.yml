@@ -71,7 +71,7 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: build # add `test` here once the suite is green to block deploys on failures
+    needs: [test, build] # a failing test blocks the deploy
     timeout-minutes: 30 # the remote build installs requirements.txt in Azure
 
     steps:

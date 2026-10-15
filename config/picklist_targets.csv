@@ -6,5 +6,5 @@ mapping_type,kind,option_set,entity,attribute,notes
 # ============================================================================================================,,,,,
 structuretype,global,ts_hcostructuretype,,,HCO structure type (account.ts_structuretype)
 hcptype,global,ts_hcptype,,,Contact HCP type (contact.ts_type → global ts_hcptype)
-language,global,ts_preferredlanguage,,,Contact preferred language (contact.ts_preferredlanguage)
+preflanguage,global,ts_preferredlanguage,,,Contact preferred language (contact.ts_preferredlanguage)
 linkcode,global,ts_affiliationlinktype,,,HCO-HCO link type global choice (ts_affiliation.ts_linktype); W2W-005 decode:linkcode

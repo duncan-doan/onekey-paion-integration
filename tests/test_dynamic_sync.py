@@ -385,3 +385,51 @@ def test_a_paused_delta_keeps_the_counts_of_the_phases_it_finished(tmp_path, mon
     assert result["accounts"]["processed"] == 2
     assert result["contacts"]["processed"] == 0
     assert result["records_written"] == 2
+
+
+class NamedAccountsDataverse(BulkDataverse):
+    """Holds account WUKH9 already; records every account payload it is sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.account_payloads = {}
+
+    def find_many_by_field(self, entity_set, match_field, keys, **kwargs):
+        if entity_set == "accounts":
+            return {key: {"accountid": "guid-9"} for key in keys if key == "WUKH9"}
+        return {}
+
+    def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+        if entity_set == "accounts":
+            self.account_payloads.update({r.get(match_field): dict(r) for r in records})
+        return super().bulk_upsert_by_field(entity_set, match_field, records, **kwargs)
+
+
+NAMELESS = [
+    {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH9", "typeLabel": "Home address"}},
+    {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH8", "typeLabel": "Home address"}},
+]
+
+
+def test_a_delta_keeps_the_name_of_an_existing_nameless_workplace(tmp_path):
+    # The delta window holds none of their activities, so it cannot build
+    # the HCP part of the name the full sync gave them.
+    dataverse = NamedAccountsDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records=NAMELESS)
+    engine.sync_delta(
+        ["WUK"], "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", sync_picklists=False
+    )
+    key = engine.config.require_key_field("account")
+    payloads = {payload[key]: payload for payload in dataverse.account_payloads.values()}
+    assert "name" not in payloads["WUKH9"]  # exists: keeps its name
+    assert payloads["WUKH8"]["name"].startswith("Home address")  # new: gets one
+
+
+def test_a_full_sync_names_every_nameless_workplace(tmp_path):
+    dataverse = NamedAccountsDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records=NAMELESS)
+    engine.sync_full(["WUK"], sync_picklists=False)
+    key = engine.config.require_key_field("account")
+    names = {payload[key]: payload.get("name") for payload in dataverse.account_payloads.values()}
+    assert names["WUKH9"].startswith("Home address")
+    assert names["WUKH8"].startswith("Home address")
