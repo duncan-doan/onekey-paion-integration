@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -307,15 +308,20 @@ class CountryResolver:
     unchanged cannot compare a bind by alternate key, so every account,
     contact and affiliation would be written again on every run. The
     country table is read once, on the first lookup. A code it does not hold
-    keeps the alternate-key bind.
+    keeps the alternate-key bind. A read that fails is tried again after
+    RETRY_AFTER_SECONDS, so one throttled request does not turn off skip
+    unchanged for the rest of the run.
     """
 
     ENTITY_SET = "ts_countries"
+    # entity_meta would guess ts_countrieid from the set name.
     PRIMARY_ID = "ts_countryid"
+    RETRY_AFTER_SECONDS = 60
 
     def __init__(self, dv):
         self.dv = dv
         self._ids: dict[str, dict[str, str]] = {}
+        self._failed_at: dict[str, float] = {}
 
     def bind(self, key_field: str, code: str) -> str:
         record_id = self._load(key_field).get(code.strip().upper())
@@ -326,9 +332,12 @@ class CountryResolver:
     def _load(self, key_field: str) -> dict[str, str]:
         if key_field in self._ids:
             return self._ids[key_field]
+        failed_at = self._failed_at.get(key_field)
+        if failed_at is not None and time.monotonic() - failed_at < self.RETRY_AFTER_SECONDS:
+            return {}
         ids: dict[str, str] = {}
-        self._ids[key_field] = ids
         if not hasattr(self.dv, "retrieve_multiple"):
+            self._ids[key_field] = ids
             return ids
         try:
             rows = self.dv.retrieve_multiple(
@@ -336,8 +345,15 @@ class CountryResolver:
                 select=[key_field, self.PRIMARY_ID],
             )
         except Exception as exc:  # noqa: BLE001 — the alternate-key bind still works
-            logger.error("Could not read %s: %s", self.ENTITY_SET, exc)
+            self._failed_at[key_field] = time.monotonic()
+            logger.error(
+                "Could not read %s, trying again in %ds: %s",
+                self.ENTITY_SET,
+                self.RETRY_AFTER_SECONDS,
+                exc,
+            )
             return ids
+        self._ids[key_field] = ids
         for row in rows or []:
             code = str(row.get(key_field) or "").strip().upper()
             record_id = str(row.get(self.PRIMARY_ID) or "").strip()

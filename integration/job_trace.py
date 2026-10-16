@@ -203,6 +203,11 @@ def run_marker(run_id: str) -> str:
     return f"run={run_id}"
 
 
+def part_marker(part: int) -> str:
+    """The text that ends a scheduled job's ts_name: which part of its work it ran."""
+    return f"part={int(part)}"
+
+
 def job_codebase(codebases: list[str]) -> str:
     """Return the ts_codebase value stored for a job over these codebases."""
     codes = [c.strip().upper() for c in codebases if c and str(c).strip()]
@@ -393,6 +398,9 @@ class JobTracer:
         # Scheduled run the jobs belong to. ts_name carries it (run_marker), so
         # all the countries' jobs of one timer run can be read back together.
         self.run_id: str | None = None
+        # The queue message's part (part_marker), ending ts_name after the run,
+        # so a redelivery can tell its own earlier tries from the next part.
+        self.part: int | None = None
         self.batch_size = max(1, int(batch_size or 100))
         self._can_trace = dataverse is not None and hasattr(dataverse, "create")
         self.enabled = self._can_trace
@@ -822,6 +830,8 @@ class JobTracer:
         name = f"{joined} {label} {started.strftime('%Y-%m-%d %H:%M')}"
         if self.run_id:
             name = f"{name} {run_marker(self.run_id)}"
+            if self.part:
+                name = f"{name} {part_marker(self.part)}"
         payload = {
             "ts_name": clip(name, 200),
             "ts_jobid": self.job_id,

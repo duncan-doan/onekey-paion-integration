@@ -3,7 +3,7 @@
 import pytest
 
 from dataverse.exceptions import DataverseHTTPError
-from integration.dynamic_sync import DynamicSyncEngine
+from integration.dynamic_sync import DynamicSyncEngine, main_activity_by_individual
 from integration.job_trace import (
     ENTITY_ACCOUNT,
     ENTITY_ADDRESS,
@@ -17,6 +17,7 @@ from integration.job_trace import (
     PHASE_HIERARCHY,
 )
 from integration.sync_logger import SyncLogger
+from onekey.parse import flatten_hco
 
 
 class PopulationOneKey:
@@ -331,10 +332,12 @@ class KnownDataverse(BulkDataverse):
             "accounts": {eid: {"accountid": f"account-{eid}"} for eid in accounts},
         }
         self.records = {}
+        self.lookups = []
 
     def find_many_by_field(self, entity_set, match_field, values, select=None, **kwargs):
         if self.lookup_error:
             raise self.lookup_error
+        self.lookups.append((entity_set, list(values)))
         table = self.rows.get(entity_set, {})
         return {value: table[value] for value in values if value in table}
 
@@ -558,3 +561,80 @@ def test_a_full_sync_names_every_nameless_workplace(tmp_path):
     names = {payload[key]: payload.get("name") for payload in dataverse.account_payloads.values()}
     assert names["WUKH9"].startswith("Home address")
     assert names["WUKH8"].startswith("Home address")
+
+
+def test_a_new_contact_takes_its_parent_only_from_the_main_activity(tmp_path):
+    # Its main activity is outside the window. The secondary one, at an
+    # account, shows the individual is in the contract but is not its parent.
+    dataverse = KnownDataverse(accounts={"WNLH2"})
+    result = _delta(tmp_path, dataverse, [
+        _individual("WNLN7", "New"), _activity("WNLN701", "WNLN7", "WNLH2", main=False),
+    ])
+    assert PARENT not in dataverse.contacts()["WNLN7"]
+    assert result["unjoined"]["individuals"] == 0
+
+
+def test_a_partial_contact_leaves_its_pending_failures_open(tmp_path):
+    # WNLN1 comes whole. WNLN2 leaves out its department and WNLN3 its
+    # parent: a pending failure of theirs may be about that part.
+    dataverse = KnownDataverse(contacts={"WNLN1", "WNLN2", "WNLN3"}, accounts={"WNLH5"})
+    engine, _ = _engine(tmp_path, dataverse, [
+        {"entityType": "WORKPLACE", "codBase": "WNL",
+         "workplace": {"workplaceEid": "WNLH1", "officialName": "Ziekenhuis"}},
+        _individual("WNLN1", "Whole"), _activity("WNLN101", "WNLN1", "WNLH1"),
+        _individual("WNLN2", "NoDepartment"), _activity("WNLN201", "WNLN2", "WNLH5"),
+        _individual("WNLN3", "NoParent"),
+    ])
+    engine.sync_delta(
+        ["WNL"], *DELTA_WINDOW, sync_picklists=False, sync_activity_affiliations=False
+    )
+    assert set(dataverse.contacts()) == {"WNLN1", "WNLN2", "WNLN3"}
+    assert "WNLN1" in engine.succeeded_ids
+    assert not {"WNLN2", "WNLN3"} & engine.succeeded_ids
+
+
+def test_a_delta_looks_up_only_the_accounts_it_can_use(tmp_path):
+    # An existing contact's secondary activity links nothing, so its
+    # workplace is not looked up.
+    dataverse = KnownDataverse(contacts={"WDKM1", "WDKM2"}, accounts={"WDKH1", "WDKH2"})
+    _delta(tmp_path, dataverse, [
+        _individual("WDKM1", "Main"), _activity("WDKM101", "WDKM1", "WDKH1"),
+        _individual("WDKM2", "Secondary"), _activity("WDKM201", "WDKM2", "WDKH2", main=False),
+    ], codebase="WDK")
+    looked_up = {
+        value for entity_set, values in dataverse.lookups if entity_set == "accounts"
+        for value in values
+    }
+    assert looked_up == {"WDKH1"}
+
+
+def test_the_main_activity_wins_whatever_the_order():
+    picked = main_activity_by_individual([
+        _activity("A1", "WNLN1", "WNLH1", main=False),
+        _activity("A2", "WNLN1", "WNLH2"),
+        _activity("A3", "WNLN1", "WNLH3"),
+        _activity("B1", "WNLN2", "WNLH4", main=False),
+    ])
+    assert picked["WNLN1"]["activity"]["activityEid"] == "A2"
+    assert picked["WNLN2"]["activity"]["activityEid"] == "B1"
+
+
+def test_a_retry_keeps_the_name_of_an_existing_nameless_workplace(tmp_path):
+    # The retry replays accounts without a population walk, so it has no HCP
+    # names: the existing account keeps the name the full sync gave it.
+    dataverse = NamedAccountsDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records=NAMELESS)
+    engine._sync_hcos("WUK", flattened=[flatten_hco(record) for record in NAMELESS])
+    key = engine.config.require_key_field("account")
+    payloads = {payload[key]: payload for payload in dataverse.account_payloads.values()}
+    assert "name" not in payloads["WUKH9"]
+    assert payloads["WUKH8"]["name"].startswith("Home address")
+
+
+def test_a_full_sync_capped_by_max_records_keeps_existing_names(tmp_path):
+    dataverse = NamedAccountsDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records=NAMELESS)
+    engine.sync_full(["WUK"], max_records=10, sync_picklists=False)
+    key = engine.config.require_key_field("account")
+    payloads = {payload[key]: payload for payload in dataverse.account_payloads.values()}
+    assert "name" not in payloads["WUKH9"]

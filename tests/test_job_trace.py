@@ -624,3 +624,18 @@ def test_a_scheduled_run_id_goes_into_the_job_name():
     name = dataverse.created[0][1]["ts_name"]
     assert name.startswith("WDE Full ")
     assert name.endswith(" run=delta-20261011T000001Z")
+
+
+def test_a_queue_part_ends_the_job_name():
+    # A redelivery takes over only its own part's jobs
+    # (scheduled_sync.own_jobs_filter); the run report still reads the run.
+    from integration.run_report import run_id_of
+
+    dataverse = FakeDataverse()
+    tracer = JobTracer(dataverse)
+    tracer.run_id = "full-20261101T000000Z-7"
+    tracer.part = 3
+    tracer.begin(job_type=JOB_FULL, codebases=["WDE"])
+    name = dataverse.created[0][1]["ts_name"]
+    assert name.endswith(" run=full-20261101T000000Z-7 part=3")
+    assert run_id_of({"ts_name": name}) == "full-20261101T000000Z-7"

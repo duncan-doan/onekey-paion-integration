@@ -4,6 +4,7 @@ from dataverse.client import _expected_columns
 from integration.activity_affiliation import flatten_activity_for_affiliation
 from integration.dynamic_mapping import load_mapping_config
 from integration.dynamic_sync import DynamicSyncEngine
+from integration import lookup_sync
 from integration.lookup_sync import CountryResolver
 from integration.sync_logger import SyncLogger
 from integration.transform import create_transform_engine
@@ -119,18 +120,29 @@ def test_a_code_the_table_lacks_keeps_the_alternate_key_bind():
     assert resolver.bind("ts_onekeycode", "WSE") == "/ts_countries(ts_onekeycode='WSE')"
 
 
-def test_an_unreadable_country_table_keeps_the_alternate_key_bind_and_is_read_once():
-    class Down:
+def test_an_unreadable_country_table_is_read_again_a_minute_later(monkeypatch):
+    # One throttled read must not turn off skip unchanged for the whole run.
+    clock = [1000.0]
+    monkeypatch.setattr(lookup_sync.time, "monotonic", lambda: clock[0])
+
+    class Throttled:
         calls = 0
 
         def retrieve_multiple(self, entity_set, **kwargs):
-            Down.calls += 1
-            raise RuntimeError("HTTP 503")
+            Throttled.calls += 1
+            if Throttled.calls == 1:
+                raise RuntimeError("HTTP 429")
+            return COUNTRY_ROWS
 
-    resolver = CountryResolver(Down())
+    resolver = CountryResolver(Throttled())
     assert resolver.bind("ts_onekeycode", "WDE") == BIND
-    assert resolver.bind("ts_onekeycode", "WDE") == BIND
-    assert Down.calls == 1
+    clock[0] += 30
+    assert resolver.bind("ts_onekeycode", "WDE") == BIND  # not read again yet
+    assert Throttled.calls == 1
+    clock[0] += CountryResolver.RETRY_AFTER_SECONDS
+    assert resolver.bind("ts_onekeycode", "WDE") == f"/ts_countries({WDE_ID})"
+    assert resolver.bind("ts_onekeycode", "WNL") == f"/ts_countries({WNL_ID})"
+    assert Throttled.calls == 2
 
 
 def test_the_sync_engine_binds_countries_by_row_id(tmp_path):

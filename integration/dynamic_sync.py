@@ -104,6 +104,27 @@ def _operation(created: bool, unchanged: bool) -> str:
     return "skip" if unchanged else "update"
 
 
+def main_activity_by_individual(activity_records) -> dict[str, dict]:
+    """One ACTIVITY per individual: the first marked ``isMainActivity``, else the first.
+
+    The full sync and the delta both pick a contact's activity with this, so
+    they agree on which workplace is its parent.
+    """
+    picked: dict[str, dict] = {}
+    for record in activity_records:
+        activity = record.get("activity") or {}
+        individual_eid = activity.get("individualEid")
+        if not individual_eid:
+            continue
+        existing = picked.get(individual_eid)
+        if existing is None or (
+            activity.get("isMainActivity")
+            and not (existing.get("activity") or {}).get("isMainActivity")
+        ):
+            picked[individual_eid] = record
+    return picked
+
+
 def _empty_hierarchy_stats() -> dict:
     return dict(_EMPTY_HIERARCHY)
 
@@ -166,9 +187,11 @@ class DynamicSyncEngine:
         self._contact_cache: dict[str, str] = {}
         # One HCP name per nameless workplace, from the same population extract.
         self._hcp_name_by_workplace: dict[str, str] = {}
-        # True when those names come from a delta window, which may hold only
-        # some of a workplace's activities (see _keep_existing_nameless_names).
-        self._hcp_names_partial = False
+        # False only while sync_full holds the names from a whole population
+        # walk. A delta window, a retry or a sample sees some of a workplace's
+        # activities at most, so existing accounts keep their name
+        # (_keep_existing_nameless_names).
+        self._hcp_names_partial = True
         # time.monotonic() after which a run stops between batches, or None.
         # Queue workers set it: Flex Consumption stops an execution 60
         # minutes into a scale-in, so a run ends cleanly before that and a
@@ -504,7 +527,8 @@ class DynamicSyncEngine:
                     # of paced packets, and two would read two snapshots.
                     packets = None
                     self._hcp_name_by_workplace = {}
-                    self._hcp_names_partial = False
+                    # max_records stops the walk early, so it sees some names only.
+                    self._hcp_names_partial = bool(max_records)
                     if not hco_only and not hcp_only:
                         packets = self._collect_population_packets(
                             codebase, max_records=max_records
@@ -2007,21 +2031,7 @@ class DynamicSyncEngine:
             individual_eid = (record.get("individual") or {}).get("individualEid")
             if individual_eid:
                 individuals[individual_eid] = record
-        activities_by_individual: dict[str, dict] = {}
-        for record in activity_records:
-            activity = record.get("activity") or {}
-            individual_eid = activity.get("individualEid")
-            if not individual_eid:
-                continue
-            existing = activities_by_individual.get(individual_eid)
-            if existing is None:
-                activities_by_individual[individual_eid] = record
-            else:
-                existing_activity = existing.get("activity") or {}
-                if activity.get("isMainActivity") and not existing_activity.get(
-                    "isMainActivity"
-                ):
-                    activities_by_individual[individual_eid] = record
+        activities_by_individual = main_activity_by_individual(activity_records)
 
         composed = []
         skipped_unjoined = 0
@@ -2072,37 +2082,47 @@ class DynamicSyncEngine:
         workplace_index: dict[str, dict],
         *,
         dry_run: bool = False,
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[dict], int, set[str]]:
         """Join one delta's packets into contact rows for every changed individual.
 
         A delta returns only what changed: an individual whose name changed
         comes without its activity's workplace, often without the activity
         too. Each one is still written with what arrived:
 
-        - An individual that is already a contact is updated. Its parent comes
-          from its main activity when that activity is in the window and its
-          workplace is an account; otherwise the parent stays as it is. The
-          transform leaves out fields without a value, so a workplace outside
-          the window leaves the department as it is.
+        - Its parent comes from its main activity, when that activity is in
+          the window and its workplace is in the window or an account;
+          otherwise the parent stays as it is. Another activity may be the
+          main one, so a secondary activity never moves the parent.
+        - The transform leaves out fields without a value, so a workplace
+          outside the window leaves the department as it is.
         - A new individual is created only as the full sync would: through an
           activity at a workplace in the window or already an account.
 
-        Returns the rows and the number of new individuals left out. A dry run
-        reads nothing from Dataverse, so it treats every individual as an
-        existing contact.
+        Returns the rows, the number of new individuals left out, and the
+        individuals written without their parent or department, whose
+        pending failures stay open (_sync_hcps). A dry run reads nothing from
+        Dataverse, so it treats every individual as an existing contact.
         """
         if not dry_run:
             self._lookup_contacts_bulk(list(individuals))
-            outside_window = set()
+            # Only a main activity links a parent, and a new individual's
+            # activity also decides whether it is in the contract.
+            wanted = set()
             for individual_eid in individuals:
                 activity_record = activities_by_individual.get(individual_eid) or {}
-                workplace_eid = (activity_record.get("activity") or {}).get("workplaceEid")
-                if workplace_eid and workplace_eid not in workplace_index:
-                    outside_window.add(workplace_eid)
-            self._lookup_accounts_bulk(outside_window)
+                activity = activity_record.get("activity") or {}
+                workplace_eid = activity.get("workplaceEid")
+                if (
+                    workplace_eid
+                    and workplace_eid not in workplace_index
+                    and (activity.get("isMainActivity") or individual_eid not in self._contact_cache)
+                ):
+                    wanted.add(workplace_eid)
+            self._lookup_accounts_bulk(wanted)
 
         composed = []
         left_out = 0
+        partial: set[str] = set()
         for individual_eid, individual_record in individuals.items():
             activity_record = activities_by_individual.get(individual_eid)
             activity = (activity_record or {}).get("activity") or {}
@@ -2110,22 +2130,18 @@ class DynamicSyncEngine:
             known_workplace = bool(workplace_eid) and (
                 workplace_eid in workplace_index or workplace_eid in self._account_cache
             )
-            if dry_run or individual_eid in self._contact_cache:
-                # Another activity may be the main one, so only the main
-                # activity moves the parent.
-                if not (known_workplace and activity.get("isMainActivity")):
-                    activity_record = None
-            elif not known_workplace:
+            if not (dry_run or individual_eid in self._contact_cache or known_workplace):
                 left_out += 1
                 continue
+            if not (known_workplace and activity.get("isMainActivity")):
+                activity_record = None
+            workplace_record = workplace_index.get(workplace_eid) if activity_record else None
+            if workplace_record is None:
+                partial.add(individual_eid)
             composed.append(
-                compose_hcp_result(
-                    individual_record,
-                    activity_record,
-                    workplace_index.get(workplace_eid) if activity_record else None,
-                )
+                compose_hcp_result(individual_record, activity_record, workplace_record)
             )
-        return composed, left_out
+        return composed, left_out, partial
 
     def _sync_hcps(
         self,
@@ -2135,6 +2151,7 @@ class DynamicSyncEngine:
         date_from: str = None,
         date_to: str = None,
         composed: list[dict] | None = None,
+        partial: set[str] | None = None,
     ) -> dict:
         with self._phase(PHASE_HCP, "contacts", codbase=codebase) as phase:
             phase["stats"] = self._sync_hcps_impl(
@@ -2144,6 +2161,7 @@ class DynamicSyncEngine:
                 date_from=date_from,
                 date_to=date_to,
                 composed=composed,
+                partial=partial,
             )
             return phase["stats"]
 
@@ -2155,8 +2173,14 @@ class DynamicSyncEngine:
         date_from: str = None,
         date_to: str = None,
         composed: list[dict] | None = None,
+        partial: set[str] | None = None,
     ) -> dict:
-        """Sync HCPs for a single codebase using bulk upserts."""
+        """Sync HCPs for a single codebase using bulk upserts.
+
+        ``partial`` holds individuals whose row leaves out the parent or the
+        department (a delta, see _compose_delta_hcps). Writing them does not
+        resolve their pending failures: what failed may be the part left out.
+        """
 
         result = _empty_entity_stats()
 
@@ -2292,7 +2316,10 @@ class DynamicSyncEngine:
                     result["updated"] += 1
                 result["processed"] += 1
                 done += 1
-                self._note_success(individual_eid, entity="contact", external_id=payload.get(key_name))
+                if individual_eid not in (partial or ()):
+                    self._note_success(
+                        individual_eid, entity="contact", external_id=payload.get(key_name)
+                    )
                 self.sync_logger.log_record_success(
                     "contact",
                     individual_eid,
@@ -2330,7 +2357,6 @@ class DynamicSyncEngine:
         workplaces = []
         individuals: dict[str, dict] = {}
         workplace_index: dict[str, dict] = {}
-        activities_by_individual: dict[str, dict] = {}
         all_activities: list[dict] = []
 
         started = self.sync_logger.phase_started(
@@ -2362,20 +2388,8 @@ class DynamicSyncEngine:
                     self._contracted_individual_eids.add(str(individual_eid))
             elif entity_type == "ACTIVITY":
                 all_activities.append(record)
-                activity = record.get("activity") or {}
-                individual_eid = activity.get("individualEid")
-                if not individual_eid:
-                    continue
-                existing = activities_by_individual.get(individual_eid)
-                if existing is None:
-                    activities_by_individual[individual_eid] = record
-                else:
-                    existing_activity = existing.get("activity") or {}
-                    if activity.get("isMainActivity") and not existing_activity.get(
-                        "isMainActivity"
-                    ):
-                        activities_by_individual[individual_eid] = record
 
+        activities_by_individual = main_activity_by_individual(all_activities)
         self._hcp_name_by_workplace = hcp_name_by_workplace(
             individuals.values(), all_activities
         )
@@ -2437,7 +2451,7 @@ class DynamicSyncEngine:
                 1 for eid in activities_by_individual if eid not in individuals
             )
             if individuals:
-                composed, result["unjoined"]["individuals"] = self._compose_delta_hcps(
+                composed, result["unjoined"]["individuals"], partial = self._compose_delta_hcps(
                     individuals,
                     activities_by_individual,
                     workplace_index,
@@ -2447,6 +2461,7 @@ class DynamicSyncEngine:
                     codebase,
                     dry_run=dry_run,
                     composed=composed,
+                    partial=partial,
                 )
             if any(result["unjoined"].values()):
                 logger.warning(

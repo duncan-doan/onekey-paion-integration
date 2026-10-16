@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from integration import queue_sync, scheduled_sync
+from integration import queue_sync
 from integration.queue_sync import (
     FULL_MAX_DELIVERIES,
     OUTCOME_DONE,
@@ -131,6 +131,8 @@ def test_dispatch_runs_one_codebase_and_skips_a_busy_delta(monkeypatch):
         "run_id": None,
         # Stops before Flex Consumption's 60-minute scale-in limit.
         "time_budget": 45 * 60,
+        "part": 1,
+        "queued_at": None,
     }
 
 
@@ -142,7 +144,9 @@ def test_dispatch_runs_a_retry_alone_and_skips_a_busy_codebase(monkeypatch):
         "integration.scheduled_sync.run_from_env", lambda **kwargs: pytest.fail("ran a sync")
     )
     dispatch(SyncQueueMessage(mode="retry", codebase="WDE", retry_limit=10))
-    assert seen == {"codebases": ["WDE"], "limit": 10, "if_busy": IF_BUSY_SKIP, "run_id": None}
+    assert seen == {
+        "codebases": ["WDE"], "limit": 10, "if_busy": IF_BUSY_SKIP, "run_id": None, "part": 1,
+    }
 
 
 def test_dispatch_passes_the_run_to_the_job_trace(monkeypatch):
@@ -187,14 +191,14 @@ def test_dispatch_raises_with_job_and_errors_so_azure_retries(monkeypatch):
 
 
 def test_malformed_message_goes_straight_to_poison(monkeypatch):
-    monkeypatch.setattr(queue_sync, "dispatch", lambda item: pytest.fail("ran"))
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item, **_: pytest.fail("ran"))
     outcome = handle_message(b"not json", 1)
     assert outcome.status == OUTCOME_POISON
     assert outcome.item is None
     assert "Invalid queue message" in outcome.reason
 
 
-def failing_dispatch(item):
+def failing_dispatch(item, **_):
     raise QueueWorkFailed(f"{item.mode} sync failed for codebase {item.codebase}")
 
 
@@ -216,7 +220,7 @@ def test_failed_delta_keeps_every_azure_retry(monkeypatch):
 
 
 def test_busy_full_sync_is_deferred_not_poisoned(monkeypatch):
-    def busy(item):
+    def busy(item, **_):
         raise SyncBusy("WUK", {"ts_jobid": "job-0", "ts_lastheartbeat": "x"})
 
     monkeypatch.setattr(queue_sync, "dispatch", busy)
@@ -229,59 +233,69 @@ RUN_FULL = SyncQueueMessage(
 ).encode()
 
 
+QUEUED = datetime(2026, 10, 14, 15, 26, 40, tzinfo=timezone.utc)
+
+
+def failing_try(tries):
+    def fail(item, **_):
+        raise QueueWorkFailed(f"full sync failed for codebase {item.codebase}", full_sync=True, tries=tries)
+    return fail
+
+
 def test_busy_deliveries_do_not_use_up_a_full_syncs_tries(monkeypatch):
-    # Delivery 1 found WDE busy and started no job; delivery 2 is the first try.
-    monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
-    counted = []
-    monkeypatch.setattr(
-        scheduled_sync,
-        "run_tries_from_env",
-        lambda codebase, run_id, since: counted.append((codebase, run_id, since)) or 1,
-    )
-    queued = datetime(2026, 10, 14, 15, 26, 40)  # Azure's queue time, read as UTC
+    # Delivery 1 found WDE busy; delivery 2 got past the busy check as the
+    # message's first try (run_from_env counts it), so it is retried.
+    monkeypatch.setattr(queue_sync, "dispatch", failing_try(1))
     with pytest.raises(QueueWorkFailed):
-        handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
-    assert counted == [
-        ("WDE", "full-20261014T131500Z-7", queued.replace(tzinfo=timezone.utc))
-    ]
+        handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=QUEUED)
     # The second try fails too, so it is poisoned.
-    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", lambda *args: 2)
-    outcome = handle_message(
-        RUN_FULL, FULL_MAX_DELIVERIES + 1, mode="full", inserted_at=queued
-    )
+    monkeypatch.setattr(queue_sync, "dispatch", failing_try(2))
+    outcome = handle_message(RUN_FULL, FULL_MAX_DELIVERIES + 1, mode="full", inserted_at=QUEUED)
     assert outcome.status == OUTCOME_POISON
 
 
-def test_the_delivery_count_stands_when_the_tries_cannot_be_counted(monkeypatch):
+def test_a_delivery_that_fails_before_starting_is_not_a_try(monkeypatch):
+    # An outage before the busy check: the exception carries no try, so
+    # Azure's maxDequeueCount is what bounds the deliveries.
+    def outage(item, **_):
+        raise RuntimeError("token endpoint unavailable")
+
+    monkeypatch.setattr(queue_sync, "dispatch", outage)
+    with pytest.raises(RuntimeError):
+        handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=QUEUED)
+
+
+def test_a_full_sync_outside_a_timer_run_counts_its_deliveries(monkeypatch):
     monkeypatch.setattr(queue_sync, "dispatch", failing_dispatch)
-    queued = datetime(2026, 10, 14, 15, 26, 40, tzinfo=timezone.utc)
+    manual = '{"mode":"full","codebase":"WDE"}'
+    outcome = handle_message(manual, FULL_MAX_DELIVERIES, mode="full", inserted_at=QUEUED)
+    assert outcome.status == OUTCOME_POISON
+    # Without a queue time there is nothing to count from either.
+    assert handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full").status == OUTCOME_POISON
 
-    def unavailable(*args):
-        raise RuntimeError("Dataverse unavailable")
 
-    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", unavailable)
-    outcome = handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
-    assert outcome.status == OUTCOME_POISON
-    # No job at all means tracing failed, so the jobs tell nothing.
-    monkeypatch.setattr(scheduled_sync, "run_tries_from_env", lambda *args: 0)
-    outcome = handle_message(RUN_FULL, FULL_MAX_DELIVERIES, mode="full", inserted_at=queued)
-    assert outcome.status == OUTCOME_POISON
-    # A manual message has no run to count by.
-    monkeypatch.setattr(
-        scheduled_sync, "run_tries_from_env", lambda *args: pytest.fail("counted")
-    )
-    outcome = handle_message(
-        '{"mode":"full","codebase":"WDE"}', FULL_MAX_DELIVERIES, mode="full", inserted_at=queued
-    )
-    assert outcome.status == OUTCOME_POISON
+def test_the_part_and_queue_time_reach_the_sync(monkeypatch):
+    seen = fake_runner(monkeypatch, {"success": True, "full": {}})
+    body = SyncQueueMessage(
+        mode="full", codebase="WUK", run_id="full-20261101T000000Z-7", part=3
+    ).encode()
+    handle_message(body, 1, mode="full", inserted_at=QUEUED)
+    assert (seen["part"], seen["queued_at"]) == (3, QUEUED)
+
+
+def test_a_failed_full_sync_reports_its_try(monkeypatch):
+    fake_runner(monkeypatch, {"success": False, "tries": 2, "full": {"errors": ["HTTP 400"]}})
+    with pytest.raises(QueueWorkFailed) as caught:
+        dispatch(SyncQueueMessage(mode="full", codebase="WUK", run_id="full-20261101T000000Z-7"))
+    assert caught.value.tries == 2
 
 
 def test_skipped_and_done_outcomes(monkeypatch):
     monkeypatch.setattr(
-        queue_sync, "dispatch", lambda item: {"success": True, "skipped": True}
+        queue_sync, "dispatch", lambda item, **_: {"success": True, "skipped": True}
     )
     assert handle_message('{"mode":"delta","codebase":"WUK"}', 1).status == OUTCOME_SKIPPED
-    monkeypatch.setattr(queue_sync, "dispatch", lambda item: {"success": True, "delta": {}})
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item, **_: {"success": True, "delta": {}})
     outcome = handle_message('{"mode":"delta","codebase":"WUK"}', 1)
     assert outcome.status == OUTCOME_DONE
     assert outcome.result == {"success": True, "delta": {}}
@@ -289,7 +303,7 @@ def test_skipped_and_done_outcomes(monkeypatch):
 
 
 def test_a_message_from_another_queue_is_poisoned(monkeypatch):
-    monkeypatch.setattr(queue_sync, "dispatch", lambda item: pytest.fail("ran"))
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item, **_: pytest.fail("ran"))
     outcome = handle_message('{"mode":"full","codebase":"WUK"}', 1, mode="delta")
     assert outcome.status == OUTCOME_POISON
     assert outcome.item.codebase == "WUK"
@@ -299,7 +313,7 @@ def test_a_message_from_another_queue_is_poisoned(monkeypatch):
 def test_the_queue_mode_runs_a_message_without_one(monkeypatch):
     ran = []
     monkeypatch.setattr(
-        queue_sync, "dispatch", lambda item: ran.append(item.mode) or {"success": True}
+        queue_sync, "dispatch", lambda item, **_: ran.append(item.mode) or {"success": True}
     )
     assert handle_message('{"codebase":"WUK"}', 1, mode="full").status == OUTCOME_DONE
     assert ran == ["full"]
@@ -309,7 +323,7 @@ def test_the_queue_mode_runs_a_message_without_one(monkeypatch):
 
 
 def test_a_finished_retry_queues_its_delta(monkeypatch):
-    monkeypatch.setattr(queue_sync, "dispatch", lambda item: {"success": True, "retry": {}})
+    monkeypatch.setattr(queue_sync, "dispatch", lambda item, **_: {"success": True, "retry": {}})
     outcome = handle_message(
         '{"mode":"retry","codebase":"wnl","choices":false}', 1, mode="retry"
     )
@@ -321,7 +335,7 @@ def test_a_finished_retry_queues_its_delta(monkeypatch):
 
 def test_a_busy_retry_queues_no_delta(monkeypatch):
     monkeypatch.setattr(
-        queue_sync, "dispatch", lambda item: {"success": True, "skipped": True}
+        queue_sync, "dispatch", lambda item, **_: {"success": True, "skipped": True}
     )
     outcome = handle_message('{"mode":"retry","codebase":"WNL"}', 1, mode="retry")
     assert outcome.status == OUTCOME_SKIPPED
@@ -362,7 +376,7 @@ def test_a_promoted_full_sync_that_fails_is_reported_as_full(monkeypatch):
 
 
 def test_a_promoted_full_sync_gets_the_full_sync_delivery_limit(monkeypatch):
-    def promoted_failure(item):
+    def promoted_failure(item, **_):
         raise QueueWorkFailed("full sync failed for codebase WNL", full_sync=True)
 
     monkeypatch.setattr(queue_sync, "dispatch", promoted_failure)

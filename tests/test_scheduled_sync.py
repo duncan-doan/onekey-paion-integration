@@ -116,11 +116,23 @@ def test_active_job_looks_for_a_fresh_running_job_per_codebase():
     assert f"ts_lastheartbeat ge {fresh}" in text
 
 
-def test_active_job_ignores_every_job_of_the_callers_run():
+def test_active_job_ignores_only_the_jobs_the_delivery_replaces():
+    # A delta or full sync replaces its own part's jobs and the run's retry
+    # jobs; the next part of the same run still counts as busy.
     jobs = Jobs()
-    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7")
+    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", part=2)
     assert jobs.queries[0][1]["filter"].endswith(
-        " and not contains(ts_name, 'run=delta-20261012T000001Z-7')"
+        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
+        " and (_ts_retryofjob_value ne null or endswith(ts_name, ' part=2')))"
+    )
+
+
+def test_a_retry_replaces_only_the_runs_retry_jobs():
+    jobs = Jobs()
+    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", retry=True)
+    assert jobs.queries[0][1]["filter"].endswith(
+        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
+        " and _ts_retryofjob_value ne null)"
     )
 
 
@@ -434,7 +446,7 @@ def test_a_redelivered_message_is_not_blocked_by_its_own_run(fake_engine):
     filters = [kwargs["filter"] for _, kwargs in fake_engine.dataverse.queries]
     busy = [text for text in filters if "ts_lastheartbeat ge" in text]
     assert len(busy) == 2
-    assert all("not contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in busy)
+    assert all("not (contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in busy)
 
 
 # -- taking over from a stopped delivery of the same run ------------------------------
@@ -477,6 +489,7 @@ def test_a_redelivered_full_sync_takes_over_its_stopped_job(fake_engine):
     assert takeover == (
         f"ts_codebase eq 'WDE' and ts_status eq {STATUS_RUNNING}"
         f" and contains(ts_name, 'run={RUN}')"
+        " and (_ts_retryofjob_value ne null or endswith(ts_name, ' part=1'))"
     )
     [(entity_set, record_id, payload)] = fake_engine.dataverse.updates
     assert (entity_set, record_id) == (JOBS, "guid-1")
@@ -519,14 +532,50 @@ def test_the_takeover_reports_the_jobs_it_abandoned():
     assert scheduled_sync.abandon_own_jobs(table, ["WDE"], RUN) == ["job-killed"]
 
 
-def test_run_tries_counts_the_runs_jobs_since_the_message_was_queued():
+def test_run_tries_counts_the_parts_jobs_since_the_message_was_queued():
     jobs = Jobs([{"ts_jobid": "a"}, {"ts_jobid": "b"}])
     since = datetime(2026, 10, 14, 15, 26, 40, 500000, tzinfo=timezone.utc)
-    assert scheduled_sync.run_tries(jobs, "wde", RUN, since) == 2
+    assert scheduled_sync.run_tries(jobs, "wde", RUN, 2, since) == 2
     assert jobs.queries[0][1]["filter"] == (
         f"ts_codebase eq 'WDE' and contains(ts_name, 'run={RUN}')"
+        " and endswith(ts_name, ' part=2')"
         " and _ts_retryofjob_value eq null and ts_startedon ge 2026-10-14T15:26:40Z"
     )
+
+
+QUEUED = datetime(2026, 10, 14, 15, 26, 40, tzinfo=timezone.utc)
+
+
+def test_a_full_sync_reports_which_try_it_is(fake_engine):
+    # An earlier delivery of this part was stopped: its job is taken over and
+    # counted, so this is try 2. The count comes after the busy check, so a
+    # delivery that found the codebase busy is not a try.
+    fake_engine.tracer = SimpleNamespace(run_id=None, part=None)
+    fake_engine.dataverse = JobTable(own=[STOPPED])
+    result = run_from_env(
+        codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN, part=2, queued_at=QUEUED
+    )
+    assert result["tries"] == 2
+    assert [record_id for _, record_id, _ in fake_engine.dataverse.updates] == ["guid-1"]
+    assert (fake_engine.tracer.run_id, fake_engine.tracer.part) == (RUN, 2)
+
+
+def test_a_failing_full_sync_reports_its_try_on_the_exception(fake_engine, monkeypatch):
+    fake_engine.tracer = SimpleNamespace(run_id=None, part=None)
+    fake_engine.dataverse = JobTable()
+
+    def outage(engine, **kwargs):
+        raise RuntimeError("OneKey 503")
+
+    monkeypatch.setattr(scheduled_sync, "run_full", outage)
+    with pytest.raises(RuntimeError) as caught:
+        run_from_env(codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN, queued_at=QUEUED)
+    assert caught.value.tries == 1
+
+
+def test_a_full_sync_outside_a_timer_run_reports_no_try(fake_engine):
+    result = run_from_env(codebases=["WUK"], full=True, if_busy=IF_BUSY_RAISE)
+    assert "tries" not in result
 
 
 def test_a_paused_promoted_full_sync_reports_it_at_the_top(monkeypatch):

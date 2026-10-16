@@ -95,12 +95,14 @@ class QueueWorkFailed(RuntimeError):
     """A sync returned an unsuccessful result and should be retried.
 
     ``full_sync`` is True when a full sync ran, including a delta message
-    whose codebase had no completed job yet and was synced in full.
+    whose codebase had no completed job yet and was synced in full. ``tries``
+    is which try of its message a full sync was (see full_sync_tries).
     """
 
-    def __init__(self, message: str, *, full_sync: bool = False):
+    def __init__(self, message: str, *, full_sync: bool = False, tries: int | None = None):
         super().__init__(message)
         self.full_sync = full_sync
+        self.tries = tries
 
 
 @dataclass(frozen=True)
@@ -311,15 +313,16 @@ def run_progress(
     }
 
 
-def dispatch(message: SyncQueueMessage) -> dict:
+def dispatch(message: SyncQueueMessage, queued_at: datetime | None = None) -> dict:
     """Run a queued sync and raise when Azure should retry the message.
 
     A delta or retry whose codebase is busy is skipped: the next delta starts
     from the last window that was covered and pending rows stay Pending, so
     nothing is lost. A busy full sync raises SyncBusy and is retried later.
-    Jobs of the message's own run are not busy: a delivery that was stopped
-    left them Running, and this one takes over. A delta for a codebase with
-    no completed job runs as a full sync (``promoted_to_full`` in the result).
+    The jobs an earlier, stopped delivery of the message left Running are not
+    busy: this delivery takes over (integration.scheduled_sync). A delta for a
+    codebase with no completed job runs as a full sync (``promoted_to_full``
+    in the result). ``queued_at`` is when Azure queued the message.
     """
     from integration.env import time_budget_seconds
     from integration.scheduled_sync import (
@@ -335,6 +338,7 @@ def dispatch(message: SyncQueueMessage) -> dict:
             limit=message.retry_limit,
             if_busy=IF_BUSY_SKIP,
             run_id=message.run_id,
+            part=message.part,
         )
     else:
         result = run_from_env(
@@ -346,6 +350,8 @@ def dispatch(message: SyncQueueMessage) -> dict:
             sync_choices=message.choices,
             run_id=message.run_id,
             time_budget=time_budget_seconds(),
+            part=message.part,
+            queued_at=queued_at,
         )
     if result.get("skipped") or result.get("paused"):
         return result
@@ -357,6 +363,7 @@ def dispatch(message: SyncQueueMessage) -> dict:
             f"{ran} sync failed for codebase {message.codebase}: "
             f"job={job_ids(detail)} errors={errors[:500] or 'none recorded'}",
             full_sync=ran == "full",
+            tries=result.get("tries"),
         )
     return result
 
@@ -381,32 +388,23 @@ def _delivery_limit(item: SyncQueueMessage, exc: BaseException) -> int | None:
 
 
 def full_sync_tries(
-    item: SyncQueueMessage, dequeue_count: int, inserted_at: datetime | None
+    item: SyncQueueMessage,
+    dequeue_count: int,
+    inserted_at: datetime | None,
+    exc: BaseException,
 ) -> int:
     """How many deliveries of a full sync message started the work.
 
-    A busy full sync raises SyncBusy before it starts a job, and Azure counts
-    that delivery too. Every try writes a job named with its run, so the
-    run's jobs for the codebase since the message was queued are its tries.
-    Without a run, a queue time or any such job (tracing failed), the dequeue
-    count stands.
+    A busy full sync raises SyncBusy before it starts, and Azure counts that
+    delivery too. run_from_env counts the tries once past the busy check and
+    reports the number on the exception (``tries``); a delivery that failed
+    before then carries none and is not a try. Without a run or a queue time
+    (a manual message), the dequeue count stands.
     """
     if item.mode != "full" or not item.run_id or inserted_at is None:
         return dequeue_count
-    from integration.scheduled_sync import run_tries_from_env
-
-    if inserted_at.tzinfo is None:
-        inserted_at = inserted_at.replace(tzinfo=timezone.utc)
-    try:
-        tries = run_tries_from_env(item.codebase, item.run_id, inserted_at)
-    except Exception:  # noqa: BLE001 — fall back to the dequeue count
-        logger.warning(
-            "Could not count the tries of %s; using the delivery count",
-            item.codebase,
-            exc_info=True,
-        )
-        return dequeue_count
-    return min(tries, dequeue_count) if tries else dequeue_count
+    tries = getattr(exc, "tries", None)
+    return min(tries, dequeue_count) if tries else 0
 
 
 def handle_message(
@@ -419,7 +417,7 @@ def handle_message(
 
     ``mode`` is the mode of the queue the message came from: a body without
     a mode takes it, and a body with another mode is poisoned.
-    ``inserted_at`` is when the message was queued, to tell a full sync's
+    ``inserted_at`` is when Azure queued the message, to tell a full sync's
     tries from its busy deliveries (full_sync_tries). Returns the outcome, or
     raises to make Azure retry the message.
     """
@@ -443,18 +441,19 @@ def handle_message(
     )
     next_delta = delta_after(item) if item.mode == "retry" else None
     try:
-        result = dispatch(item)
+        result = dispatch(item, queued_at=inserted_at)
     except SyncBusy as exc:
         logger.warning("Queue work deferred: %s", exc)
         raise
     except Exception as exc:
         limit = _delivery_limit(item, exc)
         if limit and dequeue_count >= limit:
-            tries = full_sync_tries(item, dequeue_count, inserted_at)
+            tries = full_sync_tries(item, dequeue_count, inserted_at, exc)
             if tries < limit:
                 logger.warning(
                     "Full sync for %s failed on delivery %d, try %d of %d; "
-                    "earlier deliveries found it busy, so retrying",
+                    "the other deliveries found it busy or stopped before it started, "
+                    "so retrying",
                     item.codebase,
                     dequeue_count,
                     tries,

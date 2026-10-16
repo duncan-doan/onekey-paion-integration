@@ -25,12 +25,15 @@ appear in a later delta, so step 1 is what retries it.
 
 Queue workers run one codebase at a time and check active_job first. This is
 a best-effort busy check; simultaneous starts still need an atomic lease. A
-scheduled run does not wait for its own jobs: it chains each codebase's work
-(retry, then delta, then each continuation part), so a job of the same run
-still Running for that codebase was left by a delivery the platform killed.
-The delivery that takes over marks it Abandoned (abandon_own_jobs). The time
-budget (SYNC_TIME_BUDGET_MINUTES) keeps the new delivery under the 60-minute
-scale-in limit.
+delivery does not wait for its own earlier tries: a job of the same run and
+part (part_marker ends its ts_name) still Running was left by a delivery the
+platform killed, and so was a retry job of the run when a delta or full sync
+starts, since a codebase's retry ends before its delta is queued
+(own_jobs_filter). The delivery that takes over marks them Abandoned
+(abandon_own_jobs). Any other live job, including the next part of the same
+run, still makes the codebase busy. The time budget
+(SYNC_TIME_BUDGET_MINUTES) keeps the new delivery under the 60-minute scale-in
+limit.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from integration.job_trace import (
     TRIGGER_TIMER,
     clip,
     job_codebase,
+    part_marker,
     run_marker,
 )
 from integration.retry_sync import resolve_pending_for_ids, retry_pending_failures
@@ -214,26 +218,41 @@ def delta_window(
     return fallback, iso_to
 
 
+def own_jobs_filter(run_id: str, part: int = 1, *, retry: bool = False) -> str:
+    """OData filter for the jobs a delivery of ``run_id`` replaces (module docstring).
+
+    A retry message replaces the run's retry jobs. A delta or full sync
+    message replaces its own part's jobs and the run's retry jobs.
+    """
+    marker = f"contains(ts_name, '{escape_odata(run_marker(run_id))}')"
+    if retry:
+        return f"{marker} and _ts_retryofjob_value ne null"
+    return (
+        f"{marker} and (_ts_retryofjob_value ne null"
+        f" or endswith(ts_name, ' {escape_odata(part_marker(part))}'))"
+    )
+
+
 def active_job(
     dataverse,
     codebases: list[str],
     *,
     now: datetime | None = None,
     own_run: str | None = None,
+    part: int = 1,
+    retry: bool = False,
 ) -> dict | None:
     """Return a live Running job for any of these codebases, or None.
 
     Live means its heartbeat is newer than ACTIVE_JOB_HEARTBEAT. A job killed
     by a timeout or a platform restart stays Running, but its heartbeat
-    stops, so it no longer blocks the next run. Jobs of ``own_run`` are
-    ignored (see the module docstring), so a killed delivery blocks neither
-    its redelivery nor the work queued after it.
+    stops, so it no longer blocks the next run. The jobs a delivery of
+    ``own_run`` replaces (own_jobs_filter) are ignored, so a killed delivery
+    does not block its own redelivery.
     """
     fresh = (now or datetime.now(timezone.utc)) - ACTIVE_JOB_HEARTBEAT
     own_jobs = (
-        f" and not contains(ts_name, '{escape_odata(run_marker(own_run))}')"
-        if own_run
-        else ""
+        f" and not ({own_jobs_filter(own_run, part, retry=retry)})" if own_run else ""
     )
     for codebase in codebases:
         rows = dataverse.retrieve_multiple(
@@ -254,16 +273,24 @@ def active_job(
     return None
 
 
-def abandon_own_jobs(dataverse, codebases: list[str], run_id: str) -> list[str]:
-    """Mark the Running jobs of ``run_id`` for these codebases Abandoned.
+def abandon_own_jobs(
+    dataverse,
+    codebases: list[str],
+    run_id: str,
+    part: int = 1,
+    *,
+    retry: bool = False,
+) -> list[str]:
+    """Mark the Running jobs this delivery replaces Abandoned (own_jobs_filter).
 
     They were left by a delivery the platform killed (see the module
     docstring). Each keeps its counts; it ends at its last heartbeat, when it
     stopped, and its error summary says it was abandoned. Returns their
     ts_jobid. A row that cannot be updated stays Running and is logged; it no
-    longer blocks this run either way.
+    longer blocks this delivery either way.
     """
     marker = run_marker(run_id)
+    own = own_jobs_filter(run_id, part, retry=retry)
     abandoned = []
     for codebase in codebases:
         rows = dataverse.retrieve_multiple(
@@ -278,7 +305,7 @@ def abandon_own_jobs(dataverse, codebases: list[str], run_id: str) -> list[str]:
             filter=(
                 f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
                 f" and ts_status eq {STATUS_RUNNING}"
-                f" and contains(ts_name, '{escape_odata(marker)}')"
+                f" and {own}"
             ),
         )
         for row in rows or []:
@@ -315,12 +342,12 @@ def abandon_own_jobs(dataverse, codebases: list[str], run_id: str) -> list[str]:
     return abandoned
 
 
-def run_tries(dataverse, codebase: str, run_id: str, since: datetime) -> int:
-    """Jobs ``run_id`` started for the codebase at or after ``since``.
+def run_tries(dataverse, codebase: str, run_id: str, part: int, since: datetime) -> int:
+    """Jobs of ``run_id`` and ``part`` started for the codebase at or after ``since``.
 
-    Every delivery that starts work writes one, so counted from when a
-    message was queued this is how many deliveries of it got past the busy
-    check. Retry jobs are left out.
+    Every delivery that gets past the busy check writes one, so counted from
+    when a message was queued this is how many deliveries of it started the
+    work. Retry jobs are left out.
     """
     rows = dataverse.retrieve_multiple(
         JOBS,
@@ -328,23 +355,12 @@ def run_tries(dataverse, codebase: str, run_id: str, since: datetime) -> int:
         filter=(
             f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
             f" and contains(ts_name, '{escape_odata(run_marker(run_id))}')"
+            f" and endswith(ts_name, ' {escape_odata(part_marker(part))}')"
             " and _ts_retryofjob_value eq null"
             f" and ts_startedon ge {_iso(since)}"
         ),
     )
     return len(rows or [])
-
-
-def run_tries_from_env(codebase: str, run_id: str, since: datetime) -> int:
-    """run_tries on a Dataverse client built from the environment."""
-    from dataverse import DataverseClient, DataverseConfig
-
-    load_env()
-    dataverse = DataverseClient(DataverseConfig.from_env())
-    try:
-        return run_tries(dataverse, codebase, run_id, since)
-    finally:
-        dataverse.close()
 
 
 def _retry_each_codebase(
@@ -649,22 +665,26 @@ def _busy(
     if_busy: str | None,
     job: str,
     run_id: str | None = None,
+    part: int = 1,
 ) -> dict | None:
     """Apply ``if_busy`` when a live job is syncing one of the codebases.
 
     Returns the skipped result for ``"skip"``, raises SyncBusy for ``"raise"``,
-    and returns None when nothing is running or ``if_busy`` is None. Jobs of
-    the same scheduled run (``run_id``) do not count: they are marked
-    Abandoned and this delivery takes over.
+    and returns None when nothing is running or ``if_busy`` is None. The jobs
+    this delivery of ``run_id`` replaces do not count: they are marked
+    Abandoned and this delivery takes over (see the module docstring).
     """
     if not if_busy:
         return None
+    retry = job == "retry"
     if run_id:
         try:
-            abandon_own_jobs(engine.dataverse, codebases, run_id)
+            abandon_own_jobs(engine.dataverse, codebases, run_id, part, retry=retry)
         except Exception:  # noqa: BLE001 — active_job ignores them anyway
             logger.warning("Could not look for stopped jobs of run %s", run_id, exc_info=True)
-    running = active_job(engine.dataverse, codebases, own_run=run_id)
+    running = active_job(
+        engine.dataverse, codebases, own_run=run_id, part=part, retry=retry
+    )
     if not running:
         return None
     if if_busy == IF_BUSY_SKIP:
@@ -677,6 +697,36 @@ def _busy(
         )
         return {"success": True, "skipped": True, "busy_job": running.get("ts_jobid")}
     raise SyncBusy(running["codebase"], running)
+
+
+def _full_sync_try(
+    engine,
+    codebases: list[str],
+    run_id: str | None,
+    part: int,
+    queued_at: datetime | None,
+) -> int | None:
+    """Which try of its queue message this full sync is, or None outside a timer run.
+
+    Counted after the busy check, from the jobs earlier deliveries of the
+    message started (run_tries): a delivery that found the codebase busy, or
+    failed before getting here, started none and is not a try. When the jobs
+    cannot be read this delivery counts as the first, and Azure's
+    maxDequeueCount still bounds the deliveries.
+    """
+    if not run_id or queued_at is None:
+        return None
+    if queued_at.tzinfo is None:
+        queued_at = queued_at.replace(tzinfo=timezone.utc)
+    try:
+        return run_tries(engine.dataverse, codebases[0], run_id, part, queued_at) + 1
+    except Exception:  # noqa: BLE001 — the count only decides when to stop retrying
+        logger.warning(
+            "Could not count the earlier tries of run %s; counting this one only",
+            run_id,
+            exc_info=True,
+        )
+        return 1
 
 
 def run_from_env(
@@ -695,6 +745,8 @@ def run_from_env(
     sync_choices: bool = True,
     run_id: str | None = None,
     time_budget: float | None = None,
+    part: int = 1,
+    queued_at: datetime | None = None,
 ) -> dict:
     """Build the OneKey and Dataverse clients from the environment and run the job.
 
@@ -711,11 +763,16 @@ def run_from_env(
     without running, ``"raise"`` raises :class:`SyncBusy`, and None (the
     default, for the CLI) does not check.
 
-    ``run_id`` names the scheduled run in each job's ts_name (see run_report).
+    ``run_id`` names the scheduled run in each job's ts_name (see run_report),
+    and ``part`` the queue message's part.
 
     ``time_budget`` (seconds from now) makes the run stop between batches once
     it is spent and return with ``paused`` set; the queue worker then queues a
     continuation. None (the CLI) runs to the end.
+
+    ``queued_at`` is when the queue message was queued. A full sync of a
+    timer run then reports which try of that message it is, as ``tries`` on
+    its result or on the exception it raises (_full_sync_try).
     """
     deadline = time.monotonic() + time_budget if time_budget else None
     selected = codebases or ["WUK"]
@@ -723,18 +780,29 @@ def run_from_env(
         engine.deadline = deadline
         if run_id:
             engine.tracer.run_id = run_id
+            engine.tracer.part = part
         if not dry_run:
-            skipped = _busy(engine, selected, if_busy, "full" if full else "delta", run_id)
+            skipped = _busy(
+                engine, selected, if_busy, "full" if full else "delta", run_id, part
+            )
             if skipped:
                 return skipped
         if full:
-            return run_full(
-                engine,
-                codebases=selected,
-                dry_run=dry_run,
-                trigger=trigger,
-                sync_choices=sync_choices,
-            )
+            tries = None if dry_run else _full_sync_try(engine, selected, run_id, part, queued_at)
+            try:
+                result = run_full(
+                    engine,
+                    codebases=selected,
+                    dry_run=dry_run,
+                    trigger=trigger,
+                    sync_choices=sync_choices,
+                )
+            except Exception as exc:
+                exc.tries = tries
+                raise
+            if tries is not None:
+                result["tries"] = tries
+            return result
         if not retry:
             return run_delta(
                 engine,
@@ -767,18 +835,21 @@ def retry_from_env(
     bulk_batch_size: int | None = None,
     if_busy: str | None = None,
     run_id: str | None = None,
+    part: int = 1,
 ) -> dict:
     """Build the clients from the environment and replay pending failures only.
 
-    ``if_busy`` and ``run_id`` work as in run_from_env. The retry queue skips a
-    busy codebase: its failure rows stay Pending for the next run.
+    ``if_busy``, ``run_id`` and ``part`` work as in run_from_env. The retry
+    queue skips a busy codebase: its failure rows stay Pending for the next
+    run.
     """
     selected = codebases or ["WUK"]
     with engine_from_env(config_dir, bulk_batch_size) as engine:
         if run_id:
             engine.tracer.run_id = run_id
+            engine.tracer.part = part
         if not dry_run:
-            skipped = _busy(engine, selected, if_busy, "retry", run_id)
+            skipped = _busy(engine, selected, if_busy, "retry", run_id, part)
             if skipped:
                 return skipped
         return run_retry(
