@@ -9,10 +9,25 @@ from .exceptions import OneKeyConfigError
 
 # The three syndicated OneKey environments, per the "START HERE" guide 6.1.1.
 ENVIRONMENTS = {
-    "prd": "https://okws.ok.imshealth.com",
+    "prod": "https://okws.ok.imshealth.com",
     "uat": "https://okws-uat.onekey.iqvia.com",
     "qa": "https://okws-qa.ok.imshealth.com",
 }
+
+
+def is_production(environ=None, prefix="ONEKEY_") -> bool:
+    """True when the settings point at OneKey production.
+
+    ``<prefix>BASE_URL`` wins, as in :meth:`OneKeyConfig.from_env`; otherwise
+    ``<prefix>ENV``. ``prd``, the name before ``prod``, is not a valid
+    ``ONEKEY_ENV`` any more (from_env rejects it), but it plainly means
+    production, so it counts.
+    """
+    env = os.environ if environ is None else environ
+    base_url = str(env.get(f"{prefix}BASE_URL") or "").strip().rstrip("/").lower()
+    if base_url:
+        return base_url == ENVIRONMENTS["prod"]
+    return str(env.get(f"{prefix}ENV") or "").strip().lower() in ("prod", "prd")
 
 
 @dataclass(frozen=True)
@@ -104,7 +119,7 @@ class OneKeyConfig:
         """Build a config from environment variables.
 
         Reads ``<prefix>BASE_URL``, ``<prefix>USERNAME``, ``<prefix>PASSWORD``
-        and ``<prefix>CONNECTOR_ID``. ``<prefix>ENV`` (``prd``/``uat``/``qa``)
+        and ``<prefix>CONNECTOR_ID``. ``<prefix>ENV`` (``prod``/``uat``/``qa``)
         is accepted instead of an explicit base URL.
         """
         base_url = os.environ.get(f"{prefix}BASE_URL")

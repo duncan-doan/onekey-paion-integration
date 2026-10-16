@@ -1,0 +1,127 @@
+# Deploys to the PRODUCTION Function App func-onekey-d365-prod.
+# Docs for the Azure Functions deploy action: https://github.com/azure/functions-action
+#
+# Manual only (Actions > this workflow > Run workflow). A deploy restarts the
+# app and stops any sync that is running, so a person picks the moment: check
+# Integration Jobs in prod for a Running job with a recent heartbeat first.
+# Run it from a release/* branch or a v* tag, after the same changes have run
+# on func-onekey-d365-test (develop deploys there through
+# release-v0.1_func-onekey-d365-test.yml).
+#
+# Login is OpenID Connect, not a publish profile: the prod app has SCM basic
+# auth turned off. One-time setup, before the first run:
+#   1. An Entra app registration (or user-assigned managed identity) with a
+#      federated credential for GitHub Actions: organization TruesonGithub,
+#      repository onekey-paion-integration, entity type Environment, name
+#      production (subject repo:TruesonGithub/onekey-paion-integration:environment:production).
+#   2. The role Website Contributor for it on func-onekey-d365-prod.
+#   3. Secrets AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID on
+#      the GitHub environment "production". These are ids, not passwords.
+#   4. Required reviewers on that environment, so each deploy waits for approval.
+
+name: Deploy to PRODUCTION - func-onekey-d365-prod
+
+on:
+  workflow_dispatch:
+
+# One deployment at a time; a second run waits for the first.
+concurrency:
+  group: deploy-func-onekey-d365-prod
+  cancel-in-progress: false
+
+env:
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  PYTHON_VERSION: '3.11' # the app runs Python 3.11
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Only release branches and version tags
+        if: ${{ !startsWith(github.ref, 'refs/heads/release/') && !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::Deploy production from a release/* branch or a v* tag, not $REF"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      # Offline tests; tests/test_live.py skips itself without OneKey credentials.
+      - name: Run tests
+        run: pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Source only. The package does not carry the dependencies: the deploy
+      # step asks Azure to install requirements.txt (remote-build). Without
+      # that, the app starts with no `requests` and loads no functions.
+      - name: Zip artifact for deployment
+        run: >
+          zip -r release.zip .
+          -x '.git/*' '.github/*' 'tests/*' 'docs/*' 'scripts/*' 'output/*' 'logs/*'
+          '*.md' '.env*' 'local.settings.json' '*__pycache__*' '*.pyc'
+          '.python_packages/*' '.vscode/*' '.pytest_cache/*' '.ruff_cache/*' '*.DS_Store'
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-app
+          path: release.zip
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, build] # a failing test blocks the deploy
+    timeout-minutes: 30 # the remote build installs requirements.txt in Azure
+    environment:
+      name: production
+    permissions:
+      id-token: write # OIDC token for azure/login
+      contents: read
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: python-app
+
+      - name: Unzip artifact for deployment
+        run: |
+          unzip -q release.zip
+          rm release.zip
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Flex Consumption has no deployment slots, so no slot-name. Without a
+      # publish profile the action deploys with the identity logged in above.
+      - name: 'Deploy to Azure Functions'
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
+        with:
+          app-name: 'func-onekey-d365-prod'
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          sku: 'flexconsumption'
+          remote-build: true

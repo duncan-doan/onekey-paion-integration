@@ -3,6 +3,8 @@
 sample_ok_to_dv upserts a few OneKey HCOs and their related data to Dataverse,
 through the same engine phases as the full sync. It is a small end-to-end
 check: a failure there is a connectivity, configuration or mapping problem.
+Only a test app has it: an app whose OneKey settings point at production
+(ONEKEY_ENV prod, or ONEKEY_BASE_URL the production URL) does not register it.
 
 scheduled_onekey_full (monthly) and scheduled_onekey_delta (daily) sync the
 choice options once, then enqueue one work item per codebase: full syncs on
@@ -42,6 +44,7 @@ import azure.functions as func
 
 from integration import load_env
 from onekey import OneKeyError
+from onekey.config import is_production
 
 app = func.FunctionApp()
 
@@ -70,9 +73,6 @@ def _stats(result: dict, key: str) -> str:
     )
 
 
-# Noon on the 1st, not midnight: the monthly full syncs are enqueued at 00:00
-# and the sample would otherwise start in the same second, on the same records.
-@app.timer_trigger(schedule="0 0 12 1 * *", arg_name="timer", run_on_startup=False)
 def sample_ok_to_dv(timer: func.TimerRequest) -> None:
     """Monthly (or on demand from Test/Run): upsert a few OneKey HCOs and their related data.
 
@@ -128,6 +128,16 @@ def sample_ok_to_dv(timer: func.TimerRequest) -> None:
         logging.exception("sample_ok_to_dv_onekey_failed")
     except Exception:
         logging.exception("sample_ok_to_dv_unexpected_error")
+
+
+# The sample writes real records, so only a test app registers it (see the
+# module docstring). Noon on the 1st, not midnight: the monthly full syncs are
+# enqueued at 00:00 and the sample would otherwise start in the same second,
+# on the same records.
+if not is_production():
+    app.timer_trigger(schedule="0 0 12 1 * *", arg_name="timer", run_on_startup=False)(
+        sample_ok_to_dv
+    )
 
 
 def _scheduled_codebases(job: str, timer: func.TimerRequest) -> list[str] | None:

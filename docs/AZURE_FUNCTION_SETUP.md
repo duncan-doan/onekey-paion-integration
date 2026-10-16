@@ -256,7 +256,7 @@ az functionapp config appsettings set \
 | Setting | Required | Purpose |
 | --- | --- | --- |
 | `AzureWebJobsStorage` | yes | Set by `az functionapp create`. Queue connection. |
-| `ONEKEY_ENV` or `ONEKEY_BASE_URL` | yes | `uat`, `prd`, `qa`, or a full base URL. The URL wins. |
+| `ONEKEY_ENV` or `ONEKEY_BASE_URL` | yes | `uat`, `prod`, `qa`, or a full base URL. The URL wins. |
 | `ONEKEY_USERNAME`, `ONEKEY_PASSWORD`, `ONEKEY_CONNECTOR_ID` | yes | OneKey HTTP Basic credentials. |
 | `DATAVERSE_URL`, `DATAVERSE_TENANT_ID`, `DATAVERSE_CLIENT_ID`, `DATAVERSE_CLIENT_SECRET` | yes | Dataverse app registration. |
 | `SYNC_SCHEDULE` | for scheduled sync | `true` enables the delta and full timers. |

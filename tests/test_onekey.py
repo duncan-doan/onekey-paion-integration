@@ -840,3 +840,37 @@ def test_a_lost_packet_is_recovered_when_the_last_packet_omits_the_transaction_i
     records = list(OneKeyClient(session).iter_population(cod_base="WDE"))
     assert [r["onekeyEid"] for r in records] == ["A", "B", "C"]
     assert session._session.calls[2]["json"]["transactionUniqueIdentifier"] == "tx1"
+
+
+# -- production check (function_app registers sample_ok_to_dv outside it) ---------
+
+
+def test_is_production_reads_the_environment_name():
+    from onekey.config import is_production
+
+    assert is_production({"ONEKEY_ENV": "prod"})
+    assert is_production({"ONEKEY_ENV": " PRD "})  # the old name: not valid for from_env, still production
+    assert not is_production({"ONEKEY_ENV": "uat"})
+    assert not is_production({})
+
+
+def test_is_production_prefers_the_base_url():
+    from onekey.config import ENVIRONMENTS, is_production
+
+    assert is_production({"ONEKEY_BASE_URL": ENVIRONMENTS["prod"] + "/", "ONEKEY_ENV": "uat"})
+    assert not is_production({"ONEKEY_BASE_URL": ENVIRONMENTS["uat"], "ONEKEY_ENV": "prod"})
+
+
+def test_from_env_reaches_production_as_prod(monkeypatch):
+    from onekey.config import ENVIRONMENTS, OneKeyConfig
+    from onekey.exceptions import OneKeyConfigError
+
+    for name, value in {"ONEKEY_USERNAME": "user", "ONEKEY_PASSWORD": "secret",
+                        "ONEKEY_CONNECTOR_ID": "494"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("ONEKEY_BASE_URL", raising=False)
+    monkeypatch.setenv("ONEKEY_ENV", "prod")
+    assert OneKeyConfig.from_env().base_url == ENVIRONMENTS["prod"]
+    monkeypatch.setenv("ONEKEY_ENV", "prd")
+    with pytest.raises(OneKeyConfigError, match="prod, qa, uat"):
+        OneKeyConfig.from_env()

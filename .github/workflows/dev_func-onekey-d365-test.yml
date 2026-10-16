@@ -6,7 +6,7 @@ name: Build and deploy Python project to Azure Function App - func-onekey-d365-t
 on:
   push:
     branches:
-      - 'release/v0.1'
+      - 'develop'
     # A deploy restarts the app and stops any sync that is running, so a
     # push that only changes documentation does not deploy.
     paths-ignore:
