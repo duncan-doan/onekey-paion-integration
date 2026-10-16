@@ -412,19 +412,22 @@ traces
 
 ### Delta contact changes not applied
 
-A delta writes a contact only when the individual, its main activity and the
-workplace all came in its window. Each delta job records the rest in
-`ts_phasecounts` as `"unjoined":{"activities":…,"individuals":…}` and logs a
-warning. Watch it for a couple of weeks before deciding whether those changes
-need replaying (they otherwise wait for the next monthly full sync):
+A delta writes a contact for every individual that changed, with what came in
+its window: an existing contact is updated (its parent moves only through a
+main activity in the window), a new one is created only at a workplace in the
+window or already an account. Two kinds of change still wait for the next
+monthly full sync, and each delta job records them in `ts_phasecounts` as
+`"unjoined":{"activities":…,"individuals":…}` and logs a warning:
+activities whose individual did not change (such as a move to another
+workplace), and new individuals with no activity at such a workplace.
 
 ```kusto
 traces
 | where timestamp > ago(14d)
 | where message startswith "Delta changes not applied to contacts"
 | extend codebase = extract(@"codbase=(\w+)", 1, message),
-         activities = toint(extract(@"activities_without_individual_or_workplace=(\d+)", 1, message)),
-         individuals = toint(extract(@"individuals_without_activity=(\d+)", 1, message))
+         activities = toint(extract(@"activities_without_individual=(\d+)", 1, message)),
+         individuals = toint(extract(@"new_individuals_without_workplace=(\d+)", 1, message))
 | summarize deltas = count(), activities = sum(activities), individuals = sum(individuals) by codebase
 ```
 

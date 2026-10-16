@@ -292,9 +292,9 @@ def test_the_cli_dry_run_mock_passes_the_schema_check(tmp_path):
 
 
 def test_a_delta_counts_contact_changes_it_cannot_apply(tmp_path):
-    # OneKey sends INDIVIDUAL, ACTIVITY and WORKPLACE as separate results. A
-    # contact is only written when all three are in the window, so the rest
-    # is counted on the job instead of disappearing into an INFO line.
+    # An activity whose individual did not change (WUKI2) and a new individual
+    # with no activity (WUKI9) are not written; both are counted on the job
+    # instead of disappearing into an INFO line.
     records = [
         POPULATION[0],  # WUKH1
         {"entityType": "INDIVIDUAL", "individual": {"individualEid": "WUKI9", "lastName": "Alone"}},
@@ -313,6 +313,131 @@ def test_a_delta_counts_contact_changes_it_cannot_apply(tmp_path):
     assert result["contacts"]["processed"] == 0
     final = dataverse.updated[-1][2]
     assert '"unjoined":{"activities":1,"individuals":1}' in final["ts_phasecounts"]
+
+
+# -- delta contacts from what changed ----------------------------------------------
+
+DELTA_WINDOW = ("2026-10-15T00:46:00Z", "2026-10-16T03:24:00Z")
+PARENT = "parentcustomerid_account@odata.bind"
+
+
+class KnownDataverse(BulkDataverse):
+    """Already holds some contacts and accounts; keeps each upserted record."""
+
+    def __init__(self, contacts=(), accounts=(), **kwargs):
+        super().__init__(**kwargs)
+        self.rows = {
+            "contacts": {eid: {"contactid": f"contact-{eid}"} for eid in contacts},
+            "accounts": {eid: {"accountid": f"account-{eid}"} for eid in accounts},
+        }
+        self.records = {}
+
+    def find_many_by_field(self, entity_set, match_field, values, select=None, **kwargs):
+        if self.lookup_error:
+            raise self.lookup_error
+        table = self.rows.get(entity_set, {})
+        return {value: table[value] for value in values if value in table}
+
+    def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+        for record in records:
+            self.records[(entity_set, record.get(match_field))] = record
+        return super().bulk_upsert_by_field(entity_set, match_field, records, **kwargs)
+
+    def contacts(self):
+        return {key: record for (entity_set, key), record in self.records.items()
+                if entity_set == "contacts"}
+
+
+def _individual(eid, last_name):
+    return {"entityType": "INDIVIDUAL", "codBase": eid[:3],
+            "individual": {"individualEid": eid, "lastName": last_name}}
+
+
+def _activity(activity_eid, individual_eid, workplace_eid, main=True):
+    # As on UAT: the ACTIVITY's own individual and workplace are empty.
+    return {"entityType": "ACTIVITY", "codBase": individual_eid[:3],
+            "individual": {}, "workplace": {},
+            "activity": {"activityEid": activity_eid, "individualEid": individual_eid,
+                         "workplaceEid": workplace_eid, "isMainActivity": main}}
+
+
+def _delta(tmp_path, dataverse, records, codebase="WNL"):
+    engine, _ = _engine(tmp_path, dataverse, records)
+    return engine.sync_delta(
+        [codebase], *DELTA_WINDOW, sync_picklists=False, sync_activity_affiliations=False
+    )
+
+
+def test_a_delta_updates_a_contact_whose_workplace_did_not_change(tmp_path):
+    # The UAT test of 16 Oct: a last name changed, so OneKey sent the
+    # individual and its main activity but not the activity's workplace.
+    dataverse = KnownDataverse(contacts={"WNLN00001683"}, accounts={"WNLH05419505"})
+    result = _delta(tmp_path, dataverse, [
+        _individual("WNLN00001683", "Test"),
+        _activity("WNLN0000168301", "WNLN00001683", "WNLH05419505"),
+    ])
+    assert result["contacts"]["processed"] == 1
+    assert result["unjoined"] == {"activities": 0, "individuals": 0}
+    contact = dataverse.contacts()["WNLN00001683"]
+    assert contact["lastname"] == "Test"
+    assert contact[PARENT] == "/accounts(account-WNLH05419505)"
+    # The workplace was not in the window, so the department is left as it is.
+    assert "department" not in contact
+
+
+def test_a_delta_moves_the_parent_only_through_the_main_activity(tmp_path):
+    # WDKM00001098 (status Inactive) came with a secondary activity only, and
+    # WDKM00000526 with no activity: both are updated, their parents kept.
+    dataverse = KnownDataverse(
+        contacts={"WDKM00001098", "WDKM00000526"}, accounts={"WDKH00017249"}
+    )
+    result = _delta(tmp_path, dataverse, [
+        _individual("WDKM00001098", "Inactive"),
+        _activity("WDKM0000109801", "WDKM00001098", "WDKH00017249", main=False),
+        _individual("WDKM00000526", "Alone"),
+    ], codebase="WDK")
+    assert result["contacts"]["processed"] == 2
+    contacts = dataverse.contacts()
+    assert set(contacts) == {"WDKM00001098", "WDKM00000526"}
+    assert all(PARENT not in contact for contact in contacts.values())
+
+
+def test_a_delta_creates_a_new_contact_only_at_a_known_workplace(tmp_path):
+    # As the full sync: a new individual needs an activity at a workplace in
+    # the window or already an account.
+    dataverse = KnownDataverse(accounts={"WNLH1"})
+    result = _delta(tmp_path, dataverse, [
+        _individual("WNLN1", "Known"), _activity("WNLN101", "WNLN1", "WNLH1"),
+        _individual("WNLN2", "Outside"), _activity("WNLN201", "WNLN2", "WNLH9"),
+        _individual("WNLN3", "NoActivity"),
+    ])
+    contacts = dataverse.contacts()
+    assert set(contacts) == {"WNLN1"}
+    assert contacts["WNLN1"][PARENT] == "/accounts(account-WNLH1)"
+    assert result["unjoined"] == {"activities": 0, "individuals": 2}
+
+
+def test_a_delta_with_the_workplace_still_sets_the_department(tmp_path):
+    dataverse = KnownDataverse(contacts={"WNLN1"})
+    _delta(tmp_path, dataverse, [
+        {"entityType": "WORKPLACE", "codBase": "WNL",
+         "workplace": {"workplaceEid": "WNLH1", "officialName": "Ziekenhuis",
+                       "usualName": "Cardiologie"}},
+        _individual("WNLN1", "Doe"), _activity("WNLN101", "WNLN1", "WNLH1"),
+    ])
+    contact = dataverse.contacts()["WNLN1"]
+    assert contact["department"] == "Cardiologie"
+    assert PARENT in contact
+
+
+def test_a_failed_contact_lookup_fails_the_delta(tmp_path):
+    # Treating every individual as new would leave existing contacts out, so
+    # the codebase fails and the next delta reads its window again.
+    error = DataverseHTTPError("Service unavailable", status_code=503)
+    dataverse = KnownDataverse(lookup_error=error)
+    result = _delta(tmp_path, dataverse, [_individual("WNLN1", "Doe")])
+    assert result["success"] is False
+    assert dataverse.contacts() == {}
 
 
 # -- time budget -----------------------------------------------------------

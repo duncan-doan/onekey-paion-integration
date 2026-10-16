@@ -2065,6 +2065,68 @@ class DynamicSyncEngine:
         }
         return composed, stats
 
+    def _compose_delta_hcps(
+        self,
+        individuals: dict[str, dict],
+        activities_by_individual: dict[str, dict],
+        workplace_index: dict[str, dict],
+        *,
+        dry_run: bool = False,
+    ) -> tuple[list[dict], int]:
+        """Join one delta's packets into contact rows for every changed individual.
+
+        A delta returns only what changed: an individual whose name changed
+        comes without its activity's workplace, often without the activity
+        too. Each one is still written with what arrived:
+
+        - An individual that is already a contact is updated. Its parent comes
+          from its main activity when that activity is in the window and its
+          workplace is an account; otherwise the parent stays as it is. The
+          transform leaves out fields without a value, so a workplace outside
+          the window leaves the department as it is.
+        - A new individual is created only as the full sync would: through an
+          activity at a workplace in the window or already an account.
+
+        Returns the rows and the number of new individuals left out. A dry run
+        reads nothing from Dataverse, so it treats every individual as an
+        existing contact.
+        """
+        if not dry_run:
+            self._lookup_contacts_bulk(list(individuals))
+            outside_window = set()
+            for individual_eid in individuals:
+                activity_record = activities_by_individual.get(individual_eid) or {}
+                workplace_eid = (activity_record.get("activity") or {}).get("workplaceEid")
+                if workplace_eid and workplace_eid not in workplace_index:
+                    outside_window.add(workplace_eid)
+            self._lookup_accounts_bulk(outside_window)
+
+        composed = []
+        left_out = 0
+        for individual_eid, individual_record in individuals.items():
+            activity_record = activities_by_individual.get(individual_eid)
+            activity = (activity_record or {}).get("activity") or {}
+            workplace_eid = activity.get("workplaceEid")
+            known_workplace = bool(workplace_eid) and (
+                workplace_eid in workplace_index or workplace_eid in self._account_cache
+            )
+            if dry_run or individual_eid in self._contact_cache:
+                # Another activity may be the main one, so only the main
+                # activity moves the parent.
+                if not (known_workplace and activity.get("isMainActivity")):
+                    activity_record = None
+            elif not known_workplace:
+                left_out += 1
+                continue
+            composed.append(
+                compose_hcp_result(
+                    individual_record,
+                    activity_record,
+                    workplace_index.get(workplace_eid) if activity_record else None,
+                )
+            )
+        return composed, left_out
+
     def _sync_hcps(
         self,
         codebase: str,
@@ -2363,47 +2425,36 @@ class DynamicSyncEngine:
                         allowed_workplace_eids=self._contracted_workplace_eids or None,
                     )
 
-            if activities_by_individual:
-                composed = []
-                skipped = 0
-                for individual_eid, activity_record in activities_by_individual.items():
-                    activity = activity_record.get("activity") or {}
-                    workplace_eid = activity.get("workplaceEid")
-                    if individual_eid not in individuals:
-                        skipped += 1
-                        continue
-                    if not workplace_eid or workplace_eid not in workplace_index:
-                        skipped += 1
-                        continue
-                    composed.append(
-                        compose_hcp_result(
-                            individuals.get(individual_eid),
-                            activity_record,
-                            workplace_index.get(workplace_eid),
-                        )
-                    )
-                result["unjoined"]["activities"] = skipped
+            # OneKey sends INDIVIDUAL, ACTIVITY and WORKPLACE as separate
+            # results, the ACTIVITY's own individual and workplace empty
+            # (checked on UAT), and a delta only those that changed. Every
+            # changed individual is written (_compose_delta_hcps). An activity
+            # whose individual did not change, such as a move to another
+            # workplace, is not applied to the contact until the next full
+            # sync; it is counted on the job, as are new individuals outside
+            # the contracted workplaces.
+            result["unjoined"]["activities"] = sum(
+                1 for eid in activities_by_individual if eid not in individuals
+            )
+            if individuals:
+                composed, result["unjoined"]["individuals"] = self._compose_delta_hcps(
+                    individuals,
+                    activities_by_individual,
+                    workplace_index,
+                    dry_run=dry_run,
+                )
                 result["contacts"] = self._sync_hcps(
                     codebase,
                     dry_run=dry_run,
                     composed=composed,
                 )
-
-            # A contact is built from its INDIVIDUAL, main ACTIVITY and WORKPLACE
-            # results; OneKey sends them as separate results with the ACTIVITY's
-            # own individual and workplace empty (checked on UAT). A change that
-            # arrives without the other two in this window is not applied until
-            # the next full sync. Counted on the job so production shows how often.
-            result["unjoined"]["individuals"] = sum(
-                1 for eid in individuals if eid not in activities_by_individual
-            )
             if any(result["unjoined"].values()):
                 logger.warning(
                     msg(
                         "Delta changes not applied to contacts",
                         _ctx(self, codbase=codebase),
-                        activities_without_individual_or_workplace=result["unjoined"]["activities"],
-                        individuals_without_activity=result["unjoined"]["individuals"],
+                        activities_without_individual=result["unjoined"]["activities"],
+                        new_individuals_without_workplace=result["unjoined"]["individuals"],
                     )
                 )
 
