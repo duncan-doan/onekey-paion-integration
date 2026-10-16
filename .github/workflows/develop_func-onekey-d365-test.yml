@@ -1,5 +1,4 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
+# Docs for the Azure Functions deploy action: https://github.com/azure/functions-action
 # More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
 
 name: Build and deploy Python project to Azure Function App - func-onekey-d365-test
@@ -8,18 +7,27 @@ on:
   push:
     branches:
       - 'develop'
+    # A deploy restarts the app and stops any sync that is running, so a
+    # push that only changes documentation does not deploy.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
 
+# One deployment at a time; a newer push waits for the running one.
+concurrency:
+  group: deploy-func-onekey-d365-test
+  cancel-in-progress: false
+
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.11' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  PYTHON_VERSION: '3.11' # the app runs Python 3.11
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
-
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,32 +36,44 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Create and start virtual environment
-        run: |
-          python -m venv venv
-          source venv/bin/activate
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
 
-      # Optional: Add step to run tests here
+      # Offline tests; tests/test_live.py skips itself without OneKey credentials.
+      - name: Run tests
+        run: pytest -q
 
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Source only. The package does not carry the dependencies: the deploy
+      # step asks Azure to install requirements.txt (remote-build). Without
+      # that, the app starts with no `requests` and loads no functions.
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: >
+          zip -r release.zip .
+          -x '.git/*' '.github/*' 'tests/*' 'docs/*' 'scripts/*' 'output/*' 'logs/*'
+          '*.md' '.env*' 'local.settings.json' '*__pycache__*' '*.pyc'
+          '.python_packages/*' '.vscode/*' '.pytest_cache/*' '.ruff_cache/*' '*.DS_Store'
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: |
-            release.zip
-            !venv/
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
-    needs: build
-    
+    needs: [test, build] # a failing test blocks the deploy
+    timeout-minutes: 30 # the remote build installs requirements.txt in Azure
+
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
@@ -62,16 +82,16 @@ jobs:
 
       - name: Unzip artifact for deployment
         run: |
-          unzip release.zip
+          unzip -q release.zip
           rm release.zip
-        
+
+      # Flex Consumption has no deployment slots, so no slot-name.
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
         id: deploy-to-function
         with:
           app-name: 'func-onekey-d365-test'
-          slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_D10178AACCD94084A8434189D8F50484 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_3FFFAEE04382452C8D8AE9F0161677FA }}
           sku: 'flexconsumption'
-        
+          remote-build: true
