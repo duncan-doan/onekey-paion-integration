@@ -102,6 +102,6 @@ jobs:
         with:
           app-name: 'func-onekey-d365-prod'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_C54D2818CBCD4E64B95FFE1AD17F8F4D }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
           sku: 'flexconsumption'
           remote-build: true
