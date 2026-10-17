@@ -112,6 +112,15 @@ def test_affiliation_role_rows_bind_parent_and_role():
     ]
 
 
+def test_an_activity_without_its_id_gets_no_role_rows():
+    # ts_name would be the bare code, so every such activity would update
+    # (and re-parent) the same child row.
+    engine = create_transform_engine(load_mapping_config())
+    flat = flatten_activity_for_affiliation(_activity_record(codBase="WUK"))
+    flat["activityEid"] = ""
+    assert engine.affiliation_role_rows(flat, "affiliation-guid") == []
+
+
 def test_transform_w2w_affiliation_compound_key_has_both_ends():
     engine = create_transform_engine(load_mapping_config())
     edge = {

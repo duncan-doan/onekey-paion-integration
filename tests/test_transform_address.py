@@ -59,3 +59,26 @@ def test_transform_address_skips_incomplete_ids():
     assert engine.transform_address({"workplaceEid": "WUKHCO000A"}) is None
     assert engine.transform_address({"addressEid": "WUKADDR0001"}) is None
     assert engine.compose_address_external_id({}) is None
+
+
+def test_post_office_box_comes_from_the_address_not_the_workplace_id():
+    from onekey.parse import flatten_hco
+
+    engine = create_transform_engine(load_mapping_config())
+    entry = {"address": {"addressEid": "WDEA1", "addressShortLabel": "Hauptstr 1"}}
+    raw = {
+        "codBase": "WDE",
+        "workplace": {
+            "workplaceEid": "WDEH00012345",
+            "officialName": "Klinik",
+            "workplaceAddresses": {"P_1": {**entry, "postalBoxLabel": "Postfach 12 34"}},
+        },
+    }
+    payload = engine.transform_address(flatten_hco(raw), parent_account_id="guid")
+    assert payload["postofficebox"] == "Postfach 12 34"
+
+    # ADR-010 used to read workplaceEid, so every address got its own
+    # workplace id as post-office box.
+    raw["workplace"]["workplaceAddresses"]["P_1"] = entry
+    payload = engine.transform_address(flatten_hco(raw), parent_account_id="guid")
+    assert "postofficebox" not in payload

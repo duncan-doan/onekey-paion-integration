@@ -6,7 +6,7 @@
 # Integration Jobs in prod for a Running job with a recent heartbeat first.
 # Run it from a release/* branch or a v* tag, after the same changes have run
 # on func-onekey-d365-test (develop deploys there through
-# release-v0.1_func-onekey-d365-test.yml).
+# develop_func-onekey-d365-test.yml).
 #
 # Login is OpenID Connect, not a publish profile: the prod app has SCM basic
 # auth turned off. One-time setup, before the first run:

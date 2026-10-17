@@ -638,3 +638,33 @@ def test_a_full_sync_capped_by_max_records_keeps_existing_names(tmp_path):
     key = engine.config.require_key_field("account")
     payloads = {payload[key]: payload for payload in dataverse.account_payloads.values()}
     assert "name" not in payloads["WUKH9"]
+
+
+def test_role_rows_stop_between_batches_when_the_time_budget_is_spent(tmp_path, monkeypatch):
+    # The roles are written after the last affiliation batch. Without a check
+    # there, a phase that ended near the budget wrote every role and ran into
+    # the 60-minute scale-in stop.
+    from integration.dynamic_sync import SyncPaused
+
+    clock = [0.0]
+    monkeypatch.setattr("integration.dynamic_sync.time.monotonic", lambda: clock[0])
+    dataverse = BulkDataverse()
+    original = dataverse.bulk_upsert_by_field
+
+    def slow_upsert(*args, **kwargs):
+        clock[0] += 100
+        return original(*args, **kwargs)
+
+    dataverse.bulk_upsert_by_field = slow_upsert
+    engine, _ = _engine(tmp_path, dataverse)
+    engine.bulk_batch_size = 2
+    engine.deadline = 150
+    rows = [{"ts_name": f"WUKA{n} - 28"} for n in range(6)]
+    affiliations = {"processed": 3}
+
+    with pytest.raises(SyncPaused) as paused:
+        engine._upsert_affiliation_roles(rows, affiliations)
+
+    assert len([u for u in dataverse.upserts if u[0] == "ts_affiliationroles"]) == 2
+    assert paused.value.phase == "activity_affiliations"
+    assert paused.value.stats is affiliations

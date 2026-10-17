@@ -10,7 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .hco_name import nameless_account_name
-from .lookup_sync import odata_lookup_bind, render_external_id
+from .lookup_sync import CatalogUnavailable, odata_lookup_bind, render_external_id
 from .picklist_gaps import PicklistGapCollector
 
 if TYPE_CHECKING:
@@ -405,11 +405,13 @@ class TransformEngine:
         ``AFF-007``..``AFF-016`` each map a code to ``ts_role``, which looks
         up ``ts_role_ref``. ``ts_name`` is ``{activityEid} - {code}`` so a
         rerun updates the same child row. The parent affiliation is the row
-        just written.
+        just written. Without an activityEid there is no row: ``ts_name``
+        would be the bare code, and every such activity would write the same
+        child row.
         """
-        if not affiliation_id:
-            return []
         activity_eid = str(source.get("activityEid") or "").strip()
+        if not affiliation_id or not activity_eid:
+            return []
         rows: list[dict] = []
         seen: set[str] = set()
         for fm in self.config.get_field_mappings("ts_affiliationrole"):
@@ -424,7 +426,7 @@ class TransformEngine:
             if not code or code in seen:
                 continue
             seen.add(code)
-            name = f"{activity_eid} - {code}" if activity_eid else code
+            name = f"{activity_eid} - {code}"
             rows.append(
                 {
                     "ts_name": name[:100],
@@ -696,13 +698,15 @@ class TransformEngine:
                 )
             except Exception as exc:  # noqa: BLE001 — one code must not stop the codebase
                 # Leave the lookup out and report the gap; the record is still
-                # written and keeps whatever value it had.
-                logger.warning(
-                    "Catalog row %s could not be created, lookup %s left out: %s",
-                    external,
-                    mapping.target_field,
-                    exc,
-                )
+                # written and keeps whatever value it had. CatalogUnavailable
+                # repeats a failure the resolver already logged.
+                if not isinstance(exc, CatalogUnavailable):
+                    logger.warning(
+                        "Catalog row %s could not be created, lookup %s left out: %s",
+                        external,
+                        mapping.target_field,
+                        exc,
+                    )
                 self.picklist_gaps.record(
                     table.list_code,
                     code,

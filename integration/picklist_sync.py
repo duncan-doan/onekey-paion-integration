@@ -224,11 +224,13 @@ def sync_type(
         for batch in chunked(ops, batch_size):
             errors = run_batch(dv, batch)
             if errors:
-                summary["errors"] += len(errors)
+                # The changeset is all or nothing, so send each operation on
+                # its own and count the ones that fail again. Subtracting
+                # successes from the batch's count hid a failure that came
+                # before them (it could end at 0).
                 for action, body in batch:
                     try:
                         post_action(dv, action, body)
-                        summary["errors"] = max(0, summary["errors"] - 1)
                     except DataverseHTTPError as exc:
                         logger.error("FAIL %s %s: %s", action, body.get("Value"), exc)
                         summary["errors"] += 1

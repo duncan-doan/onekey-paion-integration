@@ -192,3 +192,21 @@ reads, and Dataverse GETs through a client that refused any other method.
 | English contacts got no preferred language; the deploy's test job failed | `0a6e48e` moved `en` to the `preflanguage` value type, but HCP-011 and the `ts_preferredlanguage` picklist target still used `language` | HCP-011 decodes `preflanguage`, which has a row for every code OneKey sends (en, de, nl, sv, no, da, fi) on the option values contacts already hold, and the picklist target syncs `preflanguage`; tests pin every code and the target |
 | Nameless account names changed on every delta | A delta builds the HCP part of the name from its window, which may miss the workplace's activities or hold a different HCP than the full sync chose | In a delta, a nameless account that already exists keeps its name; a new one gets the built name; the full sync names them all |
 | Failing tests did not stop a deploy | The deploy job needed only `build` | It needs `test` too |
+
+**Fourth review (17 October 2026)**
+
+Dataverse checks ran read-only against the test org, through a client that
+refused any method but GET.
+
+| Finding | Evidence | Change |
+| --- | --- | --- |
+| Every address got its workplace id as post-office box | ADR-010 read `workplaceEid`; all 15,904 test addresses with a post-office box held their own workplace id | ADR-010 reads the address entry's `postalBoxLabel` (`address_postalBox`). The sync leaves empty values out, so the wrong values already stored stay until they are cleared separately |
+| Choice-option failures reported as none | After a failed changeset each option is sent alone, and the count subtracted the successes: with 1 of 10 rejected it ended at 0, and the timer told the workers the choices were synced | Counts the options that fail on their own |
+| Catalog failures repeated for every record | A missing or closed lookup table cost a failing request per record per lookup column: 1,000 accounts made 4,000 | A 403/404 leaves the table alone for the rest of the run, another table failure for 60 s, and a code rejected on its own is not sent again |
+| The schema check never looked at columns | `validate_field_exists` returned True, so a production org without 16 mapped account and contact columns passed and then rejected every record | Each mapped table's columns are read from `EntityDefinitions`: missing on account or contact stops the sync with the list, elsewhere it is a warning, and unreadable metadata skips the check. The job's error summary names the first errors. The test org passes |
+| Role rows ignored the time budget | They are written after the last affiliation batch, with no check | Checked before each role batch; a continuation finds the affiliations unchanged and writes the rest |
+| Role rows of an activity without an id | `ts_name` was the bare code, so all such activities wrote one shared row | No role rows |
+| `ONEKEY_SAMPLE` that is not a number | Raised before the sample's error handling | Logged, and 5 is used |
+
+Run `.venv/bin/python -m pytest -q`: **580 passed, 5 live tests skipped**.
+The new tests fail on the code before these changes.

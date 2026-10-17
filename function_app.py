@@ -88,7 +88,14 @@ def sample_ok_to_dv(timer: func.TimerRequest) -> None:
     from integration.scheduled_sync import active_job, engine_from_env
 
     cod_base = os.environ.get("ONEKEY_CODBASE", "WUK").split(",")[0].strip().upper()
-    limit = int(os.environ.get("ONEKEY_SAMPLE", "5"))
+    try:
+        limit = int(os.environ.get("ONEKEY_SAMPLE") or 5)
+    except ValueError:
+        logging.error(
+            "sample_ok_to_dv_bad_setting ONEKEY_SAMPLE=%r, using 5",
+            os.environ.get("ONEKEY_SAMPLE"),
+        )
+        limit = 5
     logging.info("sample_ok_to_dv_start codbase=%s hcos=%d", cod_base, limit)
 
     try:

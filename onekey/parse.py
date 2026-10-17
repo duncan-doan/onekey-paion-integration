@@ -131,6 +131,7 @@ def _denied_accesses(entity) -> dict:
 _ADDRESS_FIELDS = (
     "addressEid",
     "buildingLabel",
+    "postalBox",
     "street",
     "postalCode",
     "city",
@@ -205,6 +206,7 @@ def flatten_address_entry(entry):
         **empty,
         "addressEid": address.get("addressEid"),
         "buildingLabel": entry.get("buildingLabel") or address.get("buildingLabel"),
+        "postalBox": entry.get("postalBoxLabel") or address.get("postalBoxLabel"),
         "street": street,
         "postalCode": address.get("longPostalCode") or address.get("postalCode"),
         "city": town.get("villageLabel") or town.get("dispatchLabel"),

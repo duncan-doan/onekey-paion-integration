@@ -1912,7 +1912,7 @@ class DynamicSyncEngine:
 
             self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
 
-        roles = self._upsert_affiliation_roles(role_rows)
+        roles = self._upsert_affiliation_roles(role_rows, result)
         logger.info(
             msg(
                 "Affiliation roles written",
@@ -1925,11 +1925,17 @@ class DynamicSyncEngine:
         )
         return result
 
-    def _upsert_affiliation_roles(self, rows: list[dict]) -> dict:
+    def _upsert_affiliation_roles(
+        self, rows: list[dict], affiliations: dict | None = None
+    ) -> dict:
         """Upsert TIH role rows onto the affiliations just written.
 
         The child table has no alternate key. ``ts_name``
-        (``{activityEid} - {role code}``) is the match column.
+        (``{activityEid} - {role code}``) is the match column. The time
+        budget is checked before each batch, as in the affiliation loop;
+        ``affiliations`` is that phase's counts, which a pause keeps. A
+        continuation finds the affiliations unchanged and writes the roles
+        not written yet.
         """
         result = _empty_entity_stats()
         if not rows:
@@ -1937,6 +1943,7 @@ class DynamicSyncEngine:
         entity_set = self._role_entity_set()
         done = 0
         for batch in chunked(rows, self.bulk_batch_size):
+            self._check_deadline("affiliation roles", "activity_affiliations", affiliations)
             try:
                 bulk_results, rejected, unchanged = self._bulk_upsert(
                     entity_set, "ts_name", batch

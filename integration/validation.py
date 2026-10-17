@@ -64,9 +64,12 @@ class ValidationResult:
             self.is_valid = False
     
     def summary(self) -> str:
-        """Return summary string."""
+        """Return summary string, naming the first errors so a job row says what failed."""
         status = "VALID" if self.is_valid else "INVALID"
-        return f"{status}: {len(self.errors)} errors, {len(self.warnings)} warnings, {len(self.info)} info"
+        text = f"{status}: {len(self.errors)} errors, {len(self.warnings)} warnings, {len(self.info)} info"
+        if self.errors:
+            text += " - " + "; ".join(str(error) for error in self.errors[:3])
+        return text
     
     def log_all(self, log_level: int = logging.WARNING):
         """Log all validation issues."""
@@ -400,12 +403,53 @@ class DataverseValidator:
             logger.warning("Entity %s not found or inaccessible: %s", entity_set, e)
             return False
     
-    def validate_field_exists(self, entity_set: str, field_name: str) -> bool:
-        """Check if a field exists on an entity."""
-        # For now, we'll validate during actual data load
-        # Full metadata validation would require EntityDefinitions API
-        return True
-    
+    def entity_columns(self, logical_name: str) -> set[str] | None:
+        """The column logical names of a table; an empty set when it does not exist.
+
+        None when they cannot be read (no metadata access, an outage, a
+        client without ``request``). The column check is then skipped and
+        the writes report what is missing, as before it existed.
+        """
+        if logical_name in self._metadata_cache:
+            return self._metadata_cache[logical_name]
+        request = getattr(self.client, "request", None)
+        if request is None:
+            return None
+        try:
+            body = request(
+                "GET",
+                f"EntityDefinitions(LogicalName='{logical_name}')"
+                "?$select=LogicalName&$expand=Attributes($select=LogicalName)",
+            ).json()
+        except DataverseHTTPError as e:
+            if e.status_code != 404:
+                logger.warning("Could not read the columns of %s: %s", logical_name, e)
+                return None
+            columns: set[str] = set()
+        except Exception as e:  # noqa: BLE001 — the check is best effort
+            logger.warning("Could not read the columns of %s: %s", logical_name, e)
+            return None
+        else:
+            attributes = body.get("Attributes") if isinstance(body, dict) else None
+            if not isinstance(attributes, list):
+                return None
+            columns = {
+                str(attribute["LogicalName"])
+                for attribute in attributes
+                if isinstance(attribute, dict) and attribute.get("LogicalName")
+            }
+        self._metadata_cache[logical_name] = columns
+        return columns
+
+    def validate_field_exists(self, entity_name: str, field_name: str) -> bool:
+        """Check that a column exists on a table, both by logical name.
+
+        True when the columns cannot be read (entity_columns), so a schema
+        that cannot be read does not stop a sync.
+        """
+        columns = self.entity_columns(entity_name)
+        return columns is None or field_name in columns
+
     def validate_schema(self, config: "MappingConfig") -> ValidationResult:
         """Validate that required Dataverse entities and fields exist.
         
@@ -440,10 +484,56 @@ class DataverseValidator:
                     field=None,
                     message=f"Entity set validated: {entity_def.entity_set}",
                 ))
-        
+
+        self._validate_columns(config, result)
+
         logger.info("Dataverse schema validation: %s", result.summary())
         return result
-    
+
+    def _validate_columns(self, config: "MappingConfig", result: ValidationResult) -> None:
+        """Report the mapped columns a table lacks, one entry per table.
+
+        Dataverse rejects every record that carries a missing column. On a
+        required table that is every record, so it is an error and the sync
+        stops here with the list; on another table it is a warning, and that
+        table's phase records the failures.
+        """
+        for entity_def in config.entity_definitions:
+            if entity_def.platform != "Dataverse":
+                continue
+            fields = sorted(
+                {
+                    fm.target_field
+                    for fm in config.get_field_mappings(entity_def.entity_name)
+                    if fm.target_field
+                }
+            )
+            if not fields:
+                continue
+            columns = self.entity_columns(entity_def.entity_name)
+            if columns is None:
+                continue
+            if not columns:
+                # A required table's absence is reported by validate_entity_exists.
+                if not entity_def.is_required:
+                    result.add_error(ValidationError(
+                        error_type="entity_not_found",
+                        severity="warning",
+                        entity=entity_def.entity_name,
+                        field=None,
+                        message=f"Table not found in Dataverse; its rows will fail: {entity_def.entity_set}",
+                    ))
+                continue
+            missing = [name for name in fields if name not in columns]
+            if missing:
+                result.add_error(ValidationError(
+                    error_type="field_not_found",
+                    severity="error" if entity_def.is_required else "warning",
+                    entity=entity_def.entity_name,
+                    field=None,
+                    message=f"Mapped columns not found in Dataverse: {', '.join(missing)}",
+                ))
+
     def check_alternate_key_exists(self, entity_set: str, key_field: str) -> bool:
         """Check if an alternate key is defined on the entity.
         

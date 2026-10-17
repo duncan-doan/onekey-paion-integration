@@ -216,18 +216,34 @@ def lookup_row(
     return row
 
 
+class CatalogUnavailable(RuntimeError):
+    """The catalog row cannot be had now; the lookup is left out (CatalogResolver)."""
+
+
 class CatalogResolver:
     """Insert a code-catalog row when a record lookup cannot find it.
 
     After the row exists, the lookup bind uses that row's id. Tables have no
     alternate key, so ``/ts_specialty_refs(ts_externalid='WDE.SP.01')`` is
     rejected. ``/ts_specialty_refs(<guid>)`` is not.
+
+    A failure is not repeated for every record that carries the code: a
+    table that is missing (404) or closed to this user (403) is left alone
+    for the rest of the run, any other table failure for
+    RETRY_AFTER_SECONDS, and a code Dataverse rejects on its own is not tried
+    again. ensure then raises CatalogUnavailable without a request, and the
+    transform leaves the lookup out and reports it as a gap.
     """
+
+    RETRY_AFTER_SECONDS = 60
 
     def __init__(self, dv):
         self.dv = dv
         self.dry_run = False
         self._ids: dict[tuple[str, str], str] = {}
+        # entity_set -> time.monotonic() to try again, or None: not this run.
+        self._unavailable: dict[str, float | None] = {}
+        self._rejected: set[tuple[str, str]] = set()
 
     def preload(self, tables) -> None:
         """Remember codes already stored, so a later lookup does not insert them."""
@@ -242,7 +258,10 @@ class CatalogResolver:
                 )
             except Exception as exc:  # noqa: BLE001 — one table must not stop the rest
                 logger.error("Could not read %s codes: %s", table.entity_set, exc)
+                if getattr(exc, "status_code", None) in (403, 404):
+                    self._unavailable[table.entity_set] = None
                 continue
+            self._unavailable.pop(table.entity_set, None)
             for row in rows or []:
                 external = str(row.get(table.key_field) or "").strip()
                 record_id = str(row.get(primary_id) or "").strip()
@@ -271,26 +290,31 @@ class CatalogResolver:
         )
         if not row:
             return odata_lookup_bind(table.entity_set, table.key_field, external)
+        self._check_available(table.entity_set, key)
         # A row the preload did not see (its read failed, or another country
         # added it since) keeps its proper label: the stub row carries the raw
         # code as its label, so it is only written when the code is new.
         _, primary_id = _primary_id(table.entity_set)
-        existing = None
-        if hasattr(self.dv, "find_one"):
-            existing = self.dv.find_one(
-                table.entity_set,
-                filter=f"{table.key_field} eq '{escape_odata(external)}'",
-                select=[primary_id],
-            )
-        if existing and existing.get(primary_id):
-            record_id, created = existing[primary_id], False
-        else:
-            record_id, created = self.dv.upsert_by_field(
-                table.entity_set,
-                table.key_field,
-                external,
-                row,
-            )
+        try:
+            existing = None
+            if hasattr(self.dv, "find_one"):
+                existing = self.dv.find_one(
+                    table.entity_set,
+                    filter=f"{table.key_field} eq '{escape_odata(external)}'",
+                    select=[primary_id],
+                )
+            if existing and existing.get(primary_id):
+                record_id, created = existing[primary_id], False
+            else:
+                record_id, created = self.dv.upsert_by_field(
+                    table.entity_set,
+                    table.key_field,
+                    external,
+                    row,
+                )
+        except Exception as exc:
+            self._remember_failure(table.entity_set, key, exc)
+            raise
         self._ids[key] = str(record_id)
         logger.info(
             "Catalog %s %s %s",
@@ -299,6 +323,40 @@ class CatalogResolver:
             external,
         )
         return f"/{table.entity_set}({record_id})"
+
+    def _check_available(self, entity_set: str, key: tuple[str, str]) -> None:
+        """Raise CatalogUnavailable while an earlier failure stands (class docstring)."""
+        if key in self._rejected:
+            raise CatalogUnavailable(f"{key[1]} was rejected earlier in this run")
+        if entity_set not in self._unavailable:
+            return
+        retry_at = self._unavailable[entity_set]
+        if retry_at is None or time.monotonic() < retry_at:
+            raise CatalogUnavailable(f"{entity_set} is unavailable")
+        del self._unavailable[entity_set]
+
+    def _remember_failure(self, entity_set: str, key: tuple[str, str], exc: Exception) -> None:
+        status = getattr(exc, "status_code", None)
+        if status in (403, 404):
+            self._unavailable[entity_set] = None
+            logger.error(
+                "Catalog table %s is unavailable (HTTP %s); its lookups are left "
+                "out for the rest of the run: %s",
+                entity_set,
+                status,
+                exc,
+            )
+        elif status is not None and 400 <= status < 500 and status not in (401, 408, 429):
+            # About this code's row, not the table: other codes go on.
+            self._rejected.add(key)
+        else:
+            self._unavailable[entity_set] = time.monotonic() + self.RETRY_AFTER_SECONDS
+            logger.error(
+                "Catalog table %s failed, trying again in %ds: %s",
+                entity_set,
+                self.RETRY_AFTER_SECONDS,
+                exc,
+            )
 
 
 class CountryResolver:

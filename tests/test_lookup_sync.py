@@ -2,6 +2,8 @@
 
 import json
 
+from dataverse.exceptions import DataverseHTTPError
+from integration import lookup_sync
 from integration.dynamic_mapping import LookupTableMapping, load_mapping_config
 from integration.lookup_sync import (
     CatalogResolver,
@@ -339,3 +341,91 @@ def test_a_code_the_preload_missed_keeps_its_label():
     assert payload["ts_Type_ref@odata.bind"] == "/ts_hcotype_refs(stored-guid)"
     assert dv.written == []
     assert dv.filters == ["ts_externalid eq 'WDE.TET.HOS'"]
+
+
+
+class CatalogDataverse:
+    """Catalog tables that fail as told; counts every request."""
+
+    def __init__(self, preload=404, find=None, upsert=None):
+        self.preload_status = preload
+        self.find_status = find
+        self.upsert_status = upsert
+        self.requests = []
+
+    def retrieve_multiple(self, entity_set, select=None, **kwargs):
+        self.requests.append(("read", entity_set))
+        if self.preload_status:
+            raise DataverseHTTPError("preload failed", status_code=self.preload_status)
+        return []
+
+    def find_one(self, entity_set, filter, select=None):
+        self.requests.append(("find", filter))
+        if self.find_status:
+            raise DataverseHTTPError("find failed", status_code=self.find_status)
+        return None
+
+    def upsert_by_field(self, entity_set, match_field, match_value, data):
+        self.requests.append(("write", match_value))
+        status = self.upsert_status(match_value) if callable(self.upsert_status) else self.upsert_status
+        if status:
+            raise DataverseHTTPError("write failed", status_code=status)
+        return f"guid-{match_value}", True
+
+
+def _engine_on(dv):
+    resolver = CatalogResolver(dv)
+    resolver.preload(load_mapping_config().lookup_tables)
+    engine = create_transform_engine(load_mapping_config())
+    engine.catalog_resolver = resolver.ensure
+    return engine
+
+
+def _hco(n, type_code="HOS"):
+    return {"workplaceEid": f"WDEH{n}", "officialName": "Klinik", "codBase": "WDE", "typeCode": type_code}
+
+
+def test_a_missing_catalog_table_costs_one_request_not_one_per_record():
+    # Each record used to ask again: 1,000 accounts made 4,000 failing requests.
+    dv = CatalogDataverse(preload=404)
+    engine = _engine_on(dv)
+    preload = len(dv.requests)
+    payloads = [engine.transform_hco(_hco(n)) for n in range(50)]
+    assert len(dv.requests) == preload
+    assert all("ts_Type_ref@odata.bind" not in payload for payload in payloads)
+    assert payloads[0]["name"] == "Klinik"  # the record itself is still written
+
+
+def test_a_table_the_preload_read_fails_once_then_is_left_alone():
+    dv = CatalogDataverse(preload=None, find=404)
+    engine = _engine_on(dv)
+    preload = len(dv.requests)
+    for n in range(20):
+        engine.transform_hco(_hco(n))
+    assert len(dv.requests) == preload + 1
+
+
+def test_a_rejected_code_is_not_tried_again_and_other_codes_go_on():
+    dv = CatalogDataverse(preload=None, upsert=lambda value: 400 if value.endswith(".BAD") else None)
+    engine = _engine_on(dv)
+    for type_code in ("BAD", "BAD", "BAD", "NEW"):
+        engine.transform_hco(_hco(1, type_code))
+    writes = [value for kind, value in dv.requests if kind == "write"]
+    assert writes == ["WDE.TET.BAD", "WDE.TET.NEW"]
+
+
+def test_a_throttled_table_is_tried_again_after_a_pause(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(lookup_sync.time, "monotonic", lambda: now[0])
+    dv = CatalogDataverse(preload=None, upsert=503)
+    engine = _engine_on(dv)
+
+    def writes():
+        return sum(1 for kind, _ in dv.requests if kind == "write")
+
+    engine.transform_hco(_hco(1, "AAA"))
+    engine.transform_hco(_hco(2, "BBB"))
+    assert writes() == 1
+    now[0] += CatalogResolver.RETRY_AFTER_SECONDS + 1
+    engine.transform_hco(_hco(3, "CCC"))
+    assert writes() == 2
