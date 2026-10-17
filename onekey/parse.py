@@ -231,6 +231,19 @@ def workplace_addresses(workplace):
     return ordered
 
 
+def _postal_box(label):
+    """The box of a ``postalBoxLabel``, without the postcode and town OneKey appends.
+
+    NL sends ``Postbus 10400,8000 GK,ZWOLLE``: the box, then the box's own
+    postcode and town, which also arrive as the workplace's mailing address
+    (M). The whole label often passes the 20 characters of Dataverse's
+    ``postofficebox`` and was cut off inside the postcode.
+    """
+    if not label:
+        return None
+    return str(label).split(",", 1)[0].strip() or None
+
+
 def flatten_address_entry(entry):
     """Flatten one ``workplaceAddresses`` entry into the address field set."""
     empty = {field: None for field in _ADDRESS_FIELDS}
@@ -248,7 +261,7 @@ def flatten_address_entry(entry):
         **empty,
         "addressEid": address.get("addressEid"),
         "buildingLabel": entry.get("buildingLabel") or address.get("buildingLabel"),
-        "postalBox": entry.get("postalBoxLabel") or address.get("postalBoxLabel"),
+        "postalBox": _postal_box(entry.get("postalBoxLabel") or address.get("postalBoxLabel")),
         "street": street,
         "postalCode": address.get("longPostalCode") or address.get("postalCode"),
         "city": town.get("villageLabel") or town.get("dispatchLabel"),

@@ -82,3 +82,19 @@ def test_post_office_box_comes_from_the_address_not_the_workplace_id():
     raw["workplace"]["workplaceAddresses"]["P_1"] = entry
     payload = engine.transform_address(flatten_hco(raw), parent_account_id="guid")
     assert "postofficebox" not in payload
+
+
+def test_the_post_office_box_keeps_the_box_without_its_postcode_and_town():
+    # OneKey NL: "Postbus 10400,8000 GK,ZWOLLE" passed the 20-character
+    # postofficebox column and was cut off inside the postcode.
+    from onekey.parse import flatten_hco
+
+    engine = create_transform_engine(load_mapping_config())
+    for label, box in (("Postbus 10400,8000 GK,ZWOLLE", "Postbus 10400"),
+                       ("Postbus 12, 5660 AB Geldrop", "Postbus 12"),
+                       ("Postfach 12 34", "Postfach 12 34")):
+        raw = {"codBase": "WNL", "workplace": {"workplaceEid": "WNLH1", "officialName": "X", "workplaceAddresses": {
+            "P,1": {"typeCode": "P", "postalBoxLabel": label,
+                    "address": {"addressEid": "WNLA1", "addressShortLabel": "Hoofdstraat 1"}}}}}
+        payload = engine.transform_address(flatten_hco(raw), parent_account_id="guid")
+        assert payload["postofficebox"] == box
