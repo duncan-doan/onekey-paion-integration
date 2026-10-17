@@ -668,3 +668,337 @@ def test_role_rows_stop_between_batches_when_the_time_budget_is_spent(tmp_path, 
     assert len([u for u in dataverse.upserts if u[0] == "ts_affiliationroles"]) == 2
     assert paused.value.phase == "activity_affiliations"
     assert paused.value.stats is affiliations
+
+
+
+class AddressStore(BulkDataverse):
+    """customeraddress rows of accounts, with the unique alternate key on ts_externalid."""
+
+    def __init__(self, rows=(), refuse_delete=(), refuse_patch=()):
+        super().__init__()
+        self.rows = {row["id"]: dict(row) for row in rows}
+        self.refuse_delete = set(refuse_delete)
+        self.refuse_patch = set(refuse_patch)
+        self.writes = []
+        self.reads = 0
+        self.created = 0
+
+    def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+        if entity_set != "customeraddresses":
+            return []
+        self.reads += 1
+        return [
+            {"customeraddressid": row["id"], "_parentid_value": row["parent"],
+             "addressnumber": row["number"], "ts_externalid": row.get("key")}
+            for row in self.rows.values()
+            if f"_parentid_value eq {row['parent']}" in (filter or "")
+        ]
+
+    def _taken(self, key, row_id):
+        return key is not None and any(r.get("key") == key and r["id"] != row_id for r in self.rows.values())
+
+    def batch_write(self, operations, idempotent):
+        outcomes = []
+        for method, path, body in operations:
+            row_id = path[path.index("(") + 1:-1]
+            self.writes.append((method, row_id, body))
+            if method == "DELETE":
+                if row_id in self.refuse_delete:
+                    outcomes.append((403, None, "deleting address records is off"))
+                elif self.rows.pop(row_id, None) is None:
+                    outcomes.append((404, None, "not found"))
+                else:
+                    outcomes.append((204, None, None))
+            elif row_id in self.refuse_patch:
+                outcomes.append((500, None, "server error"))
+            elif self._taken(body.get("ts_externalid"), row_id):
+                outcomes.append((412, None, "duplicate key"))
+            else:
+                self.rows[row_id]["key"] = body.get("ts_externalid")
+                if "line1" in body:
+                    self.rows[row_id]["line1"] = body["line1"]
+                outcomes.append((204, None, None))
+        return outcomes
+
+    def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+        if entity_set != "customeraddresses":
+            return super().bulk_upsert_by_field(entity_set, match_field, records, **kwargs)
+        results = []
+        for record in records:
+            key = record[match_field]
+            parent = record["parentid_account@odata.bind"][len("/accounts("):-1]
+            fields = {"line1": record.get("line1")}
+            if "addressnumber" in record:
+                fields["number"] = record["addressnumber"]
+            row = next((r for r in self.rows.values() if r.get("key") == key), None)
+            if row is not None:
+                row.update(fields)
+                results.append((key, row["id"], False))
+                continue
+            if "number" not in fields:  # Dataverse takes the next free number
+                taken = [r["number"] for r in self.rows.values() if r["parent"] == parent]
+                fields["number"] = max(taken + [0]) + 1
+            self.created += 1
+            row_id = f"new{self.created}"
+            self.rows[row_id] = {"id": row_id, "parent": parent, "key": key, **fields}
+            results.append((key, row_id, True))
+        return results
+
+    def layout(self, parent="acc-1"):
+        """(number, key) of the account's rows, by number."""
+        return sorted((r["number"], r.get("key")) for r in self.rows.values() if r["parent"] == parent)
+
+
+def _row(row_id, number, address=None, parent="acc-1", workplace="WUKH1"):
+    key = f"{workplace} - {address}" if address else None
+    return {"id": row_id, "parent": parent, "number": number, "key": key}
+
+
+def _workplace(*links, eid="WUKH1"):
+    """A WORKPLACE result with (typeCode, rank, addressEid) address links."""
+    return {
+        "codBase": "WUK",
+        "workplace": {
+            "workplaceEid": eid,
+            "officialName": "One",
+            "workplaceAddresses": {
+                f"{code},{rank}": {
+                    "typeCode": code,
+                    "rank": rank,
+                    "address": {"addressEid": address, "addressShortLabel": f"{address} Street"},
+                }
+                for code, rank, address in links
+            },
+        },
+    }
+
+
+def _sync_addresses(tmp_path, store, *workplaces):
+    engine, _ = _engine(tmp_path, store)
+    for raw in workplaces:
+        eid = raw["workplace"]["workplaceEid"]
+        engine._account_cache[eid] = "acc-1" if eid == "WUKH1" else f"acc-{eid}"
+    return engine._sync_addresses([flatten_hco(raw) for raw in workplaces])
+
+
+def _keys(*addresses):
+    return [f"WUKH1 - {address}" for address in addresses]
+
+
+
+def test_addresses_are_ordered_main_then_mailing_then_secondary():
+    from onekey.parse import workplace_addresses
+
+    raw = _workplace(("S", 2, "A4"), ("F", 1, "A6"), ("M", 1, "A2"), ("S", 1, "A3"), ("P", 1, "A1"), ("S", 3, "A5"))
+    entries = workplace_addresses(raw["workplace"])
+    assert [(e["addressType"], e["addressEid"]) for e in entries] == [
+        ("P", "A1"), ("M", "A2"), ("S", "A3"), ("S", "A4"), ("S", "A5"), ("F", "A6"),
+    ]
+
+
+def test_an_address_linked_under_two_types_is_kept_once_at_its_first_place():
+    from onekey.parse import workplace_addresses
+
+    raw = _workplace(("P", 1, "A1"), ("M", 1, "A1"), ("S", 1, "A2"))
+    assert [e["addressEid"] for e in workplace_addresses(raw["workplace"])] == ["A1", "A2"]
+
+
+def test_a_batch_never_splits_a_workplace():
+    from integration.address_rows import workplace_batches
+
+    items = [("k", {}, eid) for eid in ("W1", "W1", "W2", "W2", "W2", "W3")]
+    assert [[i[2] for i in b] for b in workplace_batches(items, 2)] == [
+        ["W1", "W1"], ["W2", "W2", "W2"], ["W3"],
+    ]
+
+
+def test_plan_reuses_numbered_rows_and_frees_keys_before_moving_them():
+    from integration.address_rows import plan_address_rows
+
+    # An earlier order put S1 on row 2 and M on row 3; OneKey now says P, M, S1.
+    rows = [_row("r1", 1, "A1"), _row("r2", 2, "A3"), _row("r3", 3, "A2")]
+    plan = plan_address_rows(rows, _keys("A1", "A2", "A3"), "WUKH1 - ")
+    assert plan.deletes == []
+    assert sorted(plan.clears) == ["r2", "r3"]
+    assert plan.claims == {"r2": "WUKH1 - A2", "r3": "WUKH1 - A3"}
+    assert plan.numbers == {"WUKH1 - A1": 1, "WUKH1 - A2": 2, "WUKH1 - A3": 3}
+
+
+def test_plan_never_deletes_a_row_this_sync_did_not_write():
+    from integration.address_rows import plan_address_rows
+
+    rows = [_row("r1", 1, "A1"), {"id": "r5", "parent": "acc-1", "number": 5, "key": None},
+            {"id": "r6", "parent": "acc-1", "number": 6, "key": "WUKH9 - A9"}]
+    plan = plan_address_rows(rows, _keys("A1"), "WUKH1 - ")
+    assert plan.deletes == [] and plan.writes == 0
+
+
+@pytest.mark.parametrize(
+    "rows, links, expected, writes",
+    [
+        # Prod today: the empty rows 1 and 2 Dataverse creates, the main address on row 3.
+        ([_row("r1", 1), _row("r2", 2), _row("r3", 3, "A1")],
+         [("P", 1, "A1"), ("M", 1, "A2"), ("S", 1, "A3")],
+         [(1, "A1"), (2, "A2"), (3, "A3")], 4),
+        ([_row("r1", 1), _row("r2", 2), _row("r3", 3, "A1")],
+         [("P", 1, "A1")],
+         [(1, "A1"), (2, None)], 2),
+        # A new prod account: only the empty rows.
+        ([_row("r1", 1), _row("r2", 2)],
+         [("P", 1, "A1"), ("M", 1, "A2"), ("S", 1, "A3"), ("S", 2, "A4")],
+         [(1, "A1"), (2, "A2"), (3, "A3"), (4, "A4")], 2),
+        # Test, where Dataverse creates no empty rows.
+        ([], [("P", 1, "A1"), ("M", 1, "A2"), ("S", 1, "A3")], [(1, "A1"), (2, "A2"), (3, "A3")], 0),
+        # No mailing address: the secondary ones move up.
+        ([], [("P", 1, "A1"), ("S", 1, "A3"), ("S", 2, "A4")], [(1, "A1"), (2, "A3"), (3, "A4")], 0),
+        # The mailing address left OneKey: S1 moves to row 2, row 3 goes.
+        ([_row("r1", 1, "A1"), _row("r2", 2, "A2"), _row("r3", 3, "A3")],
+         [("P", 1, "A1"), ("S", 1, "A3")],
+         [(1, "A1"), (2, "A3")], 2),
+        # Rows written in another order are put back in OneKey order.
+        ([_row("r1", 1, "A1"), _row("r2", 2, "A3"), _row("r3", 3, "A2")],
+         [("P", 1, "A1"), ("M", 1, "A2"), ("S", 1, "A3")],
+         [(1, "A1"), (2, "A2"), (3, "A3")], 4),
+        # Nothing to change.
+        ([_row("r1", 1, "A1"), _row("r2", 2, "A2")], [("P", 1, "A1"), ("M", 1, "A2")],
+         [(1, "A1"), (2, "A2")], 0),
+    ],
+)
+def test_addresses_end_on_rows_numbered_in_onekey_order(tmp_path, rows, links, expected, writes):
+    store = AddressStore(rows)
+    result = _sync_addresses(tmp_path, store, _workplace(*links))
+    assert store.layout() == [(n, f"WUKH1 - {a}" if a else None) for n, a in expected]
+    assert len(store.writes) == writes
+    assert result["failed"] == 0 and result["processed"] == len(links)
+
+
+def test_a_second_run_changes_nothing(tmp_path):
+    store = AddressStore([_row("r1", 1), _row("r2", 2), _row("r3", 3, "A1")])
+    links = [("P", 1, "A1"), ("M", 1, "A2"), ("S", 1, "A3")]
+    _sync_addresses(tmp_path, store, _workplace(*links))
+    layout, writes = store.layout(), len(store.writes)
+    _sync_addresses(tmp_path, store, _workplace(*links))
+    assert store.layout() == layout and len(store.writes) == writes
+
+
+def test_a_row_that_cannot_be_deleted_is_emptied_and_the_plan_goes_on(tmp_path):
+    # Prod with "Enable deletion of address records" off may refuse the delete.
+    store = AddressStore([_row("r1", 1), _row("r2", 2), _row("r3", 3, "A1")], refuse_delete={"r3"})
+    store.rows["r3"]["line1"] = "A1 Street"
+    result = _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1"), ("M", 1, "A2")))
+    assert store.layout() == [(1, "WUKH1 - A1"), (2, "WUKH1 - A2"), (3, None)]
+    assert store.rows["r3"]["line1"] is None
+    assert [w[0] for w in store.writes] == ["DELETE", "PATCH", "PATCH", "PATCH"]
+    assert result["failed"] == 0
+
+
+def test_when_a_row_can_be_neither_deleted_nor_emptied_the_account_is_written_as_before(tmp_path):
+    store = AddressStore([_row("r1", 1), _row("r2", 2), _row("r3", 3, "A1")],
+                         refuse_delete={"r3"}, refuse_patch={"r3"})
+    result = _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1"), ("M", 1, "A2")))
+    assert store.layout() == [(1, None), (2, None), (3, "WUKH1 - A1"), (4, "WUKH1 - A2")]
+    assert [w[0] for w in store.writes] == ["DELETE", "PATCH"]
+    assert result["failed"] == 0
+
+
+def test_a_removed_address_that_cannot_be_deleted_does_not_stop_the_rest(tmp_path):
+    store = AddressStore([_row("r1", 1, "A1"), _row("r2", 2), _row("r3", 3, "A9")],
+                         refuse_delete={"r3"}, refuse_patch={"r3"})
+    _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1"), ("M", 1, "A2")))
+    assert store.layout() == [(1, "WUKH1 - A1"), (2, "WUKH1 - A2"), (3, "WUKH1 - A9")]
+
+
+def test_a_workplace_without_addresses_keeps_its_rows(tmp_path):
+    store = AddressStore([_row("r1", 1, "A1"), _row("r2", 2, "A2")])
+    _sync_addresses(tmp_path, store, _workplace())
+    assert store.layout() == [(1, "WUKH1 - A1"), (2, "WUKH1 - A2")]
+    assert store.writes == [] and store.reads == 0
+
+
+def test_one_batch_of_accounts_is_read_in_one_call(tmp_path):
+    store = AddressStore()
+    raws = [_workplace(("P", 1, f"A{n}"), ("M", 1, f"B{n}"), eid=f"WUKH{n}") for n in range(2, 62)]
+    engine, _ = _engine(tmp_path, store)
+    engine.bulk_batch_size = 1000
+    for n in range(2, 62):
+        engine._account_cache[f"WUKH{n}"] = f"acc-{n}"
+    engine._sync_addresses([flatten_hco(raw) for raw in raws])
+    assert store.reads == 1  # 60 accounts in one batch
+    assert all(store.layout(f"acc-{n}") == [(1, f"WUKH{n} - A{n}"), (2, f"WUKH{n} - B{n}")] for n in range(2, 62))
+
+
+def test_a_flattened_row_without_the_address_list_writes_its_main_address(tmp_path):
+    # Rows built by hand (tests, older callers) carry address_* fields only.
+    store = AddressStore()
+    engine, _ = _engine(tmp_path, store)
+    engine._account_cache["WUKH1"] = "acc-1"
+    engine._sync_addresses([{"workplaceEid": "WUKH1", "codBase": "WUK", "address_addressEid": "A1",
+                             "address_street": "1 Main", "address_addressType": "P"}])
+    assert store.layout() == [(1, "WUKH1 - A1")]
+
+
+
+def test_a_removed_address_empties_row_two_instead_of_deleting_it(tmp_path):
+    # Rows 1 and 2 back the account's Address 1 and 2 fields; prod refuses to
+    # delete them unless "Enable deletion of address records" is on.
+    store = AddressStore([_row("r1", 1, "A1"), _row("r2", 2, "A2")], refuse_delete={"r2"})
+    store.rows["r2"]["line1"] = "A2 Street"
+    _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1")))
+    assert store.layout() == [(1, "WUKH1 - A1"), (2, None)]
+    assert store.rows["r2"]["line1"] is None
+    assert [method for method, _, _ in store.writes] == ["PATCH"]
+    body = store.writes[0][2]
+    assert body["ts_externalid"] is None and "line1" in body and "parentid" not in body
+
+
+def test_of_two_rows_with_one_number_the_one_holding_the_key_is_kept(tmp_path):
+    store = AddressStore([_row("r1", 1), _row("r9", 1, "A1")])
+    _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1")))
+    assert store.writes == []
+    assert sorted(store.rows) == ["r1", "r9"] and store.rows["r9"]["key"] == "WUKH1 - A1"
+
+
+def test_rows_are_read_in_one_call_per_hundred_accounts(tmp_path):
+    store = AddressStore()
+    engine, _ = _engine(tmp_path, store)
+    engine.bulk_batch_size = 1000
+    raws = [_workplace(("P", 1, f"A{n}"), eid=f"WUKH{n}") for n in range(2, 152)]
+    for n in range(2, 152):
+        engine._account_cache[f"WUKH{n}"] = f"acc-{n}"
+    engine._sync_addresses([flatten_hco(raw) for raw in raws])
+    assert store.reads == 2  # 150 accounts
+
+
+def test_each_address_is_named_from_its_own_building(tmp_path, caplog):
+    store = AddressStore()
+    raw = _workplace(("P", 1, "A1"), ("M", 1, "A2"))
+    raw["workplace"]["workplaceAddresses"]["P,1"]["buildingLabel"] = "Main Building"
+    raw["workplace"]["workplaceAddresses"]["M,1"]["buildingLabel"] = "Post Room"
+    names = {}
+    upsert = store.bulk_upsert_by_field
+
+    def capture(entity_set, match_field, records, **kwargs):
+        names.update({r[match_field]: r.get("name") for r in records})
+        return upsert(entity_set, match_field, records, **kwargs)
+
+    store.bulk_upsert_by_field = capture
+    _sync_addresses(tmp_path, store, raw)
+    assert names == {"WUKH1 - A1": "Main Building", "WUKH1 - A2": "Post Room"}
+    assert "buildingLabel' not present" not in caplog.text
+
+
+
+def test_a_row_past_the_last_number_is_renumbered_in_place(tmp_path):
+    # Without empty system rows (test): the secondary address sat on row 5.
+    store = AddressStore([_row("r1", 1, "A1"), _row("r5", 5, "A3")])
+    _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1"), ("S", 1, "A3")))
+    assert store.writes == []
+    assert store.rows["r5"]["number"] == 2 and store.layout() == [(1, "WUKH1 - A1"), (2, "WUKH1 - A3")]
+
+
+def test_a_failed_claim_never_leaves_two_rows_with_one_number(tmp_path):
+    store = AddressStore([_row("r1", 1), _row("r2", 2)], refuse_patch={"r2"})
+    _sync_addresses(tmp_path, store, _workplace(("P", 1, "A1"), ("M", 1, "A2")))
+    numbers = [number for number, _ in store.layout()]
+    assert len(numbers) == len(set(numbers))
+    assert (1, "WUKH1 - A1") in store.layout() and (3, "WUKH1 - A2") in store.layout()

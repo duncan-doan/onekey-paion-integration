@@ -24,6 +24,7 @@ from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
 from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_accounts
 from .lookup_sync import CatalogResolver, CountryResolver, sync_lookup_tables
+from .address_rows import address_id, address_sources, plan_address_rows, workplace_batches
 from .picklist_sync import sync_picklists_from_config
 from .w2w_relations import collect_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
@@ -1253,11 +1254,13 @@ class DynamicSyncEngine:
         if missing and not dry_run:
             self._lookup_accounts_bulk(missing)
 
+        address_key = self.config.require_key_field("customeraddress")
+        # (key, payload, workplace_eid); each workplace's in address-number order.
         prepared = []
         for hco in hcos:
             workplace_eid = hco.get("workplaceEid")
-            address_eid = hco.get("address_addressEid") or hco.get("addressEid")
-            if not workplace_eid or not address_eid:
+            sources = [s for s in address_sources(hco) if address_id(s)]
+            if not workplace_eid or not sources:
                 continue
             account_id = self._account_cache.get(workplace_eid)
             if not account_id and not dry_run:
@@ -1271,25 +1274,30 @@ class DynamicSyncEngine:
                     retryable=False,
                 )
                 continue
-            payload = self.transformer.transform_address(
-                hco, parent_account_id=account_id
-            )
-            if not payload:
-                continue
-            key = payload.get(self.config.require_key_field("customeraddress"))
-            if not key:
-                result["failed"] += 1
-                self._fail(
-                    "customeraddress",
-                    workplace_eid,
-                    "upsert",
-                    "Missing customeraddress key",
-                    external_id=address_eid,
-                    category="mapping",
-                    retryable=False,
+            keys: set[str] = set()
+            for source in sources:
+                payload = self.transformer.transform_address(
+                    source, parent_account_id=account_id
                 )
-                continue
-            prepared.append((key, payload, workplace_eid))
+                if not payload:
+                    continue
+                key = payload.get(address_key)
+                if not key:
+                    result["failed"] += 1
+                    self._fail(
+                        "customeraddress",
+                        workplace_eid,
+                        "upsert",
+                        "Missing customeraddress key",
+                        external_id=address_id(source),
+                        category="mapping",
+                        retryable=False,
+                    )
+                    continue
+                if key in keys:
+                    continue
+                keys.add(key)
+                prepared.append((key, payload, workplace_eid))
 
         logger.info(msg("Upserting addresses", _ctx(self), records=len(prepared)))
         if dry_run:
@@ -1298,9 +1306,9 @@ class DynamicSyncEngine:
         if not prepared:
             return result
 
-        address_key = self.config.require_key_field("customeraddress")
-        for batch in chunked(prepared, self.bulk_batch_size):
+        for batch in workplace_batches(prepared, self.bulk_batch_size):
             self._check_deadline("addresses", "addresses", result)
+            self._place_addresses(batch, address_key)
             try:
                 bulk_results, rejected, unchanged = self._bulk_upsert(
                     "customeraddresses", address_key, [p for _, p, _ in batch]
@@ -1349,6 +1357,156 @@ class DynamicSyncEngine:
                 )
 
         return result
+
+    def _place_addresses(self, batch: list[tuple], key_field: str) -> None:
+        """Number each account's OneKey addresses 1, 2, 3, ... in OneKey order.
+
+        ``batch`` holds ``(key, payload, workplace_eid)``, each workplace's
+        addresses together and in order: main, mailing, then secondary
+        (onekey.parse.workplace_addresses). For the accounts it covers, this
+        reads their address rows, plans which row each address goes to
+        (integration.address_rows.plan_address_rows), runs the plan's deletes,
+        key clears and key claims through $batch, and sets ``addressnumber``
+        on the payloads, in place, for the upsert that follows.
+
+        A step that fails leaves the account as it is and its addresses are
+        written as before, without addressnumber: an environment may refuse
+        to delete address rows, for one. The run goes on either way.
+        """
+        dv = self.dataverse
+        groups: dict[str, list[tuple[str, dict]]] = {}
+        for key, payload, eid in batch:
+            payload.pop("addressnumber", None)
+            groups.setdefault(eid, []).append((key, payload))
+        if not hasattr(dv, "retrieve_multiple"):
+            return
+        accounts = {eid: str(self._account_cache.get(eid) or "").lower() for eid in groups}
+        rows_by_account: dict[str, list[dict]] = {}
+        try:
+            # 100 parent filters stay under the client's 6,000-character filter cap.
+            for chunk in chunked(sorted(set(accounts.values()) - {""}), 100):
+                rows = dv.retrieve_multiple(
+                    "customeraddresses",
+                    select=["customeraddressid", "_parentid_value", "addressnumber", key_field],
+                    filter=" or ".join(f"_parentid_value eq {account}" for account in chunk),
+                )
+                for row in rows or []:
+                    parent = str(row.get("_parentid_value") or "").lower()
+                    rows_by_account.setdefault(parent, []).append(
+                        {
+                            "id": row["customeraddressid"],
+                            "number": row.get("addressnumber"),
+                            "key": row.get(key_field),
+                        }
+                    )
+        except Exception as exc:  # noqa: BLE001 — the addresses are still written
+            logger.warning(
+                msg(
+                    "Could not read address rows; address numbers left as they are",
+                    _ctx(self),
+                    error=str(exc)[:300],
+                )
+            )
+            return
+
+        plans = {
+            eid: plan_address_rows(
+                rows_by_account.get(accounts[eid], []),
+                [key for key, _ in items],
+                f"{eid} - ",
+            )
+            for eid, items in groups.items()
+        }
+        if any(plan.writes for plan in plans.values()):
+            if hasattr(dv, "batch_write"):
+                self._run_address_plans(plans, key_field)
+            else:
+                plans = {eid: plan for eid, plan in plans.items() if not plan.writes}
+        for eid, items in groups.items():
+            plan = plans.get(eid)
+            if plan is None:
+                continue
+            for key, payload in items:
+                if key in plan.numbers:
+                    payload["addressnumber"] = plan.numbers[key]
+
+    def _run_address_plans(self, plans: dict, key_field: str) -> None:
+        """Run the deletes and blanks, clears and claims of the address plans, in that order.
+
+        A blank empties the key and every mapped address column, as Dataverse
+        leaves rows 1 and 2 of a new account. A row Dataverse will not delete
+        (an environment with "Enable deletion of address records" off) is
+        blanked instead, so the plan goes on and the row stays, empty. A plan
+        whose step still fails is dropped from ``plans``, so its account is
+        written as before, except when the row's address left OneKey: that
+        row keeps it and the rest of the plan goes on. A failed claim drops
+        only that address's number.
+        """
+        dv = self.dataverse
+        problems: list[str] = []
+        blank = {
+            fm.target_field: None
+            for fm in self.config.get_field_mappings("customeraddress")
+            if fm.target_field and not fm.is_lookup
+        }
+        blank[key_field] = None
+
+        def run(steps, method, body, report=True):
+            """Send ``(eid, row_id)`` steps through $batch; return the failed ones."""
+            outcomes = []
+            for chunk in chunked(steps, 500):
+                outcomes.extend(
+                    dv.batch_write(
+                        [(method, f"customeraddresses({row_id})", body(eid, row_id)) for eid, row_id in chunk],
+                        idempotent=True,
+                    )
+                )
+            failed = []
+            for (eid, row_id), (status, _, error) in zip(steps, outcomes):
+                # 404 on a delete: a stopped run deleted it already.
+                if status is not None and (status < 300 or (method == "DELETE" and status == 404)):
+                    continue
+                failed.append((eid, row_id))
+                if report:
+                    problems.append(f"{method} {plans[eid].holding.get(row_id) or row_id}: {error or status}")
+            return failed
+
+        deletes = [(eid, row_id) for eid, plan in plans.items() for row_id in plan.deletes]
+        blanks = [(eid, row_id) for eid, plan in plans.items() for row_id in plan.blanks]
+        undeleted = run(deletes, "DELETE", lambda eid, row_id: None, report=False) if deletes else []
+        if undeleted:
+            logger.info(
+                msg(
+                    "Address rows Dataverse would not delete are emptied instead",
+                    _ctx(self),
+                    count=len(undeleted),
+                )
+            )
+        refused = run(undeleted + blanks, "PATCH", lambda eid, row_id: blank) if undeleted or blanks else []
+        for eid, row_id in refused:
+            plan = plans.get(eid)
+            if plan is not None and plan.holding.get(row_id) in plan.numbers:
+                plans.pop(eid)
+
+        clears = [(eid, row_id) for eid, plan in plans.items() for row_id in plan.clears]
+        for eid, _ in run(clears, "PATCH", lambda eid, row_id: {key_field: None}) if clears else []:
+            plans.pop(eid, None)
+
+        claims = [(eid, row_id) for eid, plan in plans.items() for row_id in plan.claims]
+        for eid, row_id in run(
+            claims, "PATCH", lambda eid, row_id: {key_field: plans[eid].claims[row_id]}
+        ) if claims else []:
+            plans[eid].numbers.pop(plans[eid].claims[row_id], None)
+
+        if problems:
+            logger.warning(
+                msg(
+                    "Address rows not renumbered, written as before",
+                    _ctx(self),
+                    count=len(problems),
+                    first=problems[0][:300],
+                )
+            )
 
     def _sync_hierarchy(
         self,

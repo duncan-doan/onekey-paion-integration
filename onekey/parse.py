@@ -189,6 +189,48 @@ def primary_address(workplace):
     return flatten_address_entry(entry)
 
 
+# Order of a workplace's addresses in Dataverse: main, mailing, secondary.
+ADDRESS_TYPE_ORDER = ("P", "M", "S")
+
+
+def workplace_addresses(workplace):
+    """Every address of a workplace, flattened, in Dataverse address-number order.
+
+    ``workplaceAddresses`` keys each link ``{typeCode},{rank}``: P is the
+    main address, M the mailing address, S a secondary one. The list holds
+    P first, then M, then S, each type by rank; any other type follows, by
+    code and rank. Position 1 in the list is address number 1, and so on,
+    so a missing type moves the next one up. An address linked twice (under
+    two types) is kept once, at its first place, because its Dataverse key
+    is ``{workplaceEid} - {addressEid}``. Links without an address id are
+    left out.
+    """
+    addresses = (workplace or {}).get("workplaceAddresses") or {}
+    if not isinstance(addresses, dict):
+        return []
+
+    def place(item):
+        key, value = item
+        type_code = str(value.get("typeCode") or str(key).split(",", 1)[0]).upper()
+        known = (
+            ADDRESS_TYPE_ORDER.index(type_code)
+            if type_code in ADDRESS_TYPE_ORDER
+            else len(ADDRESS_TYPE_ORDER)
+        )
+        return (known, type_code, _rank(key, value))
+
+    ordered, seen = [], set()
+    links = ((key, value) for key, value in addresses.items() if isinstance(value, dict))
+    for key, value in sorted(links, key=place):
+        entry = flatten_address_entry(value)
+        entry["addressType"] = entry["addressType"] or str(key).split(",", 1)[0]
+        if not entry["addressEid"] or entry["addressEid"] in seen:
+            continue
+        seen.add(entry["addressEid"])
+        ordered.append(entry)
+    return ordered
+
+
 def flatten_address_entry(entry):
     """Flatten one ``workplaceAddresses`` entry into the address field set."""
     empty = {field: None for field in _ADDRESS_FIELDS}
@@ -334,4 +376,6 @@ def flatten_hco(result):
         **_telephone_slots(workplace),
         **_denied_accesses(workplace),
         **{f"address_{k}": v for k, v in primary_address(workplace).items()},
+        # Every address, in Dataverse address-number order (address phase).
+        "addresses": workplace_addresses(workplace),
     }

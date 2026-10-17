@@ -579,6 +579,20 @@ def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
     assert sum(c["url"].endswith("/$batch") for c in client._session.calls) == 1
 
 
+
+def test_batch_delete_sends_no_body():
+    client = make_client([batch_response((204, None, None), (204, None, None))])
+    results = client.batch_write(
+        [("DELETE", "customeraddresses(addr-3)", None), ("PATCH", "customeraddresses(addr-1)", {"ts_externalid": "W1 - A1"})],
+        idempotent=True,
+    )
+    assert [status for status, _, _ in results] == [204, 204]
+    body = client._session.calls[0]["data"].decode()
+    delete, patch = body.split("--batch_")[1:3]
+    assert "DELETE https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/customeraddresses(addr-3) HTTP/1.1" in delete
+    assert "Content-Type: application/json" not in delete and "null" not in delete
+    assert '{"ts_externalid": "W1 - A1"}' in patch and "If-Match: *" in patch
+
 def test_odata_quotes_are_escaped():
     # O'Brien would otherwise terminate the filter literal early.
     assert escape_odata("O'Brien") == "O''Brien"

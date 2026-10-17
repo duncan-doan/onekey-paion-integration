@@ -818,10 +818,11 @@ class DataverseClient:
         batching also consumes the combined execution time service limit.
 
         Args:
-            operations: ``(method, path, body)`` tuples, at most 1,000.
-            idempotent: True when every write may safely run twice (PATCH by
-                id). A batch with creates must pass False, so an unknown
-                outcome raises :class:`DataverseAmbiguousWriteError`.
+            operations: ``(method, path, body)`` tuples, at most 1,000. A
+                DELETE takes ``None`` as its body and sends none.
+            idempotent: True when every write may safely run twice (PATCH or
+                DELETE by id). A batch with creates must pass False, so an
+                unknown outcome raises :class:`DataverseAmbiguousWriteError`.
 
         Returns:
             One ``(status, entity_id, error)`` per operation, in order.
@@ -842,6 +843,13 @@ class DataverseClient:
                     "Content-Transfer-Encoding: binary",
                     "",
                     f"{method} {self._request_url(path)} HTTP/1.1",
+                ]
+            )
+            if body is None:
+                lines.extend(["", ""])
+                continue
+            lines.extend(
+                [
                     "Content-Type: application/json;type=entry",
                     *(["If-Match: *"] if method == "PATCH" else []),
                     "",
