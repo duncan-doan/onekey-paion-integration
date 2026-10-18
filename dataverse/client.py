@@ -266,12 +266,14 @@ _ENTITY_META = {
 
 # Tables that reject bulk multi-ops in this org. bulk_upsert_by_field sends
 # each batch of their writes as one $batch of single requests instead.
-# ts_affiliation creates use CreateMultiple: test and prod list it for the
-# table (2026-10-18), and it keeps an inactive record's statecode, which a
-# single create drops. Adding the table back here returns its creates to the
-# $batch path, where _apply_states sets the state.
+# customeraddress has neither CreateMultiple nor UpdateMultiple in dev, test
+# or prod (2026-10-18); a CreateMultiple would fail and fall back to a lookup
+# and a create per record. ts_affiliation creates use CreateMultiple: test
+# and prod list it for the table, and it keeps an inactive record's
+# statecode, which a single create drops. Adding ts_affiliations here returns
+# its creates to the $batch path, where _apply_states sets the state.
 _NO_UPDATE_MULTIPLE = frozenset({"customeraddresses", "ts_affiliations"})
-_NO_CREATE_MULTIPLE = frozenset()
+_NO_CREATE_MULTIPLE = frozenset({"customeraddresses"})
 
 # Dataverse ignores statecode on a single create (POST) and keeps the new
 # record in its default state; CreateMultiple and updates apply it. A record

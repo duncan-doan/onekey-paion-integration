@@ -732,6 +732,40 @@ def test_create_multiple_keeps_the_state_in_the_create():
     assert target["statecode"] == 1
 
 
+def test_customeraddress_creates_share_one_batch():
+    """customeraddress has no CreateMultiple: its creates are POSTs in one $batch."""
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        batch_response((204, G1, None), (204, G2, None)),
+    ])
+    results = client.bulk_upsert_by_field(
+        "customeraddresses", "ts_externalid", ADDRESSES, batch_size=100, fallback_on_error=False,
+    )
+    assert results == [("W1 - A1", G1, True), ("W2 - A2", G2, True)]
+    calls = client._session.calls
+    assert len(calls) == 2 and calls[1]["url"].endswith("/$batch")
+    body = calls[1]["data"].decode()
+    assert body.count("POST https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/customeraddresses HTTP/1.1") == 2
+    assert not any("CreateMultiple" in c["url"] for c in calls)
+
+
+def test_a_rejected_address_create_fails_alone():
+    """An address Dataverse refuses (a choice value it lacks) is one failure; the rest land."""
+    errors = {}
+    refused = "The value 5 of 'addresstypecode' on record of type 'customeraddress' is outside the valid range."
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        batch_response((204, G1, None), (400, None, refused)),
+        FakeResponse(200, {"value": []}),  # W2 retried alone: find
+        FakeResponse(400, {"error": {"message": refused}}),  # and create
+    ])
+    results = client.bulk_upsert_by_field(
+        "customeraddresses", "ts_externalid", ADDRESSES, batch_size=100, record_errors=errors,
+    )
+    assert results == [("W1 - A1", G1, True), ("W2 - A2", None, False)]
+    assert list(errors) == ["W2 - A2"] and "outside the valid range" in str(errors["W2 - A2"])
+
+
 def test_ts_affiliation_creates_use_create_multiple_with_their_state():
     """One write each: CreateMultiple keeps an inactive affiliation inactive."""
     client = make_client([
