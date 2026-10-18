@@ -809,19 +809,44 @@ def test_failed_create_multiple_falls_back_to_single_creates_with_their_state():
 
 @pytest.mark.parametrize("stored, sent", [(0, 1), (1, 0)])
 def test_delta_update_of_an_affiliation_writes_its_new_state(stored, sent):
-    """An activity that turns invalid (or valid again) updates statecode in its PATCH."""
+    """An activity that turns invalid (or valid again) updates statecode in its UpdateMultiple."""
     client = make_client([
         FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": G1, "statecode": stored}]}),
-        batch_response((204, None, None)),
+        FakeResponse(204),  # UpdateMultiple
     ])
     results = client.bulk_upsert_by_field(
         "ts_affiliations", "ts_externalid", [{"ts_externalid": "A", "statecode": sent}],
         batch_size=100, fallback_on_error=False, skip_unchanged=True,
     )
     assert results == [("A", G1, False)]
-    [patch] = batch_parts(client._session.calls[1])
-    assert f"PATCH https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/ts_affiliations({G1}) HTTP/1.1" in patch
-    assert f'"statecode": {sent}' in patch
+    update = client._session.calls[1]
+    assert update["url"].endswith("ts_affiliations/Microsoft.Dynamics.CRM.UpdateMultiple")
+    [target] = update["json"]["Targets"]
+    assert target["ts_affiliationid"] == G1 and target["statecode"] == sent
+
+
+def test_affiliation_update_multiple_with_a_bad_record_updates_the_rest_one_by_one():
+    """One bad record fails the whole UpdateMultiple; the others are still written."""
+    errors = {}
+    client = make_client([
+        FakeResponse(200, {"value": [
+            {"ts_externalid": "A", "ts_affiliationid": G1},
+            {"ts_externalid": "B", "ts_affiliationid": G2},
+        ]}),
+        FakeResponse(400, {"error": {"message": "ts_name is too long"}}),  # UpdateMultiple
+        FakeResponse(204),  # A alone
+        FakeResponse(400, {"error": {"message": "ts_name is too long"}}),  # B alone
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid",
+        [{"ts_externalid": "A", "ts_name": "a"}, {"ts_externalid": "B", "ts_name": "b" * 999}],
+        batch_size=100, record_errors=errors,
+    )
+    assert results == [("A", G1, False), ("B", None, False)]
+    assert list(errors) == ["B"]
+    first = client._session.calls[2]
+    assert first["method"] == "PATCH" and first["url"].endswith(f"ts_affiliations({G1})")
+    assert first["json"] == {"ts_externalid": "A", "ts_name": "a"}
 
 
 def test_delta_update_with_the_state_already_set_writes_nothing():

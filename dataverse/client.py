@@ -268,11 +268,13 @@ _ENTITY_META = {
 # each batch of their writes as one $batch of single requests instead.
 # customeraddress has neither CreateMultiple nor UpdateMultiple in dev, test
 # or prod (2026-10-18); a CreateMultiple would fail and fall back to a lookup
-# and a create per record. ts_affiliation creates use CreateMultiple: test
-# and prod list it for the table, and it keeps an inactive record's
-# statecode, which a single create drops. Adding ts_affiliations here returns
-# its creates to the $batch path, where _apply_states sets the state.
-_NO_UPDATE_MULTIPLE = frozenset({"customeraddresses", "ts_affiliations"})
+# and a create per record. ts_affiliation uses both: test and prod list them
+# for the table, CreateMultiple keeps an inactive record's statecode, which a
+# single create drops, and UpdateMultiple wrote 100 updates in about half the
+# time of a $batch in dev. One bad record fails a whole UpdateMultiple, whose
+# records are then updated one by one. Adding ts_affiliations to a list
+# returns those writes to the $batch path, where _apply_states sets the state.
+_NO_UPDATE_MULTIPLE = frozenset({"customeraddresses"})
 _NO_CREATE_MULTIPLE = frozenset({"customeraddresses"})
 
 # Dataverse ignores statecode on a single create (POST) and keeps the new

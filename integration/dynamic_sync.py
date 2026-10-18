@@ -146,9 +146,9 @@ class DynamicSyncEngine:
 
     Bulk write notes: ``customeraddress`` has no CreateMultiple or
     UpdateMultiple, so its creates and updates are per-row POSTs and
-    PATCHes in one $batch. ``ts_affiliation`` creates use CreateMultiple,
-    which keeps an inactive record's statecode; its updates are per-row
-    PATCHes in one $batch (see ``dataverse.client._NO_*_MULTIPLE``).
+    PATCHes in one $batch. ``ts_affiliation`` uses CreateMultiple, which
+    keeps an inactive record's statecode, and UpdateMultiple (see
+    ``dataverse.client._NO_*_MULTIPLE``).
     """
 
     def __init__(
