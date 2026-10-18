@@ -465,6 +465,13 @@ def batch_response(*parts):
     )
 
 
+@pytest.fixture
+def batch_creates(monkeypatch):
+    """Send ts_affiliation creates as a $batch of POSTs: the path of a table
+    that rejects CreateMultiple, as ts_affiliation did until 2026-10-18."""
+    monkeypatch.setattr("dataverse.client._NO_CREATE_MULTIPLE", frozenset({"ts_affiliations"}))
+
+
 ADDRESSES = [
     {"ts_externalid": "W1 - A1", "line1": "1 Main"},
     {"ts_externalid": "W2 - A2", "line1": "2 High"},
@@ -532,8 +539,9 @@ def test_batch_update_row_that_fails_alone_raises():
         )
 
 
+@pytest.mark.usefixtures("batch_creates")
 def test_bulk_upsert_ts_affiliation_creates_in_one_batch():
-    """ts_affiliation rejects CreateMultiple, so its creates share one $batch."""
+    """A table that rejects CreateMultiple sends its creates in one $batch."""
     g1 = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
     g2 = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
     client = make_client([
@@ -558,6 +566,7 @@ def test_bulk_upsert_ts_affiliation_creates_in_one_batch():
     assert not any("CreateMultiple" in c["url"] for c in calls)
 
 
+@pytest.mark.usefixtures("batch_creates")
 def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
     """A $batch of creates is not resent: keep the rows that landed, create the rest."""
     landed = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
@@ -577,6 +586,221 @@ def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
     )
     assert results == [("A", landed, True), ("B", created, True)]
     assert sum(c["url"].endswith("/$batch") for c in client._session.calls) == 1
+
+
+# Dataverse ignores statecode on a POST, so an inactive affiliation would be
+# created active (533 in prod on 2026-10-17); a PATCH sets the state.
+G1 = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+G2 = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+
+
+def batch_parts(call):
+    return call["data"].decode().split("--batch_")[1:-1]
+
+
+@pytest.mark.usefixtures("batch_creates")
+def test_batch_create_sets_a_non_default_state_with_a_patch():
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # lookup existing
+        batch_response((204, G1, None), (204, G2, None)),  # the creates
+        batch_response((204, None, None)),  # the state of the inactive one
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [
+            {"ts_externalid": "A", "statecode": 1, "ts_substatus": 126870005},
+            {"ts_externalid": "B", "statecode": 0},
+        ],
+        batch_size=100,
+        fallback_on_error=False,
+    )
+    assert results == [("A", G1, True), ("B", G2, True)]
+    calls = client._session.calls
+    assert len(calls) == 3
+    inactive, active = batch_parts(calls[1])
+    assert "statecode" not in inactive and "126870005" in inactive
+    assert '"statecode": 0' in active
+    [state] = batch_parts(calls[2])
+    assert f"PATCH https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/ts_affiliations({G1}) HTTP/1.1" in state
+    assert '{"statecode": 1}' in state and "If-Match: *" in state
+
+
+@pytest.mark.usefixtures("batch_creates")
+def test_batch_state_patch_that_fails_alone_is_the_record_error():
+    errors = {}
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        batch_response((204, G1, None), (204, G2, None)),
+        batch_response((204, None, None), (412, None, "Record is locked")),
+        FakeResponse(400, {"error": {"message": "bad state"}}),  # B's PATCH alone
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [{"ts_externalid": "A", "statecode": 1}, {"ts_externalid": "B", "statecode": 1}],
+        batch_size=100,
+        fallback_on_error=False,
+        record_errors=errors,
+    )
+    # B exists but stays active: reported as failed, so a later run updates it.
+    assert results == [("A", G1, True), ("B", None, False)]
+    assert list(errors) == ["B"] and "bad state" in str(errors["B"])
+    last = client._session.calls[-1]
+    assert last["method"] == "PATCH" and last["url"].endswith(f"ts_affiliations({G2})")
+    assert last["json"] == {"statecode": 1}
+
+
+@pytest.mark.usefixtures("batch_creates")
+def test_batch_create_with_unknown_outcome_sets_the_state_of_both_halves():
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        requests.exceptions.ReadTimeout("read timed out"),  # the $batch of creates
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": G1}]}),
+        batch_response((204, None, None)),  # A landed: its state
+        FakeResponse(200, {"value": []}),  # upsert_by_field find for B
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({G2})"}),
+        FakeResponse(204),  # B's state
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [{"ts_externalid": "A", "statecode": 1}, {"ts_externalid": "B", "statecode": 1}],
+        batch_size=100,
+    )
+    assert results == [("A", G1, True), ("B", G2, True)]
+    calls = client._session.calls
+    assert f"ts_affiliations({G1})" in calls[3]["data"].decode()
+    assert calls[5]["method"] == "POST" and calls[5]["json"] == {"ts_externalid": "B"}
+    assert calls[6]["method"] == "PATCH" and calls[6]["url"].endswith(f"ts_affiliations({G2})")
+    assert calls[6]["json"] == {"statecode": 1}
+
+
+def test_single_create_sets_a_non_default_state_with_a_patch():
+    client = make_client([
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({G1})"}),
+        FakeResponse(204),
+    ])
+    record_id = client.create(
+        "ts_affiliations", {"ts_externalid": "A", "statecode": 1, "statuscode": 2}
+    )
+    assert record_id == G1
+    post, patch = client._session.calls
+    assert post["json"] == {"ts_externalid": "A"}
+    assert patch["method"] == "PATCH" and patch["url"].endswith(f"ts_affiliations({G1})")
+    assert patch["json"] == {"statecode": 1, "statuscode": 2}
+
+
+def test_upsert_whose_create_landed_unseen_still_sets_the_state():
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # find: not there yet
+        requests.exceptions.ReadTimeout("read timed out"),  # the POST
+        FakeResponse(200, {"value": [{"ts_affiliationid": G1}]}),  # it had landed
+        FakeResponse(204),  # its state
+    ])
+    assert client.upsert_by_field(
+        "ts_affiliations", "ts_externalid", "A", {"ts_externalid": "A", "statecode": 1}
+    ) == (G1, True)
+    patch = client._session.calls[-1]
+    assert patch["method"] == "PATCH" and patch["url"].endswith(f"ts_affiliations({G1})")
+    assert patch["json"] == {"statecode": 1}
+
+
+def test_single_create_in_the_default_state_is_one_post():
+    client = make_client([
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({G1})"}),
+    ])
+    assert client.create("ts_affiliations", {"ts_externalid": "A", "statecode": 0}) == G1
+    [post] = client._session.calls
+    assert post["json"] == {"ts_externalid": "A", "statecode": 0}
+
+
+def test_create_multiple_keeps_the_state_in_the_create():
+    """CreateMultiple applies statecode itself: no second write."""
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(200, {"Ids": [G1]}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "contacts", "ts_externalid", [{"ts_externalid": "C", "statecode": 1}],
+        batch_size=100, fallback_on_error=False,
+    )
+    assert results == [("C", G1, True)]
+    calls = client._session.calls
+    assert len(calls) == 2
+    [target] = calls[1]["json"]["Targets"]
+    assert target["statecode"] == 1
+
+
+def test_ts_affiliation_creates_use_create_multiple_with_their_state():
+    """One write each: CreateMultiple keeps an inactive affiliation inactive."""
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(200, {"Ids": [G1, G2]}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid",
+        [{"ts_externalid": "A", "statecode": 1}, {"ts_externalid": "B", "statecode": 0}],
+        batch_size=100, fallback_on_error=False,
+    )
+    assert results == [("A", G1, True), ("B", G2, True)]
+    calls = client._session.calls
+    assert len(calls) == 2
+    assert calls[1]["url"].endswith("ts_affiliations/Microsoft.Dynamics.CRM.CreateMultiple")
+    a, b = calls[1]["json"]["Targets"]
+    assert a["statecode"] == 1 and b["statecode"] == 0
+    assert a["@odata.type"] == "Microsoft.Dynamics.CRM.ts_affiliation"
+
+
+def test_failed_create_multiple_falls_back_to_single_creates_with_their_state():
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(400, {"error": {"message": "one bad record"}}),  # CreateMultiple
+        FakeResponse(200, {"value": []}),  # A: find
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({G1})"}),
+        FakeResponse(204),  # A: its state
+        FakeResponse(200, {"value": []}),  # B: find
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({G2})"}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid",
+        [{"ts_externalid": "A", "statecode": 1}, {"ts_externalid": "B", "statecode": 0}],
+        batch_size=100,
+    )
+    assert results == [("A", G1, True), ("B", G2, True)]
+    patches = [c for c in client._session.calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["url"].endswith(f"ts_affiliations({G1})") and patches[0]["json"] == {"statecode": 1}
+
+
+@pytest.mark.parametrize("stored, sent", [(0, 1), (1, 0)])
+def test_delta_update_of_an_affiliation_writes_its_new_state(stored, sent):
+    """An activity that turns invalid (or valid again) updates statecode in its PATCH."""
+    client = make_client([
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": G1, "statecode": stored}]}),
+        batch_response((204, None, None)),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid", [{"ts_externalid": "A", "statecode": sent}],
+        batch_size=100, fallback_on_error=False, skip_unchanged=True,
+    )
+    assert results == [("A", G1, False)]
+    [patch] = batch_parts(client._session.calls[1])
+    assert f"PATCH https://paion-crm-test.api.crm4.dynamics.com/api/data/v9.2/ts_affiliations({G1}) HTTP/1.1" in patch
+    assert f'"statecode": {sent}' in patch
+
+
+def test_delta_update_with_the_state_already_set_writes_nothing():
+    skipped = set()
+    client = make_client([
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": G1, "statecode": 1}]}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations", "ts_externalid", [{"ts_externalid": "A", "statecode": 1}],
+        batch_size=100, fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert results == [("A", G1, False)] and skipped == {"A"}
+    assert len(client._session.calls) == 1
 
 
 
@@ -1082,6 +1306,7 @@ def _existing_addresses(existing, count=2):
 
 @pytest.mark.parametrize("status", [429, 500, 503])
 @pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.usefixtures("batch_creates")
 def test_a_service_failure_inside_a_batch_keeps_the_rest_and_retries_alone(
     no_sleep, status, existing
 ):
@@ -1106,6 +1331,7 @@ def test_a_service_failure_inside_a_batch_keeps_the_rest_and_retries_alone(
 
 @pytest.mark.parametrize("status", [403, 429, 500, 503])
 @pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.usefixtures("batch_creates")
 def test_a_lasting_service_failure_inside_a_batch_stops_at_one_single_write(
     no_sleep, status, existing
 ):

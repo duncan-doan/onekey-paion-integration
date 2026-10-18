@@ -144,8 +144,10 @@ class DynamicSyncEngine:
       5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + parentcustomerid)
       6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation)
 
-    Bulk write notes: ``customeraddress`` / ``ts_affiliation`` use per-row
-    create/update (no CreateMultiple/UpdateMultiple) in this org.
+    Bulk write notes: ``customeraddress`` / ``ts_affiliation`` updates are
+    per-row PATCHes in one $batch (no UpdateMultiple); their creates use
+    CreateMultiple, which keeps an inactive affiliation's statecode
+    (see ``dataverse.client._NO_CREATE_MULTIPLE``).
     """
 
     def __init__(

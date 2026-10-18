@@ -266,8 +266,32 @@ _ENTITY_META = {
 
 # Tables that reject bulk multi-ops in this org. bulk_upsert_by_field sends
 # each batch of their writes as one $batch of single requests instead.
+# ts_affiliation creates use CreateMultiple: test and prod list it for the
+# table (2026-10-18), and it keeps an inactive record's statecode, which a
+# single create drops. Adding the table back here returns its creates to the
+# $batch path, where _apply_states sets the state.
 _NO_UPDATE_MULTIPLE = frozenset({"customeraddresses", "ts_affiliations"})
-_NO_CREATE_MULTIPLE = frozenset({"ts_affiliations"})
+_NO_CREATE_MULTIPLE = frozenset()
+
+# Dataverse ignores statecode on a single create (POST) and keeps the new
+# record in its default state; CreateMultiple and updates apply it. A record
+# created one at a time gets a non-default state with a PATCH right after.
+_STATE_FIELDS = ("statecode", "statuscode")
+
+
+def _split_state(data):
+    """Return ``(create body, state)`` for a record created with a POST.
+
+    ``state`` holds statecode (and statuscode, when given) only for a record
+    that does not start in the default state 0; it is ``{}`` otherwise and the
+    body is ``data`` unchanged.
+    """
+    statecode = data.get("statecode") if isinstance(data, dict) else None
+    if statecode is None or str(statecode) == "0":
+        return data, {}
+    state = {name: data[name] for name in _STATE_FIELDS if data.get(name) is not None}
+    body = {name: value for name, value in data.items() if name not in _STATE_FIELDS}
+    return body, state
 
 
 def escape_odata(value):
@@ -594,15 +618,19 @@ class DataverseClient:
         """Create a record and return its GUID.
 
         Dataverse returns the new id in the ``OData-EntityId`` header rather
-        than a body, unless a representation is requested.
+        than a body, unless a representation is requested. A record that
+        starts in a non-default state gets it with a PATCH after the POST,
+        which ignores statecode.
         """
         headers = {}
         if return_record:
             headers["Prefer"] = "return=representation"
 
-        response = self.request("POST", entity_set, json=data, headers=headers or None)
-        if return_record and response.content:
-            return response.json()
+        body, state = _split_state(data)
+        response = self.request("POST", entity_set, json=body, headers=headers or None)
+        record = response.json() if return_record and response.content else None
+        if record is not None and not state:
+            return record
 
         entity_id = response.headers.get("OData-EntityId", "")
         match = re.search(r"\(([0-9a-fA-F-]{36})\)", entity_id)
@@ -611,7 +639,13 @@ class DataverseClient:
                 f"Created a {entity_set} record but could not parse its id from "
                 f"OData-EntityId={entity_id!r}"
             )
-        return match.group(1)
+        record_id = match.group(1)
+        if state:
+            self.update(entity_set, record_id, state)
+            if record is not None:
+                record.update(state)
+                return record
+        return record_id
 
     def update(self, entity_set, record_id, data, attempts=None):
         """Patch an existing record by GUID; it is never created.
@@ -660,6 +694,10 @@ class DataverseClient:
                     "Create of %s %s had landed despite the error: id=%s",
                     entity_set, match_value, landed[primary_id],
                 )
+                # The POST that landed did not set the state.
+                state = _split_state(data)[1]
+                if state:
+                    self.update(entity_set, landed[primary_id], state)
                 return landed[primary_id], True
             return self.create(entity_set, data), True
 
@@ -1063,12 +1101,51 @@ class DataverseClient:
                 results[index] = (match_value, None, False)
                 record_errors[match_value] = exc
 
+        def _set_state_one(index, match_value, state):
+            self.update(entity_set, results[index][1], state)
+
+        def _apply_states(created):
+            """PATCH the state of records just created by a $batch POST.
+
+            ``created`` are ``(index, match_value, payload)`` whose result
+            holds the new id. Only a record that starts in a non-default state
+            is sent. A PATCH the $batch rejects is retried alone; one that
+            still fails is the record's error, so a later run sets it.
+            """
+            if entity_set not in _NO_CREATE_MULTIPLE:
+                return
+            writes = [
+                (index, match_value, _split_state(payload)[1])
+                for index, match_value, payload in created
+            ]
+            writes = [write for write in writes if write[2]]
+            if not writes:
+                return
+            outcomes = self.batch_write(
+                [
+                    ("PATCH", f"{entity_set}({results[index][1]})", state)
+                    for index, _, state in writes
+                ],
+                idempotent=True,
+            )
+            retry = [
+                write
+                for write, (status, _, _) in zip(writes, outcomes)
+                if not status or status >= 400
+            ]
+            if retry:
+                logger.warning(
+                    "$batch rejected %d of %d state updates for %s, retrying them one by one",
+                    len(retry), len(writes), entity_set,
+                )
+            _one_by_one(retry, _set_state_one, len(writes))
+
         def _create_batch(batch):
             payloads = [payload for _, _, payload in batch]
             try:
                 if entity_set in _NO_CREATE_MULTIPLE:
                     outcomes = self.batch_write(
-                        [("POST", entity_set, payload) for payload in payloads],
+                        [("POST", entity_set, _split_state(payload)[0]) for payload in payloads],
                         idempotent=False,
                     )
                     ids = [
@@ -1088,10 +1165,12 @@ class DataverseClient:
                     chunk_size=lookup_chunk_size,
                 )
                 missing = []
+                arrived = []
                 for index, match_value, payload in batch:
                     row = landed.get(match_value)
                     if row and row.get(primary_id):
                         results[index] = (match_value, row[primary_id], True)
+                        arrived.append((index, match_value, payload))
                     else:
                         missing.append((index, match_value, payload))
                 logger.warning(
@@ -1100,6 +1179,7 @@ class DataverseClient:
                     entity_set, match_field, len(batch), len(batch) - len(missing),
                     len(missing), str(exc)[:300],
                 )
+                _apply_states(arrived)
                 if missing and not fallback_on_error:
                     raise
                 _one_by_one(missing, _create_one, len(batch))
@@ -1120,16 +1200,20 @@ class DataverseClient:
             # creates that succeeded keep their ids. A service error that
             # persists is raised by the first single write that hits it.
             rejected = []
+            created = []
             for (index, match_value, payload), record_id in zip(batch, ids):
                 if record_id:
                     results[index] = (match_value, record_id, True)
+                    created.append((index, match_value, payload))
                 else:
                     rejected.append((index, match_value, payload))
+            _apply_states(created)
             if rejected:
                 logger.warning(
                     "$batch rejected %d of %d creates for %s, retrying them one by one",
                     len(rejected), len(batch), entity_set,
                 )
+            # A create retried alone goes through create(), which sets its state.
             _one_by_one(rejected, _create_one, len(batch))
 
         def _update_one(index, match_value, payload):
