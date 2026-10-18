@@ -260,7 +260,7 @@ HCP-003,OneKey,Individual,lastName,individual.lastName,Dataverse,contact,lastnam
 │  usualName    ─────────┘                                                   │
 │  typeCode ───────────── direct ────────► sic                               │
 │  typeLabel ──────────── template ──────► description (part of)             │
-│  activityLocationCode ─ map ───────────► industrycode                      │
+│  activityLocationCode ─ lookup ────────► ts_category_ref                   │
 │  managerWorkplaceEid ── lookup ────────► parentaccountid                   │
 │  statusCode ─────────── map ───────────► statecode                         │
 │  address_street ─────── direct ────────► address1_line1                    │

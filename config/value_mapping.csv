@@ -11,13 +11,6 @@ VAL-STR-001,statuscode,3,Valid,1,Active,Active status reason
 VAL-STR-002,statuscode,9,Invalid,2,Inactive,Inactive status reason
 VAL-STR-003,statuscode,1,Created,2,Inactive,Pending validation
 VAL-STR-004,statuscode,6,Deceased,2,Inactive,Deceased
-# Industry Code Mapping (activityLocationCode -> industrycode),,,,,,
-VAL-IND-001,industrycode,H,Hospital,11,Hospital,Hospital facility
-VAL-IND-002,industrycode,S,Surgery,12,Surgery/Practice,Surgery or GP Practice
-VAL-IND-003,industrycode,N,NHS Establishment,13,NHS Establishment,NHS Est / Clinic
-VAL-IND-004,industrycode,O,Office,14,Office,Office / Other
-VAL-IND-005,industrycode,P,Pharmacy,15,Pharmacy,Pharmacy
-VAL-IND-006,industrycode,L,Laboratory,16,Laboratory,Lab facility
 # Process Code Mapping (CDC processCode),,,,,,
 VAL-PRC-001,processcode,I,Insert,insert,Insert,New record created in OneKey
 VAL-PRC-002,processcode,U,Update,update,Update,Existing record modified
@@ -273,6 +266,15 @@ VAL-STR-004,structuretype,ETA,"Organisation, Hospital, Affiliate, Antenna",12687
 VAL-STR-005,structuretype,SER,Department,126870005,Department,
 VAL-STR-006,structuretype,SSE,Sub department,126870006,Sub department,
 VAL-STR-007,structuretype,SSS,Sub Sub department,126870007,Sub Sub department,
+VAL-TSR-008,structuretype,GOR,Group of Organisations,126870001,Primary Organisation,global 1TS.GOR (UK POR is the same global value)
+VAL-TSR-009,structuretype,MSB,Medical Specialist Company,126870002,Organisation,NL; global 1TS.ORG
+VAL-TSR-010,structuretype,POL,Group of Departments,126870003,Department,DK; global 1TS.POL
+VAL-TSR-011,structuretype,INS,"Instances, Committees",126870008,"Instances, Committees",global 1TS.COM; new option
+VAL-TSR-012,structuretype,COM,"Instances, Committees",126870008,"Instances, Committees",global 1TS.COM; new option
+VAL-TSR-013,structuretype,ASS,"Association, Fellowship",126870009,"Association, Fellowship",global 1TS.ASS; new option
+VAL-TSR-014,structuretype,NET,Network,126870010,Network,DE; global 1TS.NET; new option
+VAL-TSR-015,structuretype,DIV,Miscellaneous,126870011,Miscellaneous,SE; global 1TS.MIS; new option
+VAL-TSR-016,structuretype,UNK,Unknown,126870012,Unknown,UK/NL; global 1TS.UNK; new option
 # Title Code Mapping (individual.titleCode -> title decode),,,,,,
 VAL-TIT-001,title,02,Mx,126870001,Mx,Mx
 VAL-TIT-002,title,03,Doctor,126870002,Doctor,Doctor

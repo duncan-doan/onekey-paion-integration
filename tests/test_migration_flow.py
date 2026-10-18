@@ -109,13 +109,15 @@ def test_choices_and_states_are_json_integers():
         "preferredLanguageEID": "en",
     })
 
-    assert account["industrycode"] == 11
+    # activityLocationCode feeds the Category lookup (HCO-023), not the
+    # standard Industry choice.
+    assert "industrycode" not in account
     assert account["statecode"] == 0
     assert contact["gendercode"] == 2
     assert contact["statecode"] == 1
     assert contact["ts_preferredlanguage"] == 126870001
     for payload in (account, contact):
-        for field in ("industrycode", "statecode", "gendercode", "ts_preferredlanguage", "ts_substatus"):
+        for field in ("statecode", "gendercode", "ts_preferredlanguage", "ts_substatus"):
             if field in payload:
                 assert type(payload[field]) is int
     # Numeric identifiers remain strings; only typed option columns convert.
