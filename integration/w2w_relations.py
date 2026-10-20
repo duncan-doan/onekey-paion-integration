@@ -108,6 +108,10 @@ def explode_w2w_relations(raw_workplaces: list[dict]) -> list[dict]:
                     "toWorkplaceEid": to_eid,
                     "childWorkplaceEid": child_eid,
                     "parentWorkplaceEid": parent_eid,
+                    # Preserve the direction exactly as OneKey returned it for
+                    # this side of the relationship.  The transform maps this
+                    # to ts_affiliation.ts_isparent.
+                    "isParent": relation["isParent"],
                     "linkCode": link_code,
                     "ts_externalid": affiliation_external_id(
                         from_eid, to_eid, link_code

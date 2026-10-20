@@ -115,6 +115,7 @@ def test_each_side_of_a_link_gets_its_own_key():
         ("WUKE00001260", "WUKE00117965"),
         ("WUKE00117965", "WUKE00001260"),
     ]
+    assert [e["isParent"] for e in exploded] == [False, True]
     # Both rows still record which side is the parent.
     assert {(e["childWorkplaceEid"], e["parentWorkplaceEid"]) for e in exploded} == {
         ("WUKE00117965", "WUKE00001260")
@@ -159,6 +160,7 @@ def test_transform_w2w_binds_from_and_to():
         "toWorkplaceEid": "WUKE00117965",
         "childWorkplaceEid": "WUKE00117965",
         "parentWorkplaceEid": "WUKE00001260",
+        "isParent": False,
         "linkCode": "AUT",
         "ts_externalid": affiliation_external_id(
             "WUKE00001260", "WUKE00117965", "AUT"
@@ -177,21 +179,25 @@ def test_transform_w2w_binds_from_and_to():
     assert payload["ts_ToID@odata.bind"] == "/accounts(to-guid)"
     assert payload["ts_linktype"] == int(engine.config.get_value("linkcode", "AUT"))
     assert payload["ts_isprimary"] is False
+    assert payload["ts_isparent"] is False
 
 
 def test_transform_w2w_hie_is_primary_on_both_sides():
     engine = create_transform_engine(load_mapping_config())
-    for from_eid, to_eid in (
-        ("WUKE00001260", "WUKE00117965"),
-        ("WUKE00117965", "WUKE00001260"),
+    for from_eid, to_eid, is_parent in (
+        ("WUKE00001260", "WUKE00117965", False),
+        ("WUKE00117965", "WUKE00001260", True),
     ):
         edge = {
             "fromWorkplaceEid": from_eid,
             "toWorkplaceEid": to_eid,
+            "isParent": is_parent,
             "linkCode": "HIE",
             "ts_externalid": affiliation_external_id(from_eid, to_eid, "HIE"),
         }
-        assert engine.transform_w2w_affiliation(edge)["ts_isprimary"] is True
+        payload = engine.transform_w2w_affiliation(edge)
+        assert payload["ts_isprimary"] is True
+        assert payload["ts_isparent"] is is_parent
 
 
 def test_collect_w2w_filters_out_of_contract_related():

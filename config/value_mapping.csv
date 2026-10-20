@@ -307,7 +307,7 @@ VAL-TIT-028,title,49,Viscount,126870028,Viscount,Viscount
 # Salutation Mapping (individual.prefixNameCode -> salutation),,,,,,
 # Address Type Mapping,,,,,,
 VAL-ADD-001,addresstype,F,Billing address,1,Bill To,
-VAL-ADD-002,addresstype,L,Delivery address,2,Ship to,
+VAL-ADD-002,addresstype,L,Delivery address,2,Ship To,
 VAL-ADD-003,addresstype,M,Mailing address,5,Mail To,
 VAL-ADD-004,addresstype,P,Primary address,3,Primary,
 VAL-ADD-005,addresstype,S,Secondary address,4,Other,
