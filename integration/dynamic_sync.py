@@ -26,7 +26,7 @@ from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_ac
 from .lookup_sync import CatalogResolver, CountryResolver, sync_lookup_tables
 from .address_rows import address_id, address_sources, plan_address_rows, workplace_batches
 from .picklist_sync import sync_picklists_from_config
-from .w2w_relations import collect_w2w_relations
+from .w2w_relations import collect_w2w_relations, explode_w2w_relations
 from .activity_affiliation import flatten_activity_for_affiliation
 from .job_trace import (
     ENTITY_BY_NAME,
@@ -191,11 +191,12 @@ class DynamicSyncEngine:
         self._contact_cache: dict[str, str] = {}
         # One HCP name per nameless workplace, from the same population extract.
         self._hcp_name_by_workplace: dict[str, str] = {}
-        # False only while sync_full holds the names from a whole population
-        # walk. A delta window, a retry or a sample sees some of a workplace's
-        # activities at most, so existing accounts keep their name
-        # (_keep_existing_nameless_names).
-        self._hcp_names_partial = True
+        # False only while sync_full holds a whole population walk. A delta
+        # window, a retry or a sample sees part of it at most, so existing
+        # accounts keep their name (_keep_existing_nameless_names), and a link
+        # to a record this run did not read counts as contracted when the
+        # record is already in Dataverse (_admit_known).
+        self._partial_population = True
         # time.monotonic() after which a run stops between batches, or None.
         # Queue workers set it: Flex Consumption stops an execution 60
         # minutes into a scale-in, so a run ends cleanly before that and a
@@ -532,7 +533,7 @@ class DynamicSyncEngine:
                     packets = None
                     self._hcp_name_by_workplace = {}
                     # max_records stops the walk early, so it sees some names only.
-                    self._hcp_names_partial = bool(max_records)
+                    self._partial_population = bool(max_records)
                     if not hco_only and not hcp_only:
                         packets = self._collect_population_packets(
                             codebase, max_records=max_records
@@ -1165,7 +1166,7 @@ class DynamicSyncEngine:
         if not prepared:
             return result, flattened, raw_workplaces
 
-        if self._hcp_names_partial:
+        if self._partial_population:
             self._keep_existing_nameless_names(prepared)
 
         key_name = prepared[0][1]
@@ -1541,6 +1542,11 @@ class DynamicSyncEngine:
             if allowed_workplace_eids is not None
             else self._contracted_workplace_eids or None
         )
+        if allow is not None and self._partial_population and not dry_run:
+            # A parent that did not change in this window is still contracted.
+            allow = set(allow) | self._admit_known(
+                workplace_eids={hco.get("parentWorkplaceEid") for hco in hcos}
+            )
         edges = edges_from_hcos(hcos, allowed_workplace_eids=allow)
         result["edges"] = len(edges)
         if not edges:
@@ -1676,6 +1682,16 @@ class DynamicSyncEngine:
             if allowed_workplace_eids is not None
             else self._contracted_workplace_eids or None
         )
+        if allow is not None and self._partial_population and not dry_run:
+            # The related workplace need not have changed in this window.
+            related = explode_w2w_relations(raw_workplaces)
+            allow = set(allow) | self._admit_known(
+                workplace_eids={
+                    eid
+                    for edge in related
+                    for eid in (edge["childWorkplaceEid"], edge["parentWorkplaceEid"])
+                }
+            )
         edges = collect_w2w_relations(
             raw_workplaces, allowed_workplace_eids=allow
         )
@@ -1886,11 +1902,22 @@ class DynamicSyncEngine:
         entity_set = self._affiliation_entity_set()
 
         flat_rows: list[dict] = []
-        allow_wp = self._contracted_workplace_eids or None
-        allow_ind = self._contracted_individual_eids or None
+        flats = [flatten_activity_for_affiliation(record) for record in activity_records]
+        if self._partial_population and not dry_run:
+            # The activity's workplace or individual need not have changed in
+            # this window to be contracted. The check applies even when the
+            # window holds no workplace: an empty set is not "no filter" here.
+            self._admit_known(
+                workplace_eids={flat.get("workplaceEid") for flat in flats},
+                individual_eids={flat.get("individualEid") for flat in flats},
+            )
+            allow_wp = self._contracted_workplace_eids
+            allow_ind = self._contracted_individual_eids
+        else:
+            allow_wp = self._contracted_workplace_eids or None
+            allow_ind = self._contracted_individual_eids or None
         skipped_out_of_contract = 0
-        for record in activity_records:
-            flat = flatten_activity_for_affiliation(record)
+        for flat in flats:
             if not (
                 flat.get("activityEid")
                 and flat.get("individualEid")
@@ -2561,7 +2588,7 @@ class DynamicSyncEngine:
         self._hcp_name_by_workplace = hcp_name_by_workplace(
             individuals.values(), all_activities
         )
-        self._hcp_names_partial = True
+        self._partial_population = True
         self.sync_logger.phase_finished(
             "extract",
             started,
@@ -2707,6 +2734,30 @@ class DynamicSyncEngine:
         found = self._lookup_accounts_bulk([workplace_eid])
         return found.get(workplace_eid)
     
+    def _admit_known(self, workplace_eids=(), individual_eids=()) -> set[str]:
+        """Count workplaces and individuals already in Dataverse as contracted.
+
+        A run that reads only part of the population (_partial_population)
+        knows only the records it read, so a link from a record that changed
+        to one that did not, such as a new activity at an existing workplace,
+        would be dropped as outside the contract. Accounts and contacts are
+        loaded only from the contracted population, so one that exists is in
+        it. Returns the workplace EIDs it added.
+        """
+        wanted = {
+            str(eid) for eid in workplace_eids
+            if eid and str(eid) not in self._contracted_workplace_eids
+        }
+        admitted = set(self._lookup_accounts_bulk(wanted)) if wanted else set()
+        self._contracted_workplace_eids |= admitted
+        wanted = {
+            str(eid) for eid in individual_eids
+            if eid and str(eid) not in self._contracted_individual_eids
+        }
+        if wanted:
+            self._contracted_individual_eids |= set(self._lookup_contacts_bulk(wanted))
+        return admitted
+
     def _keep_existing_nameless_names(self, prepared: list[tuple]) -> None:
         """Leave out the built name of nameless workplaces that already exist.
 

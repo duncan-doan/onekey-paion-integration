@@ -1002,3 +1002,92 @@ def test_a_failed_claim_never_leaves_two_rows_with_one_number(tmp_path):
     numbers = [number for number, _ in store.layout()]
     assert len(numbers) == len(set(numbers))
     assert (1, "WUKH1 - A1") in store.layout() and (3, "WUKH1 - A2") in store.layout()
+
+
+class KnownRecordsDataverse(BulkDataverse):
+    """Holds the given accounts and contacts already; records every upserted key."""
+
+    def __init__(self, accounts=(), contacts=()):
+        super().__init__()
+        self.accounts = set(accounts)
+        self.contacts = set(contacts)
+
+    def find_many_by_field(self, entity_set, match_field, keys, **kwargs):
+        known = {"accounts": (self.accounts, "accountid"), "contacts": (self.contacts, "contactid")}
+        held, id_field = known.get(entity_set, (set(), ""))
+        return {key: {id_field: f"{entity_set}-{key}"} for key in keys if key in held}
+
+    def upserted(self, entity_set):
+        return [key for name, keys in self.upserts if name == entity_set for key in keys]
+
+    def update_multiple(self, entity_set, payloads):
+        self.updated.extend((entity_set, row.get("accountid"), row) for row in payloads)
+
+
+def _wdk_window_delta(tmp_path, dataverse, records):
+    engine, _ = _engine(tmp_path, dataverse, records=records)
+    result = engine.sync_delta(
+        ["WDK"], "2026-10-18T18:00:00Z", "2026-10-20T00:00:00Z", sync_picklists=False
+    )
+    return engine, result
+
+
+NEW_ACTIVITY_AT_AN_EXISTING_WORKPLACE = [
+    # One workplace that did change, as on 20 Oct: with none, the contract
+    # filter has nothing to check against and lets everything through.
+    {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WDKH2", "officialName": "Other"}},
+    {"entityType": "INDIVIDUAL", "individual": {"individualEid": "WDKI1", "lastName": "Doe"}},
+    {
+        "entityType": "ACTIVITY",
+        "activity": {
+            "activityEid": "WDKA1",
+            "individualEid": "WDKI1",
+            "workplaceEid": "WDKH1",  # not in this window
+            "isMainActivity": True,
+        },
+    },
+]
+
+
+def test_a_delta_links_a_new_activity_to_a_workplace_already_in_dataverse(tmp_path):
+    dataverse = KnownRecordsDataverse(accounts={"WDKH1", "WDKH2"}, contacts={"WDKI1"})
+    _, result = _wdk_window_delta(tmp_path, dataverse, NEW_ACTIVITY_AT_AN_EXISTING_WORKPLACE)
+    assert "WDKA1" in dataverse.upserted("ts_affiliations")
+    assert result["activity_affiliations"]["processed"] == 1
+
+
+def test_a_delta_still_skips_an_activity_at_a_workplace_outside_the_contract(tmp_path):
+    dataverse = KnownRecordsDataverse(accounts={"WDKH2"}, contacts={"WDKI1"})
+    _, result = _wdk_window_delta(tmp_path, dataverse, NEW_ACTIVITY_AT_AN_EXISTING_WORKPLACE)
+    assert "WDKA1" not in dataverse.upserted("ts_affiliations")
+    assert result["activity_affiliations"]["processed"] == 0
+
+
+def _hie(parent_eid, is_parent=False):
+    return {"typeCode": "workplaceToWorkplaceLink", "linkCode": "HIE", "isParent": is_parent,
+            "onekeyEid": parent_eid, "beginValidDate": "2026-04-09T00:00:00Z"}
+
+
+def test_a_delta_writes_a_relation_and_parent_to_a_workplace_already_in_dataverse(tmp_path):
+    changed_child = [{
+        "entityType": "WORKPLACE",
+        "workplace": {
+            "workplaceEid": "WDKE1", "officialName": "Child",
+            "managerWorkplaceEid": "WDKH9",  # parent did not change in this window
+            "relations": [_hie("WDKH9")],
+        },
+    }]
+    dataverse = KnownRecordsDataverse(accounts={"WDKE1", "WDKH9"})
+    _, result = _wdk_window_delta(tmp_path, dataverse, changed_child)
+    assert "WDKE1 - WDKH9 - HIE" in dataverse.upserted("ts_affiliations")
+    assert result["hierarchy"]["edges"] == 1
+    assert result["hierarchy"]["linked"] == 1
+
+
+def test_a_delta_without_workplaces_still_checks_the_activity_workplace(tmp_path):
+    # Only the individual and its activity changed; the workplace is not an account.
+    records = [r for r in NEW_ACTIVITY_AT_AN_EXISTING_WORKPLACE if r["entityType"] != "WORKPLACE"]
+    dataverse = KnownRecordsDataverse(accounts=set(), contacts={"WDKI1"})
+    _, result = _wdk_window_delta(tmp_path, dataverse, records)
+    assert "WDKA1" not in dataverse.upserted("ts_affiliations")
+    assert result["activity_affiliations"]["failed"] == 0

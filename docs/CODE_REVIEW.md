@@ -192,6 +192,7 @@ reads, and Dataverse GETs through a client that refused any other method.
 | English contacts got no preferred language; the deploy's test job failed | `0a6e48e` moved `en` to the `preflanguage` value type, but HCP-011 and the `ts_preferredlanguage` picklist target still used `language` | HCP-011 decodes `preflanguage`, which has a row for every code OneKey sends (en, de, nl, sv, no, da, fi) on the option values contacts already hold, and the picklist target syncs `preflanguage`; tests pin every code and the target |
 | Nameless account names changed on every delta | A delta builds the HCP part of the name from its window, which may miss the workplace's activities or hold a different HCP than the full sync chose | In a delta, a nameless account that already exists keeps its name; a new one gets the built name; the full sync names them all |
 | Failing tests did not stop a deploy | The deploy job needed only `build` | It needs `test` too |
+| Deltas dropped links to records that did not change | A delta's contract allowlist held only the workplaces and individuals in its window, so a new activity, HCO relation or parent link to an unchanged record was skipped as out of contract (WDK 20 Oct: `Activity affiliations skipped outside contracted population: records=6`) | During a delta, a workplace or individual already in Dataverse counts as contracted (`_admit_known`) for activity affiliations, HCO relations and the hierarchy |
 
 **Fourth review (17 October 2026)**
 
