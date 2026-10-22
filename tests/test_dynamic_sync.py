@@ -319,7 +319,8 @@ def test_a_delta_counts_contact_changes_it_cannot_apply(tmp_path):
 # -- delta contacts from what changed ----------------------------------------------
 
 DELTA_WINDOW = ("2026-10-15T00:46:00Z", "2026-10-16T03:24:00Z")
-PARENT = "parentcustomerid_account@odata.bind"
+# The contact's main workplace (HCP-010).
+PARENT = "ts_Department@odata.bind"
 
 
 class KnownDataverse(BulkDataverse):
@@ -420,7 +421,7 @@ def test_a_delta_creates_a_new_contact_only_at_a_known_workplace(tmp_path):
     assert result["unjoined"] == {"activities": 0, "individuals": 2}
 
 
-def test_a_delta_with_the_workplace_still_sets_the_department(tmp_path):
+def test_a_delta_with_the_workplace_sets_the_department_and_hospital(tmp_path):
     dataverse = KnownDataverse(contacts={"WNLN1"})
     _delta(tmp_path, dataverse, [
         {"entityType": "WORKPLACE", "codBase": "WNL",
@@ -429,8 +430,11 @@ def test_a_delta_with_the_workplace_still_sets_the_department(tmp_path):
         _individual("WNLN1", "Doe"), _activity("WNLN101", "WNLN1", "WNLH1"),
     ])
     contact = dataverse.contacts()["WNLN1"]
-    assert contact["department"] == "Cardiologie"
     assert PARENT in contact
+    # The workplace has no parent, so the hospital is cleared; the department
+    # text is no longer written.
+    assert contact["ts_Hospital@odata.bind"] is None
+    assert "department" not in contact
 
 
 def test_a_failed_contact_lookup_fails_the_delta(tmp_path):

@@ -349,6 +349,10 @@ def flatten_hcp(result):
         "isValid": status == "3",
         "usualName": workplace.get("usualName"),
         "workplaceName": workplace.get("officialName") or workplace.get("usualName"),
+        # The contact's hospital: the parent of its workplace. A row without its
+        # workplace (a delta whose workplace did not change) cannot tell it.
+        "hospitalWorkplaceEid": workplace.get("managerWorkplaceEid"),
+        "workplaceLoaded": bool(workplace.get("workplaceEid")),
         "country": result.get("country"),
         "codBase": result.get("codBase"),
         "isInContract": result.get("isInContract"),

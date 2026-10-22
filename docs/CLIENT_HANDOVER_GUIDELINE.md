@@ -26,7 +26,7 @@ The integration copies the connector's contracted OneKey population into Dataver
 | --- | --- | --- |
 | Workplace | `account` | Healthcare organisation (HCO): hospital, practice, department |
 | Individual | `contact` | Healthcare professional (HCP): one contact per person |
-| Activity | `contact.parentcustomerid` plus `ts_affiliation` | The person's workplace. The main activity sets the contact's account. Every activity, including the main one, is also an affiliation row. |
+| Activity | `contact.ts_department`, `ts_hospital` and `ts_hospitalgroup` plus `ts_affiliation` | The person's workplace. The main activity sets the contact's department (its workplace account), hospital (that workplace's parent) and hospital group (the hospital's parent). Every activity, including the main one, is also an affiliation row. |
 | Workplace address | `customeraddress` | Address rows owned by the account |
 | Workplace-to-workplace relation | `ts_affiliation` | HCO–HCO links (hierarchy, group, and similar) |
 | Activity role (TIH) | `ts_affiliationrole` | One row per role code on an HCP–HCO affiliation |
@@ -167,7 +167,7 @@ Dataverse should have an alternate key on that column so the platform itself rej
 | Code lookup tables | `{codBase}.{list}.{code}` | Example: `WDE.SP.01` |
 
 One person is one contact, even when they practise at several workplaces. The main activity supplies
-`parentcustomerid`. The other workplaces are affiliation rows, not extra contacts.
+`ts_department`, `ts_hospital` and `ts_hospitalgroup`. The other workplaces are affiliation rows, not extra contacts.
 
 OneKey treats an address as shared across workplaces. Dataverse keeps Account to Address as one-to-many,
 so the same street under two organisations becomes two `customeraddress` rows. They share the
@@ -261,7 +261,11 @@ Each entry in `workplace.relations[]` becomes a `ts_affiliation` between two acc
 #### Phase 5 — HCP contacts
 
 Individuals are composed with their main activity and that activity's workplace, then upserted to `contact`.
-`parentcustomerid` points at the main workplace account. A person whose individual, activity, or
+`ts_department` points at the main workplace account, `ts_hospital` at that workplace's parent and
+`ts_hospitalgroup` at the hospital's parent. Each parent is OneKey's `managerWorkplaceEid` first, then the
+HIE ("Is managed by") parent when that is a group of organisations (structure GOR or POR); a contact
+whose workplace or hospital has neither gets the field cleared. The sync no longer writes
+`parentcustomerid` or the `department` text. A person whose individual, activity, or
 workplace is outside the contracted set for this extract is skipped.
 
 #### Phase 6 — HCP–HCO affiliations and roles
@@ -424,7 +428,7 @@ order in section 1.7 is that rule applied:
 | Order | Link | Lookup |
 | --- | --- | --- |
 | 1 | Account to parent account | `parentaccountid` from `managerWorkplaceEid` |
-| 2 | Contact to account | `parentcustomerid` from the main activity's workplace |
+| 2 | Contact to account | `ts_department` from the main activity's workplace, `ts_hospital` from that workplace's parent, `ts_hospitalgroup` from the hospital's parent |
 | 3 | Affiliation between two accounts | `ts_fromid` and `ts_toid` |
 | 4 | Affiliation from contact to account | `ts_fromid` and `ts_toid` |
 | 5 | Address to account | `customeraddress.parentid` |
@@ -519,7 +523,8 @@ Account and contact mappings then point at the new table with `lookup_by_key`.
 
 - The key column and the key formula. Changing `ts_externalid`'s shape makes the next run insert
   duplicates beside the old rows.
-- Phase order. Writing contacts before accounts leaves `parentcustomerid` unresolved.
+- Phase order. Writing contacts before accounts, the hierarchy and the HCO–HCO relations leaves
+  `ts_department`, `ts_hospital` and `ts_hospitalgroup` unresolved.
 - `codBase` inside an external id for lookup tables. Dropping the country makes two countries overwrite
   each other's codes.
 - Choice integers in `value_mapping.csv`. They must match the option values published in

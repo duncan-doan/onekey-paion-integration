@@ -437,7 +437,7 @@ def build(codebase: str, out_dir: Path) -> dict:
             transformer.transform_hcp(flat),
             {"individual": composed["individual"], "activity": activity,
              "workplace": composed["workplace"]},
-            {"parentcustomerid": wp_eid},
+            {"ts_department": wp_eid, "ts_hospital": flat.get("hospitalWorkplaceEid")},
             {"__main_activity_eid": activity.get("activityEid"),
              "__valid": check.is_valid, "__issues": _issues(check)},
         )

@@ -141,7 +141,7 @@ class DynamicSyncEngine:
       2. customeraddress (workplaceAddresses → parentid=account GUID)
       3. HCO hierarchy (managerWorkplaceEid → parentaccountid)
       4. HCO–HCO affiliations (workplace.relations[] → ts_affiliation)
-      5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + parentcustomerid)
+      5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + ts_department / ts_hospital / ts_hospitalgroup)
       6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation)
 
     Bulk write notes: ``customeraddress`` has no CreateMultiple or
@@ -2392,13 +2392,44 @@ class DynamicSyncEngine:
 
         flattened = [flatten_hcp(r) for r in composed]
 
+        # A contact's department is its workplace; its hospital is that
+        # workplace's parent.
         workplace_eids = {
-            hcp.get("workplaceEid")
+            eid
             for hcp in flattened
-            if hcp.get("workplaceEid") and hcp.get("workplaceEid") not in self._account_cache
+            for eid in (hcp.get("workplaceEid"), hcp.get("hospitalWorkplaceEid"))
+            if eid and eid not in self._account_cache
         }
         if workplace_eids and not dry_run:
             self._lookup_accounts_bulk(workplace_eids)
+        # A delta row without its workplace (the workplace did not change)
+        # takes the hospital from that workplace's parent account, which the
+        # account and hierarchy phases have already written.
+        unloaded = {
+            hcp.get("workplaceEid")
+            for hcp in flattened
+            if not hcp.get("workplaceLoaded") and hcp.get("workplaceEid") in self._account_cache
+        }
+        parent_accounts = self._account_parents(unloaded) if unloaded and not dry_run else {}
+        hospitals = {
+            hcp.get("individualEid"): self._hospital_of(hcp, parent_accounts) for hcp in flattened
+        }
+        mapped = {fm.target_field for fm in self.config.get_field_mappings("contact")}
+        if not dry_run and "ts_hospital" in mapped:
+            # A workplace without a parent account (managerWorkplaceEid) takes
+            # its HIE parent as the hospital, when that parent is a group.
+            orphans = {
+                hcp.get("individualEid"): str(self._account_cache.get(hcp.get("workplaceEid") or "") or "").lower()
+                for hcp in flattened
+                if hospitals.get(hcp.get("individualEid")) == (True, None)
+            }
+            hie_groups = self._hie_group_parents(set(orphans.values()))
+            for individual_eid, workplace_account in orphans.items():
+                if workplace_account in hie_groups:
+                    hospitals[individual_eid] = (True, hie_groups[workplace_account])
+        groups = {}
+        if not dry_run and "ts_hospitalgroup" in mapped:
+            groups = self._hospital_groups({h for _, h in hospitals.values() if h})
 
         total = len(flattened)
         prepared = []
@@ -2437,7 +2468,14 @@ class DynamicSyncEngine:
                 else:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
 
-            payload = self.transformer.transform_hcp(hcp, account_id=account_id)
+            hospital_known, hospital_id = hospitals[individual_eid]
+            payload = self.transformer.transform_hcp(
+                hcp,
+                account_id=account_id,
+                hospital_id=hospital_id,
+                hospital_known=hospital_known,
+                group_id=groups.get((hospital_id or "").lower()),
+            )
             key_name = self.config.require_key_field("contact")
             key_value = payload.get(key_name)
             if not key_value:
@@ -2780,6 +2818,91 @@ class DynamicSyncEngine:
         for workplace_eid, _, _, payload, _ in prepared:
             if workplace_eid in existing:
                 payload.pop("name", None)
+
+    def _hospital_of(self, hcp: dict, parent_accounts: dict) -> tuple[bool, str | None]:
+        """Return ``(known, hospital account id)`` for one contact row.
+
+        The hospital is the parent of the HCP's workplace: from OneKey when the
+        row carries its workplace, else from the workplace's account. A
+        workplace without a parent account gives ``(True, None)``, which
+        clears it; an unknown one ``(False, None)``, which leaves it as it is.
+        """
+        if hcp.get("workplaceLoaded"):
+            return True, self._account_cache.get(hcp.get("hospitalWorkplaceEid") or "")
+        workplace_eid = hcp.get("workplaceEid")
+        return workplace_eid in parent_accounts, parent_accounts.get(workplace_eid)
+
+    def _hospital_groups(self, hospital_ids) -> dict[str, str | None]:
+        """Return ``{hospital account id: hospital group account id or None}``.
+
+        The group is the hospital's parent account (managerWorkplaceEid) and,
+        without one, its HIE parent when that is a group of organisations.
+        OneKey links a hospital to its group only through HIE: in prod
+        (2026-10-23) no hospital had a manager.
+        """
+        ids = sorted({str(i).lower() for i in hospital_ids if i})
+        rows = self._account_rows(ids)
+        managers = {h: (rows.get(h) or {}).get("_parentaccountid_value") for h in ids}
+        hie_groups = self._hie_group_parents(h for h in ids if not managers[h])
+        return {h: managers[h] or hie_groups.get(h) for h in ids}
+
+    def _hie_group_parents(self, account_ids) -> dict[str, str]:
+        """Return ``{account id: HIE parent id}`` where that parent is a group.
+
+        The HIE parent is the account's direct parent in OneKey's hierarchy
+        (an HIE "Is managed by" relation, written by the HCO-HCO phase before
+        contacts). A group of organisations has structure type GOR or POR.
+        """
+        ids = sorted({str(i).lower() for i in account_ids if i})
+        hie = self.config.get_value("linkcode", "HIE")
+        group_structure = self.config.get_value("structuretype", "GOR")
+        if not ids or not hie or not group_structure:
+            return {}
+        parents: dict[str, str] = {}
+        for chunk in chunked(ids, 50):
+            rows = self.dataverse.retrieve_multiple(
+                "ts_affiliations",
+                select=["_ts_fromid_value", "_ts_toid_value"],
+                filter=(
+                    f"ts_linktype eq {hie} and ts_isparent eq true and statecode eq 0 and ("
+                    + " or ".join(f"_ts_fromid_value eq {i}" for i in chunk)
+                    + ")"
+                ),
+            )
+            for row in rows:
+                if row.get("_ts_fromid_value") and row.get("_ts_toid_value"):
+                    parents[row["_ts_fromid_value"].lower()] = row["_ts_toid_value"].lower()
+        rows = self._account_rows(parents.values())
+        return {
+            account: parent
+            for account, parent in parents.items()
+            if str((rows.get(parent) or {}).get("ts_structuretype")) == str(group_structure)
+        }
+
+    def _account_rows(self, account_ids) -> dict[str, dict]:
+        """Return ``{account id: row}`` with the structure type and parent account."""
+        rows: dict[str, dict] = {}
+        for chunk in chunked(sorted({str(i).lower() for i in account_ids if i}), 50):
+            for row in self.dataverse.retrieve_multiple(
+                "accounts",
+                select=["accountid", "ts_structuretype", "_parentaccountid_value"],
+                filter=" or ".join(f"accountid eq {i}" for i in chunk),
+            ):
+                rows[str(row.get("accountid")).lower()] = row
+        return rows
+
+    def _account_parents(self, workplace_eids) -> dict[str, str | None]:
+        """Return ``{workplaceEid: parent account id or None}`` for existing accounts."""
+        field_name = self.config.require_key_field("account")
+        rows = self.dataverse.find_many_by_field(
+            "accounts", field_name, sorted(workplace_eids),
+            select=[field_name, "accountid", "_parentaccountid_value"],
+        )
+        return {
+            str(eid): row.get("_parentaccountid_value")
+            for eid, row in rows.items()
+            if row.get("accountid")
+        }
 
     def _lookup_accounts_bulk(self, workplace_eids) -> dict[str, str]:
         """Resolve many workplace EIDs to account GUIDs; update the cache."""

@@ -732,6 +732,49 @@ def test_create_multiple_keeps_the_state_in_the_create():
     assert target["statecode"] == 1
 
 
+def test_a_cleared_lookup_is_sent_as_its_navigation_property_on_update():
+    """UpdateMultiple rejects ``X@odata.bind: null``; ``X: null`` clears the lookup."""
+    client = make_client([
+        FakeResponse(200, {"value": [{"ts_externalid": "C", "contactid": G1}]}),
+        FakeResponse(204),  # UpdateMultiple
+    ])
+    client.bulk_upsert_by_field(
+        "contacts", "ts_externalid", [{"ts_externalid": "C", "ts_Hospital@odata.bind": None}],
+        batch_size=100, fallback_on_error=False,
+    )
+    [target] = client._session.calls[1]["json"]["Targets"]
+    assert target["ts_Hospital"] is None and "ts_Hospital@odata.bind" not in target
+
+
+def test_a_cleared_lookup_is_left_out_of_a_create():
+    client = make_client([
+        FakeResponse(200, {"value": []}),
+        FakeResponse(200, {"Ids": [G1]}),  # CreateMultiple
+    ])
+    client.bulk_upsert_by_field(
+        "contacts", "ts_externalid", [{"ts_externalid": "C", "ts_Hospital@odata.bind": None}],
+        batch_size=100, fallback_on_error=False,
+    )
+    [target] = client._session.calls[1]["json"]["Targets"]
+    assert not any(key.startswith("ts_Hospital") for key in target)
+
+
+@pytest.mark.parametrize("stored, written", [(None, False), (G2, True)])
+def test_skip_unchanged_compares_a_cleared_lookup(stored, written):
+    """An empty lookup that should stay empty is no write; a set one is cleared."""
+    client = make_client([
+        FakeResponse(200, {"value": [{"ts_externalid": "C", "contactid": G1, "_ts_hospital_value": stored}]}),
+        FakeResponse(204),
+    ])
+    skipped = set()
+    client.bulk_upsert_by_field(
+        "contacts", "ts_externalid", [{"ts_externalid": "C", "ts_Hospital@odata.bind": None}],
+        batch_size=100, fallback_on_error=False, skip_unchanged=True, skipped=skipped,
+    )
+    assert "_ts_hospital_value" in str(client._session.calls[0])  # read for the comparison
+    assert (len(client._session.calls) == 2) is written and (skipped == {"C"}) is (not written)
+
+
 def test_customeraddress_creates_share_one_batch():
     """customeraddress has no CreateMultiple: its creates are POSTs in one $batch."""
     client = make_client([

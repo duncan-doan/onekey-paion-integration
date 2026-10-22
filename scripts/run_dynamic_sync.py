@@ -7,7 +7,7 @@ Canonical phase order (contracted refreshMyOnekey IDs only):
   2. customeraddress ({workplaceEid} - {addressEid}, parentid=account GUID)
   3. HCO parentaccountid hierarchy (managerWorkplaceEid)
   4. HCO–HCO ts_affiliation (workplace.relations[], both ends contracted)
-  5. HCP contacts + parentcustomerid (INDIVIDUAL + main ACTIVITY)
+  5. HCP contacts + ts_department / ts_hospital / ts_hospitalgroup (INDIVIDUAL + main ACTIVITY)
   6. HCP–HCO ts_affiliation (all ACTIVITY packets, contracted ends)
 
 Usage:

@@ -44,7 +44,9 @@
 | `title` | → | `salutation` | decode:title |
 | `typeLabel` | → | `jobtitle` | direct |
 | `statusCode` | → | `statecode` | map: 3→0, 9→1 |
-| `workplaceEid` | → | `parentcustomerid` | lookup |
+| `workplaceEid` | → | `ts_department` | lookup |
+| `hospitalWorkplaceEid` | → | `ts_hospital` | lookup |
+| hospital's parent | → | `ts_hospitalgroup` | lookup |
 | `usualName` | → | `department` | direct |
 
 ### Address (Workplace address → CustomerAddress)

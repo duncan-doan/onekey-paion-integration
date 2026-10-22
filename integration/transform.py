@@ -43,6 +43,17 @@ def catalog_bind_name(logical_name: str) -> str:
     return CATALOG_NAVIGATION.get(logical_name, logical_name)
 
 
+# Contact lookups to account that the sync resolves to account ids itself:
+# logical column -> navigation property. Each is written only while
+# entity_mapping.csv maps the column.
+CONTACT_ACCOUNT_LOOKUPS = {
+    "parentcustomerid": "parentcustomerid_account",
+    "ts_department": "ts_Department",
+    "ts_hospital": "ts_Hospital",
+    "ts_hospitalgroup": "ts_HospitalGroup",
+}
+
+
 class TransformEngine:
     """Transforms OneKey records to Dataverse payloads using mapping config."""
     
@@ -129,11 +140,21 @@ class TransformEngine:
         self,
         source: dict,
         account_id: str = None,
+        hospital_id: str = None,
+        hospital_known: bool = False,
+        group_id: str = None,
         **_deprecated,
     ) -> dict:
         """Transform OneKey HCP (flattened) to Dataverse Contact payload.
 
         Address fields go to ``customeraddress`` (never ``address1_*``).
+        ``account_id`` is the account of the HCP's main workplace: its
+        department (and its parentcustomerid, while that is mapped).
+        ``hospital_id`` is the account of that workplace's parent, and
+        ``group_id`` the account of the hospital's group. With
+        ``hospital_known`` a missing hospital or group is cleared (it has no
+        account in Dataverse); without ``hospital_known`` both are left as
+        they are.
         """
         if "include_address" in _deprecated:
             logger.debug("include_address is ignored; use customeraddress phase")
@@ -147,7 +168,7 @@ class TransformEngine:
         for fm in mappings:
             if fm.target_field.startswith("address1_"):
                 continue
-            if fm.target_field == "parentcustomerid":
+            if fm.target_field in CONTACT_ACCOUNT_LOOKUPS:
                 continue
 
             bound = self._bound_lookup(fm, source)
@@ -194,8 +215,11 @@ class TransformEngine:
             all_parts = ([existing] if existing else []) + description_parts
             payload["description"] = "\n".join(p for p in all_parts if p)
 
+        mapped = {fm.target_field for fm in mappings}
         if account_id:
-            payload["parentcustomerid_account@odata.bind"] = f"/accounts({account_id})"
+            for column in ("parentcustomerid", "ts_department"):
+                if column in mapped:
+                    payload[f"{CONTACT_ACCOUNT_LOOKUPS[column]}@odata.bind"] = f"/accounts({account_id})"
 
         if not payload.get("lastname"):
             fallback = source.get("individualEid") or "Unknown"
@@ -205,7 +229,18 @@ class TransformEngine:
                 source.get("individualEid"), fallback
             )
 
-        return {k: v for k, v in payload.items() if v is not None}
+        payload = {k: v for k, v in payload.items() if v is not None}
+        if "ts_hospital" in mapped and (hospital_id or hospital_known):
+            # A None bind clears the lookup (dataverse.client turns it into
+            # the navigation property set to null on update).
+            payload[f"{CONTACT_ACCOUNT_LOOKUPS['ts_hospital']}@odata.bind"] = (
+                f"/accounts({hospital_id})" if hospital_id else None
+            )
+        if "ts_hospitalgroup" in mapped and (group_id or hospital_known):
+            payload[f"{CONTACT_ACCOUNT_LOOKUPS['ts_hospitalgroup']}@odata.bind"] = (
+                f"/accounts({group_id})" if group_id else None
+            )
+        return payload
 
     def transform_w2w_affiliation(
         self,

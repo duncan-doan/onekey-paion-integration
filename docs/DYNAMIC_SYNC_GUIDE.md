@@ -307,7 +307,7 @@ class ValidationResult:
 1. Extract HCOs (Workplaces) → upsert Accounts (no parent bind yet)
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
 3. Link parentaccountid from managerWorkplaceEid
-4. Extract HCPs → upsert Contacts + parentcustomerid
+4. Extract HCPs → upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup
 ```
 
 Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.

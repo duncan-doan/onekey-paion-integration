@@ -159,6 +159,10 @@ def _expected_columns(payload, key_fields):
         if key.endswith("@odata.bind"):
             navigation = key[: -len("@odata.bind")].lower()
             column = _POLYMORPHIC_NAVIGATION.get(navigation, navigation)
+            if value is None:
+                # A cleared lookup: unchanged while the column is empty.
+                expected[f"_{column}_value"] = None
+                continue
             bound = _BIND_BY_ID.match(str(value or ""))
             if not bound:
                 return None
@@ -168,6 +172,25 @@ def _expected_columns(payload, key_fields):
         else:
             expected[key] = value
     return expected
+
+
+def _clear_binds(payload, create):
+    """Rewrite lookups bound to None, which ask for the lookup to be cleared.
+
+    UpdateMultiple rejects ``X@odata.bind: null`` but clears the lookup for
+    ``X: null`` (the navigation property), as a single PATCH does (dev,
+    2026-10-22). A create has nothing to clear, so the bind is left out.
+    """
+    if not any(key.endswith("@odata.bind") and value is None for key, value in payload.items()):
+        return payload
+    out = {}
+    for key, value in payload.items():
+        if key.endswith("@odata.bind") and value is None:
+            if not create:
+                out[key[: -len("@odata.bind")]] = None
+            continue
+        out[key] = value
+    return out
 
 
 def _instant(text):
@@ -212,7 +235,7 @@ def _unchanged(expected, row) -> bool:
             return False
         actual = row[column]
         if column.startswith("_") and column.endswith("_value"):
-            if str(actual or "").lower() != value:
+            if (str(actual).lower() if actual else None) != value:
                 return False
         elif not _same_value(value, actual):
             return False
@@ -1053,10 +1076,10 @@ class DataverseClient:
                     if skipped is not None:
                         skipped.add(match_value)
                     continue
-                update_payload = {**payload, primary_id: row[primary_id]}
+                update_payload = {**_clear_binds(payload, create=False), primary_id: row[primary_id]}
                 updates.append((index, match_value, update_payload))
             else:
-                creates.append((index, match_value, payload))
+                creates.append((index, match_value, _clear_binds(payload, create=True)))
         if skip_unchanged:
             logger.info(
                 "Unchanged %s skipped: unchanged=%d updates=%d creates=%d",
