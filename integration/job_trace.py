@@ -236,7 +236,7 @@ def summarize_results(results: dict | None) -> dict:
         totals["failed"] += int(stats.get("failed") or 0)
 
     hierarchy = results.get("hierarchy") or {}
-    linked = int(hierarchy.get("linked") or 0)
+    linked = int(hierarchy.get("linked") or 0) + int(hierarchy.get("unlinked") or 0)
     totals["processed"] += linked
     totals["updated"] += linked
     totals["skipped"] += int(hierarchy.get("already_linked") or 0)
@@ -266,6 +266,7 @@ def phase_counts_json(results: dict | None) -> str | None:
                 "already_linked",
                 "missing_child",
                 "missing_parent",
+                "unlinked",
             )
         }
     if "picklists" in results:

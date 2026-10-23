@@ -957,6 +957,7 @@ class DataverseClient:
         record_errors=None,
         skip_unchanged=False,
         skipped=None,
+        update_only=False,
     ):
         """Bulk create/update by matching on a plain column.
 
@@ -985,6 +986,8 @@ class DataverseClient:
                 value. Lookups compare by the bound id; a bind by alternate
                 key, or any value whose equality is uncertain, is written.
             skipped: A set to collect the match values left unchanged.
+            update_only: Leave out records that do not exist yet instead of
+                creating them; their result has record_id None.
 
         Returns:
             list[tuple[str, str, bool]]: ``(match_value, record_id, created)``
@@ -1078,6 +1081,9 @@ class DataverseClient:
                     continue
                 update_payload = {**_clear_binds(payload, create=False), primary_id: row[primary_id]}
                 updates.append((index, match_value, update_payload))
+            elif update_only:
+                # Nothing to update; the record is not created.
+                results[index] = (match_value, None, False)
             else:
                 creates.append((index, match_value, _clear_binds(payload, create=True)))
         if skip_unchanged:

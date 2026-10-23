@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -26,7 +27,11 @@ from .hierarchy import apply_updates, build_updates, edges_from_hcos, resolve_ac
 from .lookup_sync import CatalogResolver, CountryResolver, sync_lookup_tables
 from .address_rows import address_id, address_sources, plan_address_rows, workplace_batches
 from .picklist_sync import sync_picklists_from_config
-from .w2w_relations import collect_w2w_relations, explode_w2w_relations
+from .w2w_relations import (
+    WORKPLACE_TO_WORKPLACE_LINK,
+    collect_w2w_relations,
+    explode_w2w_relations,
+)
 from .activity_affiliation import flatten_activity_for_affiliation
 from .job_trace import (
     ENTITY_BY_NAME,
@@ -45,7 +50,7 @@ from .job_trace import (
     JobTracer,
 )
 from onekey.parse import compose_hcp_result, flatten_hcp, flatten_hco
-from dataverse.client import chunked
+from dataverse.client import chunked, escape_odata
 
 if TYPE_CHECKING:
     from onekey import OneKeyClient
@@ -61,6 +66,8 @@ _EMPTY_HIERARCHY = {
     "already_linked": 0,
     "missing_child": 0,
     "missing_parent": 0,
+    # Parents cleared: OneKey no longer sends a managerWorkplaceEid.
+    "unlinked": 0,
 }
 
 
@@ -965,7 +972,7 @@ class DynamicSyncEngine:
             results["unjoined"][kind] = results["unjoined"].get(kind, 0) + count
 
     def _bulk_upsert(
-        self, entity_set: str, key_name: str, payloads: list[dict]
+        self, entity_set: str, key_name: str, payloads: list[dict], update_only: bool = False
     ) -> tuple[list[tuple], dict, set]:
         """bulk_upsert_by_field, keeping records Dataverse rejects on their own.
 
@@ -986,6 +993,7 @@ class DynamicSyncEngine:
             record_errors=rejected,
             skip_unchanged=self.skip_unchanged,
             skipped=unchanged,
+            **({"update_only": True} if update_only else {}),
         )
         self.records_written += sum(
             1 for match, record_id, _ in results if record_id and match not in unchanged
@@ -1549,6 +1557,9 @@ class DynamicSyncEngine:
             )
         edges = edges_from_hcos(hcos, allowed_workplace_eids=allow)
         result["edges"] = len(edges)
+        if not dry_run:
+            result["unlinked"], unlink_failed = self._clear_removed_parents(hcos, allow)
+            result["failed"] += unlink_failed
         if not edges:
             logger.info(
                 msg("No parent edges to link", _ctx(self), contracted_filter=allow is not None)
@@ -1695,6 +1706,8 @@ class DynamicSyncEngine:
         edges = collect_w2w_relations(
             raw_workplaces, allowed_workplace_eids=allow
         )
+        if not dry_run:
+            result["updated"] += self._deactivate_removed_relations(raw_workplaces)
         if not edges:
             logger.info(
                 msg("No HCO relations to sync", _ctx(self), contracted_filter=allow is not None)
@@ -2429,7 +2442,7 @@ class DynamicSyncEngine:
                     hospitals[individual_eid] = (True, hie_groups[workplace_account])
         groups = {}
         if not dry_run and "ts_hospitalgroup" in mapped:
-            groups = self._hospital_groups({h for _, h in hospitals.values() if h})
+            groups = self._parent_or_group({h for _, h in hospitals.values() if h})
 
         total = len(flattened)
         prepared = []
@@ -2675,14 +2688,13 @@ class DynamicSyncEngine:
             # OneKey sends INDIVIDUAL, ACTIVITY and WORKPLACE as separate
             # results, the ACTIVITY's own individual and workplace empty
             # (checked on UAT), and a delta only those that changed. Every
-            # changed individual is written (_compose_delta_hcps). An activity
-            # whose individual did not change, such as a move to another
-            # workplace, is not applied to the contact until the next full
-            # sync; it is counted on the job, as are new individuals outside
-            # the contracted workplaces.
-            result["unjoined"]["activities"] = sum(
-                1 for eid in activities_by_individual if eid not in individuals
-            )
+            # changed individual is written (_compose_delta_hcps). A main
+            # activity whose individual did not change, such as a move to
+            # another workplace, moves the contact's department, hospital and
+            # group (_refresh_contact_placement), as does a change to a
+            # department's or hospital's parent. Other activities without
+            # their individual are counted on the job, as are new individuals
+            # outside the contracted workplaces.
             if individuals:
                 composed, result["unjoined"]["individuals"], partial = self._compose_delta_hcps(
                     individuals,
@@ -2696,6 +2708,22 @@ class DynamicSyncEngine:
                     composed=composed,
                     partial=partial,
                 )
+            applied: set[str] = set()
+            if not dry_run:
+                moves = {}
+                for individual_eid, record in activities_by_individual.items():
+                    activity = record.get("activity") or {}
+                    if individual_eid not in individuals and activity.get("isMainActivity"):
+                        moves[individual_eid] = activity.get("workplaceEid")
+                placement, applied = self._refresh_contact_placement(
+                    moves, set(workplace_index), skip=set(individuals)
+                )
+                self._merge_entity(result["contacts"], placement)
+            result["unjoined"]["activities"] = sum(
+                1
+                for eid in activities_by_individual
+                if eid not in individuals and eid not in applied
+            )
             if any(result["unjoined"].values()):
                 logger.warning(
                     msg(
@@ -2832,52 +2860,248 @@ class DynamicSyncEngine:
         workplace_eid = hcp.get("workplaceEid")
         return workplace_eid in parent_accounts, parent_accounts.get(workplace_eid)
 
-    def _hospital_groups(self, hospital_ids) -> dict[str, str | None]:
-        """Return ``{hospital account id: hospital group account id or None}``.
+    def _parent_or_group(self, account_ids) -> dict[str, str | None]:
+        """Return ``{account id: its parent account id or None}``.
 
-        The group is the hospital's parent account (managerWorkplaceEid) and,
+        The parent is the account's own parent (managerWorkplaceEid) and,
         without one, its HIE parent when that is a group of organisations.
-        OneKey links a hospital to its group only through HIE: in prod
-        (2026-10-23) no hospital had a manager.
+        This is a department's hospital and a hospital's group. OneKey links
+        a hospital to its group only through HIE: in prod (2026-10-23) no
+        hospital had a manager.
         """
-        ids = sorted({str(i).lower() for i in hospital_ids if i})
+        ids = sorted({str(i).lower() for i in account_ids if i})
         rows = self._account_rows(ids)
-        managers = {h: (rows.get(h) or {}).get("_parentaccountid_value") for h in ids}
-        hie_groups = self._hie_group_parents(h for h in ids if not managers[h])
-        return {h: managers[h] or hie_groups.get(h) for h in ids}
+        managers = {a: (rows.get(a) or {}).get("_parentaccountid_value") for a in ids}
+        hie_groups = self._hie_group_parents(a for a in ids if not managers[a])
+        return {a: (str(managers[a]).lower() if managers[a] else hie_groups.get(a)) for a in ids}
 
     def _hie_group_parents(self, account_ids) -> dict[str, str]:
         """Return ``{account id: HIE parent id}`` where that parent is a group.
 
         The HIE parent is the account's direct parent in OneKey's hierarchy
         (an HIE "Is managed by" relation, written by the HCO-HCO phase before
-        contacts). A group of organisations has structure type GOR or POR.
+        contacts). A group of organisations has structure type GOR or POR. An
+        ended relation is ignored; of several, the one that started last wins.
         """
         ids = sorted({str(i).lower() for i in account_ids if i})
         hie = self.config.get_value("linkcode", "HIE")
         group_structure = self.config.get_value("structuretype", "GOR")
         if not ids or not hie or not group_structure:
             return {}
-        parents: dict[str, str] = {}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        latest: dict[str, tuple[str, str]] = {}
         for chunk in chunked(ids, 50):
             rows = self.dataverse.retrieve_multiple(
                 "ts_affiliations",
-                select=["_ts_fromid_value", "_ts_toid_value"],
+                select=["_ts_fromid_value", "_ts_toid_value", "ts_startdate"],
                 filter=(
-                    f"ts_linktype eq {hie} and ts_isparent eq true and statecode eq 0 and ("
+                    f"ts_linktype eq {hie} and ts_isparent eq true and statecode eq 0"
+                    f" and (ts_enddate eq null or ts_enddate ge {today}) and ("
                     + " or ".join(f"_ts_fromid_value eq {i}" for i in chunk)
                     + ")"
                 ),
             )
             for row in rows:
-                if row.get("_ts_fromid_value") and row.get("_ts_toid_value"):
-                    parents[row["_ts_fromid_value"].lower()] = row["_ts_toid_value"].lower()
+                child, parent = row.get("_ts_fromid_value"), row.get("_ts_toid_value")
+                if not child or not parent:
+                    continue
+                started = str(row.get("ts_startdate") or "")
+                if child.lower() not in latest or started > latest[child.lower()][1]:
+                    latest[child.lower()] = (parent.lower(), started)
+        parents = {child: parent for child, (parent, _) in latest.items()}
         rows = self._account_rows(parents.values())
         return {
             account: parent
             for account, parent in parents.items()
             if str((rows.get(parent) or {}).get("ts_structuretype")) == str(group_structure)
         }
+
+    def _clear_removed_parents(self, hcos: list[dict], allow) -> tuple[int, int]:
+        """Clear the parent of accounts OneKey now sends without a manager.
+
+        The hierarchy edges only link, so a workplace that lost its
+        managerWorkplaceEid would keep its old parent account. UpdateMultiple
+        cannot clear parentaccountid (HTTP 400, dev 2026-10-23), so the clears
+        are PATCHes in a $batch. Returns ``(cleared, failed)``.
+        """
+        orphans = sorted({
+            str(hco["workplaceEid"])
+            for hco in hcos
+            if hco.get("workplaceEid")
+            and not hco.get("parentWorkplaceEid")
+            and (allow is None or hco["workplaceEid"] in allow)
+        })
+        if not orphans:
+            return 0, 0
+        account_key = self.config.require_key_field("account")
+        accounts = resolve_accounts(self.dataverse, orphans, account_key)
+        clears = [
+            (eid, row["accountid"])
+            for eid, row in sorted(accounts.items())
+            if row.get("accountid") and row.get("_parentaccountid_value")
+        ]
+        cleared = failed = 0
+        for chunk in chunked(clears, 100):
+            outcomes = self.dataverse.batch_write(
+                [("PATCH", f"accounts({account_id})", {"parentaccountid": None}) for _, account_id in chunk],
+                idempotent=True,
+            )
+            for (eid, _), (status, _, error) in zip(chunk, outcomes):
+                if status and status < 400:
+                    cleared += 1
+                else:
+                    failed += 1
+                    logger.warning(msg("Parent account not cleared", _ctx(self), workplace=eid, error=str(error)[:300]))
+        if clears:
+            logger.info(msg("Parent accounts cleared", _ctx(self), cleared=cleared, failed=failed))
+        return cleared, failed
+
+    def _deactivate_removed_relations(self, raw_workplaces: list[dict]) -> int:
+        """Deactivate HCO–HCO rows a processed workplace no longer has in OneKey.
+
+        Each row belongs to the workplace that owns the ``relations[]`` entry:
+        its key is ``{owner} - {related} - {linkCode}``. A workplace record
+        without a ``relations`` list is left alone, as what it lacks is
+        unknown. W2W-011 makes a relation that comes back active again.
+        Returns the number of rows deactivated.
+        """
+        current: set[str] = set()
+        owners: set[str] = set()
+        for record in raw_workplaces:
+            workplace = record.get("workplace") or record
+            eid = workplace.get("workplaceEid")
+            relations = workplace.get("relations")
+            if not eid or not isinstance(relations, list):
+                continue
+            owners.add(str(eid))
+            for relation in relations:
+                if (
+                    isinstance(relation, dict)
+                    and relation.get("typeCode") == WORKPLACE_TO_WORKPLACE_LINK
+                    and relation.get("onekeyEid")
+                    and relation.get("linkCode")
+                ):
+                    current.add(f"{eid} - {relation['onekeyEid']} - {relation['linkCode']}")
+        if not owners:
+            return 0
+        entity_set = self._affiliation_entity_set()
+        key = self.config.require_key_field("ts_affiliation")
+        if len(owners) > 200:
+            # A full sync: read the codebase's active rows once.
+            prefixes = sorted({eid[:3] for eid in owners})
+            scopes = ["(" + " or ".join(f"startswith({key},'{escape_odata(p)}')" for p in prefixes) + ")"]
+        else:
+            scopes = [
+                "(" + " or ".join(f"startswith({key},'{escape_odata(o)} - ')" for o in chunk) + ")"
+                for chunk in chunked(sorted(owners), 25)
+            ]
+        stale = []
+        for scope in scopes:
+            for row in self.dataverse.retrieve_multiple(
+                entity_set,
+                select=[key, "ts_affiliationid"],
+                filter=f"statecode eq 0 and contains({key},' - ') and {scope}",
+            ):
+                row_key = row.get(key) or ""
+                if row_key.split(" - ")[0] in owners and row_key not in current:
+                    stale.append(row)
+        deactivated = 0
+        for chunk in chunked(stale, 100):
+            outcomes = self.dataverse.batch_write(
+                [("PATCH", f"{entity_set}({row['ts_affiliationid']})", {"statecode": 1}) for row in chunk],
+                idempotent=True,
+            )
+            for row, (status, _, error) in zip(chunk, outcomes):
+                if status and status < 400:
+                    deactivated += 1
+                else:
+                    logger.warning(msg("HCO relation not deactivated", _ctx(self), key=row.get(key), error=str(error)[:300]))
+        if stale:
+            logger.info(msg("HCO relations OneKey no longer sends deactivated", _ctx(self), deactivated=deactivated, found=len(stale)))
+        return deactivated
+
+    def _refresh_contact_placement(
+        self,
+        moves: dict[str, str],
+        changed_workplace_eids: set[str],
+        skip: set[str],
+    ) -> tuple[dict, set[str]]:
+        """Recompute department, hospital and group for contacts a delta changed
+        without writing them.
+
+        ``moves`` maps an individual whose main activity arrived without the
+        individual to that activity's workplace, its new department. A
+        contact whose department, hospital or group is a workplace in
+        ``changed_workplace_eids`` is recomputed too: that workplace's parent
+        or group may have changed. Individuals in ``skip`` were written by the
+        contact phase. Each level is the parent account and, without one, the
+        HIE group (``_parent_or_group``), read after the account, hierarchy
+        and HCO-HCO phases. Only existing contacts are updated.
+
+        Returns the contact counts and the individuals whose move was applied.
+        """
+        stats = _empty_entity_stats()
+        mapped = {fm.target_field for fm in self.config.get_field_mappings("contact")}
+        columns = [c for c in ("ts_department", "ts_hospital", "ts_hospitalgroup") if c in mapped]
+        if "ts_department" not in columns:
+            return stats, set()
+        key = self.config.require_key_field("contact")
+        departments: dict[str, str] = {}
+        moves = {i: w for i, w in moves.items() if i and w and i not in skip}
+        if moves:
+            self._lookup_contacts_bulk(list(moves))
+            self._lookup_accounts_bulk(set(moves.values()))
+            for individual, workplace in moves.items():
+                if individual in self._contact_cache and workplace in self._account_cache:
+                    departments[individual] = str(self._account_cache[workplace]).lower()
+        applied = set(departments)
+        if changed_workplace_eids:
+            self._lookup_accounts_bulk(changed_workplace_eids)
+            changed = sorted({
+                str(self._account_cache[eid]).lower()
+                for eid in changed_workplace_eids
+                if eid in self._account_cache
+            })
+            for chunk in chunked(changed, 25):
+                rows = self.dataverse.retrieve_multiple(
+                    "contacts",
+                    select=[key, "_ts_department_value"],
+                    filter=" or ".join(f"_{column}_value eq {i}" for column in columns for i in chunk),
+                )
+                for row in rows:
+                    individual, department = row.get(key), row.get("_ts_department_value")
+                    if individual and department and individual not in skip and individual not in departments:
+                        departments[individual] = str(department).lower()
+        if not departments:
+            return stats, applied
+        hospitals = self._parent_or_group(set(departments.values()))
+        groups = (
+            self._parent_or_group({h for h in hospitals.values() if h})
+            if "ts_hospitalgroup" in columns
+            else {}
+        )
+        payloads = []
+        for individual, department in sorted(departments.items()):
+            hospital = hospitals.get(department)
+            payloads.append({
+                key: individual,
+                **self.transformer.contact_account_binds(
+                    department, hospital, True, groups.get(hospital) if hospital else None
+                ),
+            })
+        results, rejected, unchanged = self._bulk_upsert("contacts", key, payloads, update_only=True)
+        stats["processed"] = len(payloads)
+        for match, record_id, _ in results:
+            if not record_id:
+                stats["failed"] += 1
+                if match in rejected:
+                    logger.warning(msg("Contact placement not updated", _ctx(self), individual=match, error=str(rejected[match])[:300]))
+            elif match in unchanged:
+                stats["skipped"] += 1
+            else:
+                stats["updated"] += 1
+        logger.info(msg("Contact placement refreshed", _ctx(self), moves=len(applied), **{k: stats[k] for k in ("processed", "updated", "skipped", "failed")}))
+        return stats, applied
 
     def _account_rows(self, account_ids) -> dict[str, dict]:
         """Return ``{account id: row}`` with the structure type and parent account."""

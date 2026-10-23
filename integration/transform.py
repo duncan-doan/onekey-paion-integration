@@ -215,11 +215,6 @@ class TransformEngine:
             all_parts = ([existing] if existing else []) + description_parts
             payload["description"] = "\n".join(p for p in all_parts if p)
 
-        mapped = {fm.target_field for fm in mappings}
-        if account_id:
-            for column in ("parentcustomerid", "ts_department"):
-                if column in mapped:
-                    payload[f"{CONTACT_ACCOUNT_LOOKUPS[column]}@odata.bind"] = f"/accounts({account_id})"
 
         if not payload.get("lastname"):
             fallback = source.get("individualEid") or "Unknown"
@@ -230,17 +225,38 @@ class TransformEngine:
             )
 
         payload = {k: v for k, v in payload.items() if v is not None}
-        if "ts_hospital" in mapped and (hospital_id or hospital_known):
-            # A None bind clears the lookup (dataverse.client turns it into
-            # the navigation property set to null on update).
-            payload[f"{CONTACT_ACCOUNT_LOOKUPS['ts_hospital']}@odata.bind"] = (
-                f"/accounts({hospital_id})" if hospital_id else None
-            )
-        if "ts_hospitalgroup" in mapped and (group_id or hospital_known):
-            payload[f"{CONTACT_ACCOUNT_LOOKUPS['ts_hospitalgroup']}@odata.bind"] = (
-                f"/accounts({group_id})" if group_id else None
-            )
+        payload.update(
+            self.contact_account_binds(account_id, hospital_id, hospital_known, group_id)
+        )
         return payload
+
+    def contact_account_binds(
+        self,
+        account_id: str = None,
+        hospital_id: str = None,
+        hospital_known: bool = False,
+        group_id: str = None,
+    ) -> dict:
+        """Bind the contact's account lookups that entity_mapping.csv maps.
+
+        ``account_id`` is the HCP's main workplace: the department (and
+        parentcustomerid). With ``hospital_known`` a missing hospital or group
+        is bound to None, which clears it (dataverse.client turns it into the
+        navigation property set to null on update); without, both are left
+        out.
+        """
+        mapped = {fm.target_field for fm in self.config.get_field_mappings("contact")}
+        binds: dict[str, Any] = {}
+        if account_id:
+            for column in ("parentcustomerid", "ts_department"):
+                if column in mapped:
+                    binds[f"{CONTACT_ACCOUNT_LOOKUPS[column]}@odata.bind"] = f"/accounts({account_id})"
+        for column, value in (("ts_hospital", hospital_id), ("ts_hospitalgroup", group_id)):
+            if column in mapped and (value or hospital_known):
+                binds[f"{CONTACT_ACCOUNT_LOOKUPS[column]}@odata.bind"] = (
+                    f"/accounts({value})" if value else None
+                )
+        return binds
 
     def transform_w2w_affiliation(
         self,

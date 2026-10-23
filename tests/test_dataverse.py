@@ -775,6 +775,21 @@ def test_skip_unchanged_compares_a_cleared_lookup(stored, written):
     assert (len(client._session.calls) == 2) is written and (skipped == {"C"}) is (not written)
 
 
+def test_update_only_leaves_out_records_that_do_not_exist():
+    client = make_client([
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "contactid": G1}]}),
+        FakeResponse(204),  # UpdateMultiple for A
+    ])
+    results = client.bulk_upsert_by_field(
+        "contacts", "ts_externalid",
+        [{"ts_externalid": "A", "ts_Hospital@odata.bind": None}, {"ts_externalid": "B", "ts_Hospital@odata.bind": None}],
+        batch_size=100, fallback_on_error=False, update_only=True,
+    )
+    assert results == [("A", G1, False), ("B", None, False)]
+    assert not any("CreateMultiple" in c["url"] for c in client._session.calls)
+    assert client._session.calls[1]["url"].endswith("contacts/Microsoft.Dynamics.CRM.UpdateMultiple")
+
+
 def test_customeraddress_creates_share_one_batch():
     """customeraddress has no CreateMultiple: its creates are POSTs in one $batch."""
     client = make_client([

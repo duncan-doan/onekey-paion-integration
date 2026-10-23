@@ -415,11 +415,16 @@ traces
 A delta writes a contact for every individual that changed, with what came in
 its window: an existing contact is updated (its parent moves only through a
 main activity in the window), a new one is created only at a workplace in the
-window or already an account. Two kinds of change still wait for the next
-monthly full sync, and each delta job records them in `ts_phasecounts` as
-`"unjoined":{"activities":…,"individuals":…}` and logs a warning:
-activities whose individual did not change (such as a move to another
-workplace), and new individuals with no activity at such a workplace.
+window or already an account. A main activity whose individual did not change
+(such as a move to another workplace) still moves the contact's
+`ts_department`, `ts_hospital` and `ts_hospitalgroup`, and a change to a
+department's or hospital's parent or group recomputes the contacts under it.
+Two kinds of change still wait for the next monthly full sync, and each delta
+job records them in `ts_phasecounts` as
+`"unjoined":{"activities":…,"individuals":…}` and logs a warning: other
+activities whose individual did not change (a secondary activity, or one
+whose contact or workplace is not in Dataverse), and new individuals with no
+activity at such a workplace.
 
 ```kusto
 traces
@@ -448,6 +453,8 @@ bindings create the new queues on first use.
   without running the worker, so it queues no delta. The next day's delta
   starts from the last covering job, so no window is lost.
 - Records that leave the OneKey population are not deactivated in Dataverse.
+  HCO–HCO relations a processed workplace no longer sends are, and a parent
+  account is cleared when OneKey no longer sends its `managerWorkplaceEid`.
 - Log sampling is on in `host.json`; some worker trace lines can be missing.
   Add `Trace` to `excludedTypes` to keep all of them.
 - Settings changes reach running instances only after they restart, so wait a

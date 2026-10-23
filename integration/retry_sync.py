@@ -902,6 +902,7 @@ def _empty_retry_result(codebase: str) -> dict:
             "already_linked": 0,
             "missing_child": 0,
             "missing_parent": 0,
+            "unlinked": 0,
         },
         "affiliations": {"processed": 0, "created": 0, "updated": 0, "failed": 0},
         "contacts": {"processed": 0, "created": 0, "updated": 0, "failed": 0},

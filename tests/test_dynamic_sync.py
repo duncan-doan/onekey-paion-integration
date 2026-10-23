@@ -69,7 +69,8 @@ class BulkDataverse:
         return {}
 
     def bulk_upsert_by_field(self, entity_set, match_field, records, batch_size=None,
-                             record_errors=None, skip_unchanged=False, skipped=None):
+                             record_errors=None, skip_unchanged=False, skipped=None,
+                             update_only=False):
         self.upserts.append((entity_set, [r.get(match_field) for r in records]))
         results = []
         for record in records:
@@ -236,7 +237,8 @@ class UnchangedDataverse(BulkDataverse):
         self.skip_flags = []
 
     def bulk_upsert_by_field(self, entity_set, match_field, records, batch_size=None,
-                             record_errors=None, skip_unchanged=False, skipped=None):
+                             record_errors=None, skip_unchanged=False, skipped=None,
+                             update_only=False):
         self.skip_flags.append(skip_unchanged)
         results = []
         for record in records:
@@ -1095,3 +1097,121 @@ def test_a_delta_without_workplaces_still_checks_the_activity_workplace(tmp_path
     _, result = _wdk_window_delta(tmp_path, dataverse, records)
     assert "WDKA1" not in dataverse.upserted("ts_affiliations")
     assert result["activity_affiliations"]["failed"] == 0
+
+
+# -- department, hospital and group after a delta; parents and relations OneKey drops --
+
+
+def test_a_main_activity_without_its_individual_moves_the_department(tmp_path):
+    dataverse = KnownDataverse(contacts={"WNLN1"}, accounts={"WNLH1"})
+    result = _delta(tmp_path, dataverse, [_activity("WNLN101", "WNLN1", "WNLH1")])
+    contact = dataverse.contacts()["WNLN1"]
+    assert contact["ts_Department@odata.bind"] == "/accounts(account-wnlh1)"
+    # The department has no parent account: the hospital and group are cleared.
+    assert contact["ts_Hospital@odata.bind"] is None and contact["ts_HospitalGroup@odata.bind"] is None
+    assert "lastname" not in contact  # only the placement is written
+    assert result["unjoined"]["activities"] == 0
+
+
+def test_a_secondary_activity_without_its_individual_moves_nothing(tmp_path):
+    dataverse = KnownDataverse(contacts={"WNLN1"}, accounts={"WNLH1"})
+    result = _delta(tmp_path, dataverse, [_activity("WNLN101", "WNLN1", "WNLH1", main=False)])
+    assert dataverse.contacts() == {}
+    assert result["unjoined"]["activities"] == 1
+
+
+class ParentDataverse(BulkDataverse):
+    """Accounts with parents; records $batch writes."""
+
+    def __init__(self, accounts, **kwargs):
+        super().__init__(**kwargs)
+        self.accounts = accounts  # workplaceEid -> row
+        self.batches = []
+
+    def find_many_by_field(self, entity_set, match_field, values, select=None, **kwargs):
+        return {v: self.accounts[v] for v in values if v in self.accounts} if entity_set == "accounts" else {}
+
+    def update_multiple(self, entity_set, records):
+        self.updated.extend((entity_set, r["accountid"], r) for r in records)
+
+    def batch_write(self, operations, idempotent):
+        self.batches.extend(operations)
+        return [(204, None, None) for _ in operations]
+
+
+def test_hierarchy_clears_a_parent_onekey_no_longer_sends(tmp_path):
+    dataverse = ParentDataverse({
+        "WUKH1": {"accountid": "child-1", "_parentaccountid_value": "old-parent"},  # manager removed
+        "WUKH4": {"accountid": "child-4"},                                         # no parent anyway
+        "WUKH2": {"accountid": "child-2", "_parentaccountid_value": "parent-3"},
+        "WUKH3": {"accountid": "parent-3"},
+    })
+    engine, _ = _engine(tmp_path, dataverse)
+    result = engine._sync_hierarchy([
+        {"workplaceEid": "WUKH1", "parentWorkplaceEid": None},
+        {"workplaceEid": "WUKH4", "parentWorkplaceEid": None},
+        {"workplaceEid": "WUKH2", "parentWorkplaceEid": "WUKH3"},
+    ], allowed_workplace_eids={"WUKH1", "WUKH2", "WUKH3", "WUKH4"})
+    assert dataverse.batches == [("PATCH", "accounts(child-1)", {"parentaccountid": None})]
+    assert result["unlinked"] == 1 and result["already_linked"] == 1
+
+
+class RelationDataverse(BulkDataverse):
+    """Active HCO-HCO rows; records $batch writes and the filters read."""
+
+    def __init__(self, rows, **kwargs):
+        super().__init__(**kwargs)
+        self.rows = rows
+        self.batches = []
+        self.filters = []
+
+    def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+        self.filters.append(filter)
+        return list(self.rows) if entity_set == "ts_affiliations" else []
+
+    def batch_write(self, operations, idempotent):
+        self.batches.extend(operations)
+        return [(204, None, None) for _ in operations]
+
+
+def _workplace_with_hie(eid, *related):
+    relations = [{"typeCode": "workplaceToWorkplaceLink", "onekeyEid": r, "linkCode": "HIE", "isParent": True}
+                 for r in related]
+    return {"entityType": "WORKPLACE", "workplace": {"workplaceEid": eid, "relations": relations}}
+
+
+def test_relations_onekey_no_longer_sends_are_deactivated(tmp_path):
+    dataverse = RelationDataverse([
+        {"ts_externalid": "WNLH1 - WNLG1 - HIE", "ts_affiliationid": "keep"},     # still sent
+        {"ts_externalid": "WNLH1 - WNLG0 - HIE", "ts_affiliationid": "stale"},    # gone from OneKey
+        {"ts_externalid": "WNLH9 - WNLG0 - HIE", "ts_affiliationid": "other"},    # another owner
+        {"ts_externalid": "WNLH2 - WNLG0 - HIE", "ts_affiliationid": "emptied"},  # owner has no relations left
+    ])
+    engine, _ = _engine(tmp_path, dataverse)
+    deactivated = engine._deactivate_removed_relations([
+        _workplace_with_hie("WNLH1", "WNLG1"),
+        _workplace_with_hie("WNLH2"),
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WNLH9"}},  # no relations list: unknown
+    ])
+    assert deactivated == 2
+    assert sorted(op[1] for op in dataverse.batches) == ["ts_affiliations(emptied)", "ts_affiliations(stale)"]
+    assert all(op[2] == {"statecode": 1} for op in dataverse.batches)
+    assert "startswith(ts_externalid,'WNLH1 - ')" in dataverse.filters[0]
+
+
+def test_the_relation_phase_deactivates_even_without_relations_left(tmp_path):
+    dataverse = RelationDataverse([{"ts_externalid": "WNLH2 - WNLG0 - HIE", "ts_affiliationid": "gone"}])
+    engine, _ = _engine(tmp_path, dataverse)
+    result = engine._sync_hco_relations([_workplace_with_hie("WNLH2")], allowed_workplace_eids={"WNLH2"})
+    assert dataverse.batches == [("PATCH", "ts_affiliations(gone)", {"statecode": 1})]
+    assert result["updated"] == 1
+
+
+def test_an_hco_relation_is_written_active():
+    from integration import create_transform_engine, load_mapping_config
+    payload = create_transform_engine(load_mapping_config()).transform_w2w_affiliation(
+        {"fromWorkplaceEid": "WNLH1", "toWorkplaceEid": "WNLG1", "linkCode": "HIE",
+         "childWorkplaceEid": "WNLH1", "parentWorkplaceEid": "WNLG1", "isParent": True, "codBase": "WNL"},
+        from_account_id="a", to_account_id="b",
+    )
+    assert payload["statecode"] == 0

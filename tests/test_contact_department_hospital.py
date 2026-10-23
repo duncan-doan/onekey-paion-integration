@@ -151,7 +151,7 @@ ETA = 126870004   # an organisation, not a group
 
 
 class HierarchyDataverse(PayloadDataverse):
-    """Answers the HIE relation and account reads of _hospital_groups."""
+    """Answers the HIE relation and account reads of _parent_or_group."""
 
     def __init__(self, hie=None, accounts=None, **kwargs):
         super().__init__(**kwargs)
@@ -181,7 +181,7 @@ def test_hospital_group_is_the_parent_account_else_the_hie_parent_group(tmp_path
         },
     )
     sync = DynamicSyncEngine(PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path))
-    groups = sync._hospital_groups({"hosp-a", "hosp-b", "hosp-c", "hosp-d", "hosp-e"})
+    groups = sync._parent_or_group({"hosp-a", "hosp-b", "hosp-c", "hosp-d", "hosp-e"})
     assert groups == {
         "hosp-a": "grp-a",   # no parent account: the HIE parent, a group
         "hosp-b": None,      # no parent account, and the HIE parent is not a group
@@ -220,3 +220,82 @@ def test_a_workplace_without_a_parent_account_takes_its_hie_group_as_hospital(tm
     assert contact("WUKI8")["ts_Hospital@odata.bind"] is None
     assert contact("WUKI1")["ts_Hospital@odata.bind"] == f"/accounts({HOSP})"
     assert contact("WUKI9")["ts_Hospital@odata.bind"] == f"/accounts({HOSP})"
+
+
+class PlacementDataverse(HierarchyDataverse):
+    """Also knows contacts, accounts by workplaceEid, and contacts by their lookups."""
+
+    def __init__(self, contacts=(), workplaces=None, by_lookup=None, **kwargs):
+        super().__init__(**kwargs)
+        self.known_contacts = set(contacts)
+        self.workplaces = workplaces or {}   # workplaceEid -> account id
+        self.by_lookup = by_lookup or []     # contact rows returned for a lookup query
+        self.upsert_kwargs = []
+
+    def find_many_by_field(self, entity_set, match_field, values, select=None, **kwargs):
+        if entity_set == "contacts":
+            return {v: {"contactid": f"c-{v}"} for v in values if v in self.known_contacts}
+        if entity_set == "accounts":
+            return {v: {"accountid": self.workplaces[v]} for v in values if v in self.workplaces}
+        return {}
+
+    def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+        if entity_set == "contacts":
+            self.filters.append((entity_set, filter))
+            return list(self.by_lookup)
+        return super().retrieve_multiple(entity_set, select=select, filter=filter, **kwargs)
+
+    def bulk_upsert_by_field(self, entity_set, match_field, records, **kwargs):
+        self.upsert_kwargs.append(dict(kwargs))
+        kwargs.pop("update_only", None)
+        return super().bulk_upsert_by_field(entity_set, match_field, records, **kwargs)
+
+
+def test_refresh_moves_a_contact_and_recomputes_those_under_a_changed_workplace(tmp_path):
+    dataverse = PlacementDataverse(
+        contacts={"I1", "I3"},
+        workplaces={"WNLH10": "dept-10", "WNLH20": "hosp-20", "WNLH30": "dept-30"},
+        by_lookup=[{"ts_externalid": "I4", "_ts_department_value": "dept-20"},
+                   {"ts_externalid": "I3", "_ts_department_value": "dept-20"}],
+        hie={"hosp-10": "grp-10"},
+        accounts={
+            "dept-10": {"_parentaccountid_value": "hosp-10"}, "hosp-10": {}, "grp-10": {"ts_structuretype": GOR},
+            "dept-20": {"_parentaccountid_value": "hosp-20"}, "hosp-20": {},
+        },
+    )
+    sync = DynamicSyncEngine(PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path))
+    stats, applied = sync._refresh_contact_placement(
+        {"I1": "WNLH10", "I2": "WNLH10", "I3": "WNLH30"},   # I2 has no contact; I3 was written already
+        {"WNLH20"},
+        skip={"I3"},
+    )
+    assert applied == {"I1"}
+    one, four = dataverse.payloads[("contacts", "I1")], dataverse.payloads[("contacts", "I4")]
+    assert one["ts_Department@odata.bind"] == "/accounts(dept-10)"
+    assert one["ts_Hospital@odata.bind"] == "/accounts(hosp-10)"
+    assert one["ts_HospitalGroup@odata.bind"] == "/accounts(grp-10)"
+    assert four["ts_Department@odata.bind"] == "/accounts(dept-20)"
+    assert four["ts_Hospital@odata.bind"] == "/accounts(hosp-20)"
+    assert four["ts_HospitalGroup@odata.bind"] is None
+    assert ("contacts", "I3") not in dataverse.payloads and ("contacts", "I2") not in dataverse.payloads
+    assert all(kw.get("update_only") is True for kw in dataverse.upsert_kwargs)
+    lookup_filter = next(f for es, f in dataverse.filters if es == "contacts")
+    assert "_ts_department_value eq hosp-20" in lookup_filter and "_ts_hospital_value eq hosp-20" in lookup_filter
+    assert stats["processed"] == 2
+
+
+def test_hie_parent_ignores_ended_relations_and_takes_the_latest(tmp_path):
+    class TwoParents(HierarchyDataverse):
+        def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+            if entity_set == "ts_affiliations":
+                self.filters.append((entity_set, filter))
+                return [
+                    {"_ts_fromid_value": "hosp-a", "_ts_toid_value": "grp-new", "ts_startdate": "2026-09-01T00:00:00Z"},
+                    {"_ts_fromid_value": "hosp-a", "_ts_toid_value": "grp-old", "ts_startdate": "2020-01-01T00:00:00Z"},
+                ]
+            return super().retrieve_multiple(entity_set, select=select, filter=filter, **kwargs)
+    dataverse = TwoParents(accounts={"grp-new": {"ts_structuretype": GOR}, "grp-old": {"ts_structuretype": GOR}})
+    sync = DynamicSyncEngine(PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path))
+    assert sync._hie_group_parents({"hosp-a"}) == {"hosp-a": "grp-new"}
+    relation_filter = next(f for es, f in dataverse.filters if es == "ts_affiliations")
+    assert "ts_enddate eq null or ts_enddate ge " in relation_filter
