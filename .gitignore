@@ -240,3 +240,7 @@ obj/
 # Deployment archives can carry .env and other secrets; build them outside the
 # repository and never commit them.
 *.zip
+
+# Local instructions for Claude Code; kept out of the repository.
+CLAUDE.md
+.claude/*

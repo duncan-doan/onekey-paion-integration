@@ -304,11 +304,16 @@ class ValidationResult:
 
 ```
 0. Load the OneKey code catalog, then upsert short choices from value_mapping.csv
-1. Extract HCOs (Workplaces) → upsert Accounts (no parent bind yet)
+1. Extract the full population; derive Account hierarchy levels in memory; upsert Accounts
+   (no parent bind yet) with `ts_hierarchylevel` in the same payload
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
 3. Link parentaccountid from managerWorkplaceEid
-4. Extract HCPs → upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup
+4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup
 ```
+
+The full-sync level derivation uses the same main-activity placement chain as Contacts:
+department = 3, hospital = 2, and hospital group = 1. Partial, HCP-only, and delta runs retain
+a cached batched fallback that promotes levels only.
 
 Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.
 Specialty, HCO type, and the other large OneKey lists are loaded into the code catalog before this step. See [PICKLIST_GUIDE.md](PICKLIST_GUIDE.md).

@@ -144,7 +144,8 @@ class DynamicSyncEngine:
     IDs only (no search enrichment):
 
       0. Picklists (value_mapping → Dataverse choices)
-      1. HCO accounts (WORKPLACE → account)
+      1. HCO accounts (WORKPLACE → account), including ts_hierarchylevel
+         derived from the complete population's Contact placement chain
       2. customeraddress (workplaceAddresses → parentid=account GUID)
       3. HCO hierarchy (managerWorkplaceEid → parentaccountid)
       4. HCO–HCO affiliations (workplace.relations[] → ts_affiliation)
@@ -191,6 +192,10 @@ class DynamicSyncEngine:
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
+        # Account GUID -> current ts_hierarchylevel. This is intentionally
+        # per-job: delta fallbacks can reuse Account rows already read in the
+        # same run without trusting values cached before the job started.
+        self._account_hierarchy_level_cache: dict[str, int | None] = {}
         # Contracted workplace EIDs from the latest refreshMyOnekey extract
         self._contracted_workplace_eids: set[str] = set()
         self._contracted_individual_eids: set[str] = set()
@@ -260,6 +265,7 @@ class DynamicSyncEngine:
     ) -> None:
         self.succeeded_ids.clear()
         self.succeeded_records.clear()
+        self._account_hierarchy_level_cache = {}
         self.records_written = 0
         self.tracer.begin(
             job_type=job_type,
@@ -549,12 +555,24 @@ class DynamicSyncEngine:
                             packets[1], packets[2]
                         )
 
+                    # A complete full population already contains every
+                    # input needed to derive the Account level. Put it in the
+                    # normal Account upsert instead of reading and updating
+                    # Accounts again after the Contact phase. A sampled run
+                    # is incomplete, so it keeps the safe promotion fallback.
+                    source_hierarchy_levels = (
+                        self._population_hierarchy_levels(*packets)
+                        if packets is not None and not max_records
+                        else None
+                    )
+
                     if not hcp_only:
                         hco_result, flattened_hcos, raw_workplaces = self._sync_hcos(
                             codebase,
                             max_records=max_records,
                             dry_run=dry_run,
                             raw_workplaces=packets[0] if packets is not None else None,
+                            hierarchy_levels=source_hierarchy_levels,
                         )
                         self._merge_entity(results["accounts"], hco_result)
                         self._checkpoint(results)
@@ -602,6 +620,7 @@ class DynamicSyncEngine:
                             max_records=max_records,
                             dry_run=dry_run,
                             composed=composed,
+                            update_hierarchy_levels=source_hierarchy_levels is None,
                         )
                         self._merge_entity(results["contacts"], hcp_result)
                         self._checkpoint(results)
@@ -824,6 +843,86 @@ class DynamicSyncEngine:
         )
         return workplaces, individuals, activities
 
+    def _population_hierarchy_levels(
+        self,
+        workplace_records: list[dict],
+        individual_records: list[dict],
+        activity_records: list[dict],
+    ) -> dict[str, int]:
+        """Derive ``{workplaceEid: hierarchy level}`` from a full population.
+
+        This follows the same chain used by Contact placement: the main
+        activity's workplace is the department; its manager (or active HIE
+        group parent) is the hospital; and that hospital's equivalent parent
+        is the group. When a workplace has multiple roles, the role closest
+        to an HCP wins (3 > 2 > 1).
+        """
+        workplaces = {
+            str(eid): record.get("workplace") or record
+            for record in workplace_records
+            if (eid := workplace_eid_from_record(record))
+        }
+        individuals = {
+            str(eid)
+            for record in individual_records
+            if (eid := individual_eid_from_record(record))
+        }
+        if not workplaces or not individuals:
+            return {}
+
+        allowed = set(workplaces)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        latest_hie: dict[str, tuple[str, str]] = {}
+        for edge in collect_w2w_relations(workplace_records, allowed):
+            if edge.get("linkCode") != "HIE":
+                continue
+            end = str(edge.get("endValidDate") or "")
+            if end and end[:10] < today:
+                continue
+            child = str(edge.get("childWorkplaceEid") or "")
+            parent = str(edge.get("parentWorkplaceEid") or "")
+            started = str(edge.get("beginValidDate") or "")
+            if child and parent and (
+                child not in latest_hie or started > latest_hie[child][1]
+            ):
+                latest_hie[child] = (parent, started)
+
+        def parent_of(workplace_eid: str) -> str | None:
+            manager = (workplaces.get(workplace_eid) or {}).get(
+                "managerWorkplaceEid"
+            )
+            if manager and str(manager) in workplaces:
+                return str(manager)
+            hie = latest_hie.get(workplace_eid)
+            if not hie:
+                return None
+            parent = hie[0]
+            structure = str(
+                (workplaces.get(parent) or {}).get("structureTypeCode") or ""
+            ).upper()
+            return parent if structure in {"GOR", "POR"} else None
+
+        levels: dict[str, int] = {}
+
+        def promote(workplace_eid: str | None, level: int) -> None:
+            if workplace_eid:
+                levels[workplace_eid] = max(level, levels.get(workplace_eid, 0))
+
+        for individual_eid, record in main_activity_by_individual(
+            activity_records
+        ).items():
+            activity = record.get("activity") or {}
+            department = activity.get("workplaceEid")
+            if individual_eid not in individuals or department not in workplaces:
+                continue
+            department = str(department)
+            hospital = parent_of(department)
+            group = parent_of(hospital) if hospital else None
+            promote(group, 1)
+            promote(hospital, 2)
+            promote(department, 3)
+        return levels
+
     def sync_delta(
         self,
         codebases: list[str],
@@ -1019,6 +1118,7 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         flattened: list[dict] | None = None,
         raw_workplaces: list[dict] | None = None,
+        hierarchy_levels: dict[str, int] | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
         with self._phase(PHASE_HCO, "accounts", codbase=codebase) as phase:
             result = self._sync_hcos_impl(
@@ -1027,6 +1127,7 @@ class DynamicSyncEngine:
                 dry_run=dry_run,
                 flattened=flattened,
                 raw_workplaces=raw_workplaces,
+                hierarchy_levels=hierarchy_levels,
             )
             phase["stats"] = result[0]
             return result
@@ -1038,6 +1139,7 @@ class DynamicSyncEngine:
         dry_run: bool = False,
         flattened: list[dict] | None = None,
         raw_workplaces: list[dict] | None = None,
+        hierarchy_levels: dict[str, int] | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
         """Sync HCOs for a single codebase using bulk upserts.
 
@@ -1144,6 +1246,8 @@ class DynamicSyncEngine:
                 continue
 
             payload = self.transformer.transform_hco(hco)
+            if workplace_eid in (hierarchy_levels or {}):
+                payload["ts_hierarchylevel"] = hierarchy_levels[workplace_eid]
             key_name = self.config.require_key_field("account")
             key_value = payload.get(key_name)
             if not key_value:
@@ -1201,7 +1305,7 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (workplace_eid, _, key_value, _, hco), (match, account_id, created) in zip(
+            for (workplace_eid, _, key_value, payload, hco), (match, account_id, created) in zip(
                 batch, bulk_results
             ):
                 if not account_id:
@@ -1218,6 +1322,10 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._account_cache[workplace_eid] = account_id
+                if "ts_hierarchylevel" in payload:
+                    self._account_hierarchy_level_cache[
+                        str(account_id).lower()
+                    ] = payload["ts_hierarchylevel"]
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -2360,6 +2468,7 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
+        update_hierarchy_levels: bool = True,
     ) -> dict:
         with self._phase(PHASE_HCP, "contacts", codbase=codebase) as phase:
             phase["stats"] = self._sync_hcps_impl(
@@ -2370,6 +2479,7 @@ class DynamicSyncEngine:
                 date_to=date_to,
                 composed=composed,
                 partial=partial,
+                update_hierarchy_levels=update_hierarchy_levels,
             )
             return phase["stats"]
 
@@ -2382,6 +2492,7 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
+        update_hierarchy_levels: bool = True,
     ) -> dict:
         """Sync HCPs for a single codebase using bulk upserts.
 
@@ -2482,12 +2593,13 @@ class DynamicSyncEngine:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
 
             hospital_known, hospital_id = hospitals[individual_eid]
+            group_id = groups.get((hospital_id or "").lower())
             payload = self.transformer.transform_hcp(
                 hcp,
                 account_id=account_id,
                 hospital_id=hospital_id,
                 hospital_known=hospital_known,
-                group_id=groups.get((hospital_id or "").lower()),
+                group_id=group_id,
             )
             key_name = self.config.require_key_field("contact")
             key_value = payload.get(key_name)
@@ -2513,21 +2625,35 @@ class DynamicSyncEngine:
                     self.sync_logger.log_progress("contacts", i, total)
                 continue
 
-            prepared.append((individual_eid, key_name, payload, hcp))
+            prepared.append(
+                (
+                    individual_eid,
+                    key_name,
+                    payload,
+                    account_id,
+                    hospital_id,
+                    group_id,
+                )
+            )
 
         if dry_run or not prepared:
             return result
 
         key_name = prepared[0][1]
         done = 0
+        departments: set[str] = set()
+        hospital_accounts: set[str] = set()
+        group_accounts: set[str] = set()
         for batch in chunked(prepared, self.bulk_batch_size):
             self._check_deadline("contacts", "contacts", result)
             payloads = [item[2] for item in batch]
             try:
-                bulk_results, rejected, unchanged = self._bulk_upsert("contacts", key_name, payloads)
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    "contacts", key_name, payloads
+                )
             except Exception as e:
                 result["failed"] += len(batch)
-                for individual_eid, _, payload, _ in batch:
+                for individual_eid, _, payload, *_ in batch:
                     self._fail(
                         "contact",
                         individual_eid,
@@ -2538,9 +2664,14 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (individual_eid, _, payload, hcp), (match, contact_id, created) in zip(
-                batch, bulk_results
-            ):
+            for (
+                individual_eid,
+                _,
+                payload,
+                department_id,
+                hospital_id,
+                group_id,
+            ), (match, contact_id, created) in zip(batch, bulk_results):
                 if not contact_id:
                     error = rejected.get(match)
                     result["failed"] += 1
@@ -2554,6 +2685,12 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._contact_cache[str(individual_eid)] = contact_id
+                if department_id:
+                    departments.add(str(department_id))
+                if hospital_id:
+                    hospital_accounts.add(str(hospital_id))
+                if group_id:
+                    group_accounts.add(str(group_id))
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -2575,6 +2712,10 @@ class DynamicSyncEngine:
 
             self.sync_logger.log_progress("contacts", done, len(prepared))
 
+        if update_hierarchy_levels:
+            self._set_account_hierarchy_levels(
+                departments, hospital_accounts, group_accounts
+            )
         return result
 
     def _sync_delta_codebase(
@@ -3081,27 +3222,147 @@ class DynamicSyncEngine:
             else {}
         )
         payloads = []
+        placements = []
         for individual, department in sorted(departments.items()):
             hospital = hospitals.get(department)
+            group = groups.get(hospital) if hospital else None
+            placements.append((individual, department, hospital, group))
             payloads.append({
                 key: individual,
                 **self.transformer.contact_account_binds(
-                    department, hospital, True, groups.get(hospital) if hospital else None
+                    department, hospital, True, group
                 ),
             })
-        results, rejected, unchanged = self._bulk_upsert("contacts", key, payloads, update_only=True)
+        results, rejected, unchanged = self._bulk_upsert(
+            "contacts", key, payloads, update_only=True
+        )
         stats["processed"] = len(payloads)
-        for match, record_id, _ in results:
+        hierarchy_departments: set[str] = set()
+        hierarchy_hospitals: set[str] = set()
+        hierarchy_groups: set[str] = set()
+        for (_individual, department, hospital, group), (match, record_id, _) in zip(
+            placements, results
+        ):
             if not record_id:
                 stats["failed"] += 1
                 if match in rejected:
-                    logger.warning(msg("Contact placement not updated", _ctx(self), individual=match, error=str(rejected[match])[:300]))
+                    logger.warning(
+                        msg(
+                            "Contact placement not updated",
+                            _ctx(self),
+                            individual=match,
+                            error=str(rejected[match])[:300],
+                        )
+                    )
             elif match in unchanged:
                 stats["skipped"] += 1
             else:
                 stats["updated"] += 1
-        logger.info(msg("Contact placement refreshed", _ctx(self), moves=len(applied), **{k: stats[k] for k in ("processed", "updated", "skipped", "failed")}))
+            if record_id:
+                hierarchy_departments.add(department)
+                if hospital:
+                    hierarchy_hospitals.add(hospital)
+                if group:
+                    hierarchy_groups.add(group)
+        self._set_account_hierarchy_levels(
+            hierarchy_departments,
+            hierarchy_hospitals,
+            hierarchy_groups,
+        )
+        logger.info(
+            msg(
+                "Contact placement refreshed",
+                _ctx(self),
+                moves=len(applied),
+                **{
+                    key: stats[key]
+                    for key in ("processed", "updated", "skipped", "failed")
+                },
+            )
+        )
         return stats, applied
+
+    def _set_account_hierarchy_levels(
+        self,
+        departments=(),
+        hospitals=(),
+        groups=(),
+    ) -> int:
+        """Set Account hierarchy level from the resolved contact placement chain.
+
+        An Account directly referenced by ``contact.ts_department`` is level 3;
+        one referenced by ``contact.ts_hospital`` is level 2; and one referenced
+        by ``contact.ts_hospitalgroup`` is level 1. If an Account has more than
+        one role, the most direct HCP role wins (3 > 2 > 1). A partial delta
+        never lowers an existing level because other unchanged contacts may
+        still reference that Account in the more direct role.
+        """
+        levels: dict[str, int] = {}
+        for account_ids, level in ((groups, 1), (hospitals, 2), (departments, 3)):
+            for account_id in account_ids:
+                if account_id:
+                    key = str(account_id).lower()
+                    levels[key] = max(level, levels.get(key, 0))
+        if not levels:
+            return 0
+
+        existing = self._account_hierarchy_level_cache
+        missing = sorted(account_id for account_id in levels if account_id not in existing)
+        for account_ids in chunked(missing, 50):
+            rows = self.dataverse.retrieve_multiple(
+                "accounts",
+                select=["accountid", "ts_hierarchylevel"],
+                filter=" or ".join(
+                    f"accountid eq {account_id}" for account_id in account_ids
+                ),
+            )
+            # Remember an empty value too, so another placement update in the
+            # same job does not repeat this Account read.
+            for account_id in account_ids:
+                existing[account_id] = None
+            for row in rows:
+                account_id = str(row.get("accountid") or "").lower()
+                try:
+                    current = int(row.get("ts_hierarchylevel"))
+                except (TypeError, ValueError):
+                    continue
+                if account_id:
+                    existing[account_id] = current
+
+        updates = [
+            {"accountid": account_id, "ts_hierarchylevel": level}
+            for account_id, level in sorted(levels.items())
+            if (existing.get(account_id) or 0) < level
+        ]
+        updated = 0
+        for batch in chunked(updates, self.bulk_batch_size):
+            self._check_deadline("contacts")
+            update_multiple = getattr(self.dataverse, "update_multiple", None)
+            if update_multiple:
+                update_multiple("accounts", batch)
+            else:
+                for row in batch:
+                    self.dataverse.update(
+                        "accounts",
+                        row["accountid"],
+                        {"ts_hierarchylevel": row["ts_hierarchylevel"]},
+                    )
+            for row in batch:
+                existing[row["accountid"]] = row["ts_hierarchylevel"]
+            updated += len(batch)
+            self.records_written += len(batch)
+        if updates:
+            logger.info(
+                msg(
+                    "Account hierarchy levels updated",
+                    _ctx(self),
+                    updated=updated,
+                    departments=sum(level == 3 for level in levels.values()),
+                    hospitals=sum(level == 2 for level in levels.values()),
+                    groups=sum(level == 1 for level in levels.values()),
+                )
+            )
+        return updated
 
     def _account_rows(self, account_ids) -> dict[str, dict]:
         """Return ``{account id: row}`` with the structure type and parent account."""
@@ -3109,10 +3370,22 @@ class DynamicSyncEngine:
         for chunk in chunked(sorted({str(i).lower() for i in account_ids if i}), 50):
             for row in self.dataverse.retrieve_multiple(
                 "accounts",
-                select=["accountid", "ts_structuretype", "_parentaccountid_value"],
+                select=[
+                    "accountid",
+                    "ts_structuretype",
+                    "_parentaccountid_value",
+                    "ts_hierarchylevel",
+                ],
                 filter=" or ".join(f"accountid eq {i}" for i in chunk),
             ):
-                rows[str(row.get("accountid")).lower()] = row
+                account_id = str(row.get("accountid")).lower()
+                rows[account_id] = row
+                if "ts_hierarchylevel" in row:
+                    try:
+                        level = int(row.get("ts_hierarchylevel"))
+                    except (TypeError, ValueError):
+                        level = None
+                    self._account_hierarchy_level_cache[account_id] = level
         return rows
 
     def _account_parents(self, workplace_eids) -> dict[str, str | None]:
@@ -3150,21 +3423,37 @@ class DynamicSyncEngine:
                     "accounts",
                     field_name,
                     needed,
-                    select=[field_name, "accountid"],
+                    select=[field_name, "accountid", "ts_hierarchylevel"],
                 )
                 for match_value, row in rows.items():
                     account_id = row.get("accountid")
                     if account_id:
                         self._account_cache[str(match_value)] = account_id
+                        if "ts_hierarchylevel" in row:
+                            try:
+                                level = int(row.get("ts_hierarchylevel"))
+                            except (TypeError, ValueError):
+                                level = None
+                            self._account_hierarchy_level_cache[
+                                str(account_id).lower()
+                            ] = level
             else:
                 for eid in needed:
                     record = self.dataverse.find_one(
                         "accounts",
                         filter=f"{field_name} eq '{eid}'",
-                        select=[field_name, "accountid"],
+                        select=[field_name, "accountid", "ts_hierarchylevel"],
                     )
                     if record and record.get("accountid"):
                         self._account_cache[eid] = record["accountid"]
+                        if "ts_hierarchylevel" in record:
+                            try:
+                                level = int(record.get("ts_hierarchylevel"))
+                            except (TypeError, ValueError):
+                                level = None
+                            self._account_hierarchy_level_cache[
+                                str(record["accountid"]).lower()
+                            ] = level
         except Exception as e:
             # Raise for the reason given in _lookup_contacts_bulk.
             logger.warning(msg("Account lookup failed", _ctx(self), error=str(e)))

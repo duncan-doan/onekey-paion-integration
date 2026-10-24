@@ -200,6 +200,155 @@ def test_contact_sync_writes_the_hospital_group(tmp_path):
     sync._sync_hcps("WUK", composed=[_row("WUKI1", "WUKH10", manager="WUKH20"), _row("WUKI3", "WUKH12")], partial=set())
     assert dataverse.payloads[("contacts", "WUKI1")]["ts_HospitalGroup@odata.bind"] == f"/accounts({GROUP})"
     assert dataverse.payloads[("contacts", "WUKI3")]["ts_HospitalGroup@odata.bind"] is None
+    levels = {
+        account_id: payload["ts_hierarchylevel"]
+        for entity_set, account_id, payload in dataverse.updated
+        if entity_set == "accounts" and "ts_hierarchylevel" in payload
+    }
+    assert levels == {DEPT: 3, "dept-12": 3, HOSP: 2, GROUP: 1}
+
+
+def test_hierarchy_level_uses_the_most_direct_hcp_role_and_never_downgrades(tmp_path):
+    dataverse = HierarchyDataverse(
+        accounts={
+            "account-shared": {"ts_hierarchylevel": 1},
+            "account-existing": {"ts_hierarchylevel": 3},
+        }
+    )
+    sync = DynamicSyncEngine(
+        PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path)
+    )
+
+    updated = sync._set_account_hierarchy_levels(
+        departments={"account-shared"},
+        hospitals={"account-shared"},
+        groups={"account-shared", "account-existing"},
+    )
+
+    levels = {
+        account_id: payload["ts_hierarchylevel"]
+        for entity_set, account_id, payload in dataverse.updated
+        if entity_set == "accounts"
+    }
+    assert updated == 1
+    assert levels == {"account-shared": 3}
+
+
+def test_hierarchy_levels_use_update_multiple_batches_and_skip_matching_rows(tmp_path):
+    class BatchedHierarchyDataverse(HierarchyDataverse):
+        def __init__(self):
+            super().__init__(
+                accounts={
+                    "account-0": {"ts_hierarchylevel": 3},
+                    **{f"account-{index}": {} for index in range(1, 5)},
+                }
+            )
+            self.level_batches = []
+
+        def update_multiple(self, entity_set, records):
+            assert entity_set == "accounts"
+            self.level_batches.append(list(records))
+
+    dataverse = BatchedHierarchyDataverse()
+    sync = DynamicSyncEngine(
+        PopulationOneKey([]),
+        dataverse,
+        sync_logger=SyncLogger(log_dir=tmp_path),
+        bulk_batch_size=2,
+    )
+
+    updated = sync._set_account_hierarchy_levels(
+        departments={f"account-{index}" for index in range(5)}
+    )
+
+    assert updated == 4
+    assert [len(batch) for batch in dataverse.level_batches] == [2, 2]
+    assert {
+        row["accountid"]
+        for batch in dataverse.level_batches
+        for row in batch
+    } == {"account-1", "account-2", "account-3", "account-4"}
+    assert dataverse.updated == []  # no one-by-one fallback on the normal path
+
+    account_reads = sum(es == "accounts" for es, _ in dataverse.filters)
+    assert sync._set_account_hierarchy_levels(
+        departments={f"account-{index}" for index in range(5)}
+    ) == 0
+    assert sum(es == "accounts" for es, _ in dataverse.filters) == account_reads
+
+
+def test_full_sync_puts_hierarchy_levels_in_the_account_upsert(tmp_path):
+    records = [
+        {
+            "entityType": "WORKPLACE",
+            "workplace": {
+                "workplaceEid": "WUKD1",
+                "officialName": "Department",
+                "managerWorkplaceEid": "WUKH1",
+            },
+        },
+        {
+            "entityType": "WORKPLACE",
+            "workplace": {
+                "workplaceEid": "WUKH1",
+                "officialName": "Hospital",
+                "relations": [
+                    {
+                        "typeCode": "workplaceToWorkplaceLink",
+                        "onekeyEid": "WUKG1",
+                        "linkCode": "HIE",
+                        "isParent": True,
+                    }
+                ],
+            },
+        },
+        {
+            "entityType": "WORKPLACE",
+            "workplace": {
+                "workplaceEid": "WUKG1",
+                "officialName": "Group",
+                "structureTypeCode": "GOR",
+            },
+        },
+        {
+            "entityType": "INDIVIDUAL",
+            "individual": {"individualEid": "WUKI1", "lastName": "Doe"},
+        },
+        {
+            "entityType": "ACTIVITY",
+            "activity": {
+                "activityEid": "WUKA1",
+                "individualEid": "WUKI1",
+                "workplaceEid": "WUKD1",
+                "isMainActivity": True,
+            },
+        },
+    ]
+    dataverse = PayloadDataverse()
+    sync = DynamicSyncEngine(
+        PopulationOneKey(records),
+        dataverse,
+        sync_logger=SyncLogger(log_dir=tmp_path),
+    )
+
+    result = sync.sync_full(
+        ["WUK"],
+        sync_picklists=False,
+        sync_addresses=False,
+        sync_hierarchy=False,
+        sync_hco_relations=False,
+        sync_activity_affiliations=False,
+    )
+
+    assert result["success"] is True
+    assert {
+        eid: dataverse.payloads[("accounts", eid)].get("ts_hierarchylevel")
+        for eid in ("WUKD1", "WUKH1", "WUKG1")
+    } == {"WUKD1": 3, "WUKH1": 2, "WUKG1": 1}
+    assert not any(
+        entity_set == "accounts" and "ts_hierarchylevel" in payload
+        for entity_set, _account_id, payload in dataverse.updated
+    )
 
 
 def test_a_workplace_without_a_parent_account_takes_its_hie_group_as_hospital(tmp_path):
@@ -277,6 +426,18 @@ def test_refresh_moves_a_contact_and_recomputes_those_under_a_changed_workplace(
     assert four["ts_Department@odata.bind"] == "/accounts(dept-20)"
     assert four["ts_Hospital@odata.bind"] == "/accounts(hosp-20)"
     assert four["ts_HospitalGroup@odata.bind"] is None
+    levels = {
+        account_id: payload["ts_hierarchylevel"]
+        for entity_set, account_id, payload in dataverse.updated
+        if entity_set == "accounts" and "ts_hierarchylevel" in payload
+    }
+    assert levels == {
+        "dept-10": 3,
+        "dept-20": 3,
+        "hosp-10": 2,
+        "hosp-20": 2,
+        "grp-10": 1,
+    }
     assert ("contacts", "I3") not in dataverse.payloads and ("contacts", "I2") not in dataverse.payloads
     assert all(kw.get("update_only") is True for kw in dataverse.upsert_kwargs)
     lookup_filter = next(f for es, f in dataverse.filters if es == "contacts")

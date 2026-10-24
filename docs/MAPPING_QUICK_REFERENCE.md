@@ -28,6 +28,7 @@
 | `typeCode` | → | `sic` | direct |
 | `statusCode` | → | `statecode` | map: 3→0, 9→1 |
 | `managerWorkplaceEid` | → | `parentaccountid` | lookup |
+| main-activity Contact placement chain | → | `ts_hierarchylevel` | full sync: included in Account upsert; department=3, hospital=2, hospital group=1 |
 | `address_street` | → | `address1_line1` | direct |
 | `address_city` | → | `address1_city` | direct |
 | `address_postalCode` | → | `address1_postalcode` | direct |

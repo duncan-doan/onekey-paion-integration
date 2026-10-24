@@ -268,6 +268,14 @@ whose workplace or hospital has neither gets the field cleared. The sync no long
 `parentcustomerid` or the `department` text. A person whose individual, activity, or
 workplace is outside the contracted set for this extract is skipped.
 
+The same resolved lookup chain sets `account.ts_hierarchylevel`: an Account referenced by
+`ts_department` is level 3, by `ts_hospital` is level 2, and by `ts_hospitalgroup` is level 1.
+If the same Account has several roles, the most direct HCP role wins (3 before 2 before 1).
+During a complete full sync these values are derived in memory from the population and included
+in the existing Account upsert, so this adds no Dataverse read or write pass. Partial, HCP-only,
+and delta runs use a cached, batched, promotion-only fallback because they do not see the whole
+population and therefore cannot safely lower an existing level.
+
 #### Phase 6 — HCP–HCO affiliations and roles
 
 Every activity, not only the main one, becomes a `ts_affiliation` from the contact to the account. Each
