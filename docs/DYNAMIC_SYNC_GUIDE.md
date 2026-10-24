@@ -61,7 +61,7 @@ Defines field-level mapping from OneKey to Dataverse.
 | `target_platform` | Target system | Dataverse |
 | `target_entity` | Target table | account, contact |
 | `target_field` | Target column | cree7_externalid, firstname |
-| `target_field_type` | Data type | string, picklist, lookup |
+| `target_field_type` | Data type | string, integer, picklist, lookup |
 | `max_length` | Max string length | 50, 160 |
 | `is_required` | Mandatory field | true/false |
 | `is_key` | Upsert key field | true/false |

@@ -30,6 +30,7 @@ HCO-023,OneKey,Workplace,activityLocationCode,workplace.activityLocationCode,Dat
 HCO-024,OneKey,Workplace,legalCategoryCode,workplace.ada.CAJ_1.code,Dataverse,account,ts_legalcategory_ref,lookup,,FALSE,FALSE,TRUE,ts_hcolegalcategory_ref,ts_externalid,lookup_by_key,,Lookup key from lookup_table_mapping.csv (list CAJ),,,,,,,,,,,,,,,,,
 HCO-025,OneKey,Workplace,stateCode,workplace.stateCode,Dataverse,account,ts_substatus,picklist,,FALSE,FALSE,FALSE,,,decode:substatus,,3=Valid->Active(0); 9=Invalid->Inactive(1); 1=Created->Inactive,,,,,,,,,,,,,,,,,
 HCO-026,OneKey,Workplace,codBase,codBase,Dataverse,account,ts_country,lookup,,FALSE,FALSE,TRUE,ts_country,ts_onekeycode,lookup_by_key,,HCO country; alternate-key bind /ts_countries(ts_onekeycode='WDE'),,,,,,,,,,,,,,,,,
+HCO-027,OneKey,Workplace,hierarchyLevel,derived from main Activity and Workplace hierarchy,Dataverse,account,ts_hierarchylevel,integer,,FALSE,FALSE,FALSE,,,direct,,Derived Contact placement level; department=3 hospital=2 hospital group=1; highest role wins,,,,,,,,,,,,,,,,,
 # ============================================================================================================,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 # HCP (Individual/Activity) -> Contact Mapping,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 # Source: flatten_hcp() output from onekey/parse.py,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,

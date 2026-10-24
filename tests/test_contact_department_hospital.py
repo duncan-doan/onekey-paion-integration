@@ -52,6 +52,26 @@ def test_no_workplace_account_leaves_the_department_out(engine):
     assert "ts_Department@odata.bind" not in payload
 
 
+def test_hierarchy_level_mapping_uses_the_dataverse_logical_name(engine):
+    mapping = next(
+        fm
+        for fm in engine.config.get_field_mappings("account")
+        if fm.mapping_id == "HCO-027"
+    )
+    assert mapping.source_field == "hierarchyLevel"
+    assert mapping.target_field == "ts_hierarchylevel"
+    assert mapping.target_field_type == "integer"
+
+    payload = engine.transform_hco(
+        {
+            "workplaceEid": "WUKH10",
+            "officialName": "Cardiology",
+            "hierarchyLevel": 3,
+        }
+    )
+    assert payload["ts_hierarchylevel"] == 3
+
+
 def test_a_mapped_parentcustomerid_is_bound_to_the_workplace_too():
     """Adding the parentcustomerid row back to entity_mapping.csv writes it again."""
     config = load_mapping_config()

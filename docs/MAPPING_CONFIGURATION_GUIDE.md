@@ -173,7 +173,7 @@ This is the **main mapping file** that defines how each OneKey field maps to a D
 | `target_platform` | Always `Dataverse` | `Dataverse` |
 | `target_entity` | Dataverse table | `account`, `contact` |
 | `target_field` | Dataverse column | `cree7_externalid`, `lastname` |
-| `target_field_type` | Data type | `string`, `picklist`, `lookup` |
+| `target_field_type` | Data type | `string`, `integer`, `picklist`, `lookup` |
 | `max_length` | Max characters (for strings) | `50`, `160` |
 | `is_required` | Must have value? | `true` / `false` |
 | `is_key` | Is this the upsert key? | `true` / `false` |

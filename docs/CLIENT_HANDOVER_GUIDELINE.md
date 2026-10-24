@@ -368,7 +368,7 @@ target column.
 | `source_field_path` | Path in the raw OneKey JSON, kept for documentation |
 | `target_entity` | Dataverse logical name: `account`, `contact`, `customeraddress`, `ts_affiliation`, `ts_affiliationrole`, or a custom table |
 | `target_field` | Dataverse logical column name |
-| `target_field_type` | string, picklist, lookup, boolean, datetime, state |
+| `target_field_type` | string, integer, picklist, lookup, boolean, datetime, state |
 | `max_length` | Truncation length for strings |
 | `is_required` | The source value must be present |
 | `is_key` | This value is part of `ts_externalid`. Several rows can build one key with `append` |

@@ -1245,9 +1245,12 @@ class DynamicSyncEngine:
                 )
                 continue
 
+            # hierarchyLevel is a synthetic flattened field declared in
+            # entity_mapping.csv. A complete full sync supplies it here; the
+            # normal transform then writes the configured Dataverse column.
+            if hierarchy_levels is not None:
+                hco["hierarchyLevel"] = hierarchy_levels.get(workplace_eid)
             payload = self.transformer.transform_hco(hco)
-            if workplace_eid in (hierarchy_levels or {}):
-                payload["ts_hierarchylevel"] = hierarchy_levels[workplace_eid]
             key_name = self.config.require_key_field("account")
             key_value = payload.get(key_name)
             if not key_value:
@@ -3297,6 +3300,12 @@ class DynamicSyncEngine:
         never lowers an existing level because other unchanged contacts may
         still reference that Account in the more direct role.
         """
+        mapped = {
+            fm.target_field for fm in self.config.get_field_mappings("account")
+        }
+        if "ts_hierarchylevel" not in mapped:
+            return 0
+
         levels: dict[str, int] = {}
         for account_ids, level in ((groups, 1), (hospitals, 2), (departments, 3)):
             for account_id in account_ids:
