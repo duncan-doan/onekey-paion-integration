@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 
 from .dynamic_mapping import load_mapping_config, MappingConfig
 from .hco_name import hcp_name_by_workplace
-from .env import skip_unchanged
-from .transform import TransformEngine
+from .env import contract_cleanup_max_percent, skip_unchanged
+from .transform import CONTACT_ACCOUNT_LOOKUPS, TransformEngine, affiliation_role_name
 from .validation import MappingValidator, DataverseValidator, ValidationResult
 from .sync_logger import SyncLogger, msg, setup_logging, short_job
 from .contracted_ids import workplace_eid_from_record, individual_eid_from_record
@@ -69,6 +69,18 @@ _EMPTY_HIERARCHY = {
     # Parents cleared: OneKey no longer sends a managerWorkplaceEid.
     "unlinked": 0,
 }
+# Out-of-contract cleanup: records deactivated and lookups cleared, by kind;
+# ``written`` counts the PATCHes, one per record.
+_EMPTY_CONTRACT = {
+    "accounts": 0,
+    "contacts": 0,
+    "affiliations": 0,
+    "placements": 0,
+    "parents": 0,
+    "roles": 0,
+    "written": 0,
+    "failed": 0,
+}
 
 
 class SyncPaused(RuntimeError):
@@ -112,17 +124,19 @@ def _operation(created: bool, unchanged: bool) -> str:
     return "skip" if unchanged else "update"
 
 
-def main_activity_by_individual(activity_records) -> dict[str, dict]:
+def main_activity_by_individual(activity_records, active=None) -> dict[str, dict]:
     """One ACTIVITY per individual: the first marked ``isMainActivity``, else the first.
 
-    The full sync and the delta both pick a contact's activity with this, so
-    they agree on which workplace is its parent.
+    ``active`` (activity dict -> bool) leaves out inactive activities, so an
+    individual with only inactive ones is missing from the result. The full
+    sync and the delta both pick a contact's activity with this, so they
+    agree on which workplace is its parent.
     """
     picked: dict[str, dict] = {}
     for record in activity_records:
         activity = record.get("activity") or {}
         individual_eid = activity.get("individualEid")
-        if not individual_eid:
+        if not individual_eid or (active is not None and not active(activity)):
             continue
         existing = picked.get(individual_eid)
         if existing is None or (
@@ -149,7 +163,9 @@ class DynamicSyncEngine:
       2. customeraddress (workplaceAddresses → parentid=account GUID)
       3. HCO hierarchy (managerWorkplaceEid → parentaccountid)
       4. HCO–HCO affiliations (workplace.relations[] → ts_affiliation)
-      5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + ts_department / ts_hospital / ts_hospitalgroup)
+      5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + ts_department / ts_hospital / ts_hospitalgroup);
+         after a complete full-sync walk, records that left the contract are
+         deactivated and lookups to them cleared (_retire_out_of_contract)
       6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation), then each
          account's primarycontactid from its primary affiliation
 
@@ -193,10 +209,6 @@ class DynamicSyncEngine:
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
-        # Account GUID -> current ts_hierarchylevel. This is intentionally
-        # per-job: delta fallbacks can reuse Account rows already read in the
-        # same run without trusting values cached before the job started.
-        self._account_hierarchy_level_cache: dict[str, int | None] = {}
         # Contracted workplace EIDs from the latest refreshMyOnekey extract
         self._contracted_workplace_eids: set[str] = set()
         self._contracted_individual_eids: set[str] = set()
@@ -222,6 +234,14 @@ class DynamicSyncEngine:
     def close(self) -> None:
         """Release what the engine holds open: its sync log file."""
         self.sync_logger.close()
+
+    def _active_activity(self, activity: dict) -> bool:
+        """False when the activity's stateCode decodes to Inactive, as AFF-018 writes it.
+
+        An inactive activity places no contact (department, hospital, group)
+        and gives no level. A missing or unknown code counts as active.
+        """
+        return self.config.get_value("statecode", activity.get("stateCode")) != "1"
 
     def _check_deadline(
         self, before: str, phase: str | None = None, stats: dict | None = None
@@ -266,7 +286,6 @@ class DynamicSyncEngine:
     ) -> None:
         self.succeeded_ids.clear()
         self.succeeded_records.clear()
-        self._account_hierarchy_level_cache = {}
         self.records_written = 0
         self.tracer.begin(
             job_type=job_type,
@@ -498,6 +517,7 @@ class DynamicSyncEngine:
             "affiliations": _empty_entity_stats(),
             "activity_affiliations": _empty_entity_stats(),
             "contacts": _empty_entity_stats(),
+            "contract_cleanup": dict(_EMPTY_CONTRACT),
             "picklist_gaps": 0,
             "picklist_gap_report": None,
             "errors": [],
@@ -559,8 +579,9 @@ class DynamicSyncEngine:
                     # A complete full population already contains every
                     # input needed to derive the Account level. Put it in the
                     # normal Account upsert instead of reading and updating
-                    # Accounts again after the Contact phase. A sampled run
-                    # is incomplete, so it keeps the safe promotion fallback.
+                    # Accounts again after the Contact phase. Only a complete
+                    # walk sets levels: a sampled run, an HCP-only run, a
+                    # delta and a retry leave them as they are.
                     source_hierarchy_levels = (
                         self._population_hierarchy_levels(*packets)
                         if packets is not None and not max_records
@@ -621,10 +642,22 @@ class DynamicSyncEngine:
                             max_records=max_records,
                             dry_run=dry_run,
                             composed=composed,
-                            update_hierarchy_levels=source_hierarchy_levels is None,
                         )
                         self._merge_entity(results["contacts"], hcp_result)
                         self._checkpoint(results)
+
+                        # A complete walk shows what left the contract. This
+                        # runs before the activity phase, so its primary
+                        # contact step sees the deactivated affiliations.
+                        if packets is not None and not max_records:
+                            cleanup, error = self._retire_out_of_contract(
+                                codebase, packets, dry_run=dry_run
+                            )
+                            for key in _EMPTY_CONTRACT:
+                                results["contract_cleanup"][key] += cleanup[key]
+                            if error:
+                                results["errors"].append(error)
+                            self._checkpoint(results)
 
                         if sync_activity_affiliations:
                             act_result = self._sync_activity_affiliations(
@@ -658,7 +691,7 @@ class DynamicSyncEngine:
 
             self.sync_logger.end_sync(success=results["success"], results=results)
             return results
-        except Exception as exc:
+        except BaseException as exc:  # Ctrl-C and SystemExit too: the run did not finish
             aborted = True
             message = str(exc)
             if message and message not in results["errors"]:
@@ -733,6 +766,8 @@ class DynamicSyncEngine:
                 codebase_started = self.sync_logger.phase_started("codebase", codbase=codebase)
                 codebase_failed = False
                 try:
+                    # A complete walk unless sampled, as in sync_full.
+                    self._partial_population = bool(max_records)
                     workplaces, individuals, activities = self._collect_population_packets(
                         codebase, max_records=max_records
                     )
@@ -796,7 +831,7 @@ class DynamicSyncEngine:
 
             self.sync_logger.end_sync(success=results["success"], results=results)
             return results
-        except Exception as exc:
+        except BaseException as exc:  # Ctrl-C and SystemExit too: the run did not finish
             aborted = True
             message = str(exc)
             if message and message not in results["errors"]:
@@ -849,27 +884,36 @@ class DynamicSyncEngine:
         workplace_records: list[dict],
         individual_records: list[dict],
         activity_records: list[dict],
-    ) -> dict[str, int]:
+    ) -> dict[str, int] | None:
         """Derive ``{workplaceEid: hierarchy level}`` from a full population.
 
         This follows the same chain used by Contact placement: the main
         activity's workplace is the department; its manager (or active HIE
         group parent) is the hospital; and that hospital's equivalent parent
         is the group. When a workplace has multiple roles, the role closest
-        to an HCP wins (3 > 2 > 1).
+        to an HCP wins (3 > 2 > 1). An HCP whose contact the sync makes
+        inactive (its stateCode decodes to Inactive) gives no level. A
+        workplace missing from the result has none, which clears it. Returns
+        None, leaving levels as they are, when the walk has no workplaces or
+        no individuals.
         """
         workplaces = {
             str(eid): record.get("workplace") or record
             for record in workplace_records
             if (eid := workplace_eid_from_record(record))
         }
-        individuals = {
-            str(eid)
+        people = {
+            str(eid): record.get("individual") or record
             for record in individual_records
             if (eid := individual_eid_from_record(record))
         }
-        if not workplaces or not individuals:
-            return {}
+        if not workplaces or not people:
+            return None
+        individuals = {
+            eid
+            for eid, person in people.items()
+            if self.config.get_value("statecode", person.get("stateCode")) != "1"
+        }
 
         allowed = set(workplaces)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -910,7 +954,7 @@ class DynamicSyncEngine:
                 levels[workplace_eid] = max(level, levels.get(workplace_eid, 0))
 
         for individual_eid, record in main_activity_by_individual(
-            activity_records
+            activity_records, active=self._active_activity
         ).items():
             activity = record.get("activity") or {}
             department = activity.get("workplaceEid")
@@ -1042,7 +1086,7 @@ class DynamicSyncEngine:
 
             self.sync_logger.end_sync(success=results["success"], results=results)
             return results
-        except Exception as exc:
+        except BaseException as exc:  # Ctrl-C and SystemExit too: the run did not finish
             aborted = True
             message = str(exc)
             if message and message not in results["errors"]:
@@ -1183,6 +1227,12 @@ class DynamicSyncEngine:
             flattened = [flatten_hco(r) for r in raw_workplaces]
 
         self._stamp_nameless_hcp_names(flattened)
+        # A complete full sync writes every account's level, an empty one too,
+        # to the column mapped from hierarchyLevel (HCO-027).
+        level_column = next(
+            (fm.target_field for fm in self.config.get_field_mappings("account") if fm.source_field == "hierarchyLevel"),
+            None,
+        ) if hierarchy_levels is not None else None
 
         contracted = {
             eid
@@ -1246,12 +1296,11 @@ class DynamicSyncEngine:
                 )
                 continue
 
-            # hierarchyLevel is a synthetic flattened field declared in
-            # entity_mapping.csv. A complete full sync supplies it here; the
-            # normal transform then writes the configured Dataverse column.
-            if hierarchy_levels is not None:
-                hco["hierarchyLevel"] = hierarchy_levels.get(workplace_eid)
             payload = self.transformer.transform_hco(hco)
+            if level_column:
+                # The transform leaves an empty value out; None clears the level
+                # of a workplace no active HCP points at.
+                payload[level_column] = hierarchy_levels.get(workplace_eid)
             key_name = self.config.require_key_field("account")
             key_value = payload.get(key_name)
             if not key_value:
@@ -1309,7 +1358,7 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (workplace_eid, _, key_value, payload, hco), (match, account_id, created) in zip(
+            for (workplace_eid, _, key_value, _, hco), (match, account_id, created) in zip(
                 batch, bulk_results
             ):
                 if not account_id:
@@ -1326,10 +1375,6 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._account_cache[workplace_eid] = account_id
-                if "ts_hierarchylevel" in payload:
-                    self._account_hierarchy_level_cache[
-                        str(account_id).lower()
-                    ] = payload["ts_hierarchylevel"]
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -1770,7 +1815,7 @@ class DynamicSyncEngine:
             if child_eid not in failed_eids:
                 self._note_success(child_eid, entity="account")
         result["linked"] = linked
-        result["failed"] = failed
+        result["failed"] += failed
         return result
 
     def _affiliation_entity_set(self) -> str:
@@ -1818,7 +1863,9 @@ class DynamicSyncEngine:
         edges = collect_w2w_relations(
             raw_workplaces, allowed_workplace_eids=allow
         )
-        if not dry_run:
+        # Only a complete walk deactivates: a delta writes what OneKey sends
+        # and leaves removals to the next full sync.
+        if not dry_run and not self._partial_population:
             result["updated"] += self._deactivate_removed_relations(raw_workplaces)
         if not edges:
             logger.info(
@@ -2272,20 +2319,23 @@ class DynamicSyncEngine:
                 )
             except Exception as exc:
                 result["failed"] += len(batch)
-                self._fail(
-                    "ts_affiliationrole",
-                    "",
-                    "upsert",
-                    str(exc),
-                    exc=exc,
-                )
+                # One failure per activity, which a retry replays with its roles.
+                for activity_eid in sorted({row["ts_name"].split(" - ")[0] for row in batch}):
+                    self._fail(
+                        "ts_affiliationrole",
+                        activity_eid,
+                        "upsert",
+                        str(exc),
+                        external_id=activity_eid,
+                        exc=exc,
+                    )
                 raise
             for match, record_id, created in bulk_results:
                 if not record_id:
                     result["failed"] += 1
                     self._fail(
                         "ts_affiliationrole",
-                        match,
+                        str(match).split(" - ")[0],
                         "upsert",
                         str(rejected.get(match) or "Dataverse rejected the role row"),
                         external_id=match,
@@ -2330,10 +2380,11 @@ class DynamicSyncEngine:
         value set by hand is overwritten.
 
         A complete population reads the codebase's accounts and primary rows
-        once, by ``prefixes``. A partial run (delta, sample, retry) reads
-        ``accounts``, the accounts it wrote affiliations to, and the accounts
-        whose primary contact is one of ``contacts``, which covers a primary
-        HCP who left. The writes are PATCHes in a $batch, which also clear
+        once, by ``prefixes``, and so does a partial run that touched more
+        than 1,000 accounts and contacts. A smaller one (delta, sample, retry)
+        reads ``accounts``, the accounts it wrote affiliations to, and the
+        accounts whose primary contact is one of ``contacts``, which covers a
+        primary HCP who left. The writes are PATCHes in a $batch, which also clear
         the lookup (dev 2026-10-24); failures add to ``stats["failed"]``.
         Returns ``{"set", "cleared", "failed"}`` counts.
         """
@@ -2349,7 +2400,10 @@ class DynamicSyncEngine:
         # HCO–HCO keys are "{from} - {to} - {linkCode}"; HCP–HCO keys are activity IDs.
         primary = f"ts_isprimary eq true and statecode eq 0 and not contains({affiliation_key},' - ')"
 
-        if not self._partial_population:
+        # By account, 50 per query, is slower than the whole codebase past about
+        # 1,000 (prod 2026-10-24: 413 accounts and 911 contacts took 14.2 s, all
+        # of WUK 8.6 s).
+        if not self._partial_population or len(accounts) + len(contacts) > 1000:
             starts = [f"'{escape_odata(prefix)}'" for prefix in sorted(prefixes)]
             account_rows = self.dataverse.retrieve_multiple(
                 "accounts",
@@ -2479,11 +2533,16 @@ class DynamicSyncEngine:
             if individual_eid:
                 individuals[individual_eid] = record
         activities_by_individual = main_activity_by_individual(activity_records)
+        # An inactive activity places no contact: an individual with only
+        # inactive ones is still written, its department, hospital and group
+        # left as they are.
+        placing = main_activity_by_individual(activity_records, active=self._active_activity)
 
         composed = []
         skipped_unjoined = 0
-        for individual_eid, activity_record in activities_by_individual.items():
-            activity = activity_record.get("activity") or {}
+        for individual_eid, any_state_record in activities_by_individual.items():
+            activity_record = placing.get(individual_eid)
+            activity = (activity_record or any_state_record).get("activity") or {}
             workplace_eid = activity.get("workplaceEid")
             # Only process IDs present in refreshMyOnekey packets — do not
             # fall back to search/get_by_id for missing workplace/individual.
@@ -2505,7 +2564,7 @@ class DynamicSyncEngine:
                 compose_hcp_result(
                     individuals.get(individual_eid),
                     activity_record,
-                    workplaces.get(workplace_eid),
+                    workplaces.get(workplace_eid) if activity_record else None,
                 )
             )
 
@@ -2599,7 +2658,6 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
-        update_hierarchy_levels: bool = True,
     ) -> dict:
         with self._phase(PHASE_HCP, "contacts", codbase=codebase) as phase:
             phase["stats"] = self._sync_hcps_impl(
@@ -2610,7 +2668,6 @@ class DynamicSyncEngine:
                 date_to=date_to,
                 composed=composed,
                 partial=partial,
-                update_hierarchy_levels=update_hierarchy_levels,
             )
             return phase["stats"]
 
@@ -2623,7 +2680,6 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
-        update_hierarchy_levels: bool = True,
     ) -> dict:
         """Sync HCPs for a single codebase using bulk upserts.
 
@@ -2724,13 +2780,12 @@ class DynamicSyncEngine:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
 
             hospital_known, hospital_id = hospitals[individual_eid]
-            group_id = groups.get((hospital_id or "").lower())
             payload = self.transformer.transform_hcp(
                 hcp,
                 account_id=account_id,
                 hospital_id=hospital_id,
                 hospital_known=hospital_known,
-                group_id=group_id,
+                group_id=groups.get((hospital_id or "").lower()),
             )
             key_name = self.config.require_key_field("contact")
             key_value = payload.get(key_name)
@@ -2756,35 +2811,21 @@ class DynamicSyncEngine:
                     self.sync_logger.log_progress("contacts", i, total)
                 continue
 
-            prepared.append(
-                (
-                    individual_eid,
-                    key_name,
-                    payload,
-                    account_id,
-                    hospital_id,
-                    group_id,
-                )
-            )
+            prepared.append((individual_eid, key_name, payload, hcp))
 
         if dry_run or not prepared:
             return result
 
         key_name = prepared[0][1]
         done = 0
-        departments: set[str] = set()
-        hospital_accounts: set[str] = set()
-        group_accounts: set[str] = set()
         for batch in chunked(prepared, self.bulk_batch_size):
             self._check_deadline("contacts", "contacts", result)
             payloads = [item[2] for item in batch]
             try:
-                bulk_results, rejected, unchanged = self._bulk_upsert(
-                    "contacts", key_name, payloads
-                )
+                bulk_results, rejected, unchanged = self._bulk_upsert("contacts", key_name, payloads)
             except Exception as e:
                 result["failed"] += len(batch)
-                for individual_eid, _, payload, *_ in batch:
+                for individual_eid, _, payload, _ in batch:
                     self._fail(
                         "contact",
                         individual_eid,
@@ -2795,14 +2836,9 @@ class DynamicSyncEngine:
                     )
                 raise
 
-            for (
-                individual_eid,
-                _,
-                payload,
-                department_id,
-                hospital_id,
-                group_id,
-            ), (match, contact_id, created) in zip(batch, bulk_results):
+            for (individual_eid, _, payload, hcp), (match, contact_id, created) in zip(
+                batch, bulk_results
+            ):
                 if not contact_id:
                     error = rejected.get(match)
                     result["failed"] += 1
@@ -2816,12 +2852,6 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._contact_cache[str(individual_eid)] = contact_id
-                if department_id:
-                    departments.add(str(department_id))
-                if hospital_id:
-                    hospital_accounts.add(str(hospital_id))
-                if group_id:
-                    group_accounts.add(str(group_id))
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -2843,10 +2873,6 @@ class DynamicSyncEngine:
 
             self.sync_logger.log_progress("contacts", done, len(prepared))
 
-        if update_hierarchy_levels:
-            self._set_account_hierarchy_levels(
-                departments, hospital_accounts, group_accounts
-            )
         return result
 
     def _sync_delta_codebase(
@@ -2907,7 +2933,9 @@ class DynamicSyncEngine:
             elif entity_type == "ACTIVITY":
                 all_activities.append(record)
 
-        activities_by_individual = main_activity_by_individual(all_activities)
+        activities_by_individual = main_activity_by_individual(
+            all_activities, active=self._active_activity
+        )
         self._hcp_name_by_workplace = hcp_name_by_workplace(
             individuals.values(), all_activities
         )
@@ -2967,6 +2995,7 @@ class DynamicSyncEngine:
             # department's or hospital's parent. Other activities without
             # their individual are counted on the job, as are new individuals
             # outside the contracted workplaces.
+            partial: set[str] = set()
             if individuals:
                 composed, result["unjoined"]["individuals"], partial = self._compose_delta_hcps(
                     individuals,
@@ -2987,8 +3016,10 @@ class DynamicSyncEngine:
                     activity = record.get("activity") or {}
                     if individual_eid not in individuals and activity.get("isMainActivity"):
                         moves[individual_eid] = activity.get("workplaceEid")
+                # A contact written without its workplace (partial) left its
+                # placement as it was, so the refresh still covers it.
                 placement, applied = self._refresh_contact_placement(
-                    moves, set(workplace_index), skip=set(individuals)
+                    moves, set(workplace_index), skip=set(individuals) - partial
                 )
                 self._merge_entity(result["contacts"], placement)
             result["unjoined"]["activities"] = sum(
@@ -3126,9 +3157,14 @@ class DynamicSyncEngine:
         row carries its workplace, else from the workplace's account. A
         workplace without a parent account gives ``(True, None)``, which
         clears it; an unknown one ``(False, None)``, which leaves it as it is.
+        After a complete walk, a parent outside the contract counts as none:
+        _retire_out_of_contract deactivates its account.
         """
         if hcp.get("workplaceLoaded"):
-            return True, self._account_cache.get(hcp.get("hospitalWorkplaceEid") or "")
+            manager = hcp.get("hospitalWorkplaceEid") or ""
+            if not self._partial_population and manager not in self._contracted_workplace_eids:
+                return True, None
+            return True, self._account_cache.get(manager)
         workplace_eid = hcp.get("workplaceEid")
         return workplace_eid in parent_accounts, parent_accounts.get(workplace_eid)
 
@@ -3235,6 +3271,7 @@ class DynamicSyncEngine:
         its key is ``{owner} - {related} - {linkCode}``. A workplace record
         without a ``relations`` list is left alone, as what it lacks is
         unknown. W2W-011 makes a relation that comes back active again.
+        Only a run over the complete population calls it, never a delta.
         Returns the number of rows deactivated.
         """
         current: set[str] = set()
@@ -3291,6 +3328,160 @@ class DynamicSyncEngine:
         if stale:
             logger.info(msg("HCO relations OneKey no longer sends deactivated", _ctx(self), deactivated=deactivated, found=len(stale)))
         return deactivated
+
+    def _retire_out_of_contract(
+        self,
+        codebase: str,
+        packets: tuple[list[dict], list[dict], list[dict]],
+        dry_run: bool = False,
+    ) -> tuple[dict, str | None]:
+        """Deactivate what left the OneKey contract, after a complete population walk.
+
+        A record of this codebase that the walk did not return is out of the
+        contract. Its account or contact is deactivated, and so are the
+        HCP–HCO affiliations the activity phase would not write (the activity
+        is gone, or one end is outside the contract) and the HCO–HCO rows with
+        an end outside it, and the role rows of a role an activity no longer
+        has. Contacts' department, hospital and group, and accounts' parent,
+        that point at an out-of-contract account are cleared. Nothing is deleted: a record that comes back is written with
+        its OneKey state, which reactivates it (dev 2026-10-24).
+
+        A walk that lost packets makes valid records look gone, so when more
+        than ``contract_cleanup_max_percent()`` of the codebase's active
+        accounts, contacts, affiliations or roles would be deactivated, nothing is
+        written and the error is returned for the job. ``dry_run`` counts
+        what would change. Returns ``(counts, error or None)``.
+        """
+        counts = dict(_EMPTY_CONTRACT)
+        workplace_records, individual_records, activity_records = packets
+        workplaces = {str(eid) for eid in map(workplace_eid_from_record, workplace_records) if eid}
+        individuals = {str(eid) for eid in map(individual_eid_from_record, individual_records) if eid}
+        if not workplaces or not individuals:
+            return counts, None
+        # The activities the activity phase writes (both ends in the contract)
+        # and the role rows it writes for them.
+        activities = set()
+        roles = set()
+        for record in activity_records:
+            flat = flatten_activity_for_affiliation(record)
+            if (
+                flat.get("activityEid")
+                and str(flat.get("workplaceEid")) in workplaces
+                and str(flat.get("individualEid")) in individuals
+            ):
+                activities.add(str(flat["activityEid"]))
+                roles.update(
+                    affiliation_role_name(flat["activityEid"], code)
+                    for code in self.transformer.affiliation_role_codes(flat)
+                )
+
+        account_key = self.config.require_key_field("account")
+        contact_key = self.config.require_key_field("contact")
+        affiliation_key = self.config.require_key_field("ts_affiliation")
+        entity_set = self._affiliation_entity_set()
+        prefix = escape_odata(codebase)
+        contact_fields = {fm.target_field for fm in self.config.get_field_mappings("contact")}
+        lookups = {field: nav for field, nav in CONTACT_ACCOUNT_LOOKUPS.items() if field in contact_fields}
+        parents = any(fm.target_field == "parentaccountid" for fm in self.config.get_field_mappings("account"))
+        accounts = self.dataverse.retrieve_multiple(
+            "accounts",
+            select=["accountid", account_key, "statecode"] + (["_parentaccountid_value"] if parents else []),
+            filter=f"startswith({account_key},'{prefix}')",
+        )
+        contacts = self.dataverse.retrieve_multiple(
+            "contacts",
+            select=["contactid", contact_key, "statecode"] + [f"_{field}_value" for field in lookups],
+            filter=f"startswith({contact_key},'{prefix}')",
+        )
+        affiliations = self.dataverse.retrieve_multiple(
+            entity_set,
+            select=["ts_affiliationid", affiliation_key],
+            filter=f"statecode eq 0 and startswith({affiliation_key},'{prefix}')",
+        )
+        role_set = self._role_entity_set()
+        role_rows = self.dataverse.retrieve_multiple(
+            role_set,
+            select=["ts_affiliationroleid", "ts_name"],
+            filter=f"statecode eq 0 and startswith(ts_name,'{prefix}')",
+        )
+
+        gone = {str(row["accountid"]).lower() for row in accounts if str(row.get(account_key) or "") not in workplaces}
+        # One PATCH per record, whatever it needs: path -> (body, kinds, key).
+        writes: dict[str, tuple[dict, list[str], str]] = {}
+
+        def plan(path: str, body: dict, kind: str, key: str) -> None:
+            entry = writes.setdefault(path, ({}, [], key))
+            entry[0].update(body)
+            entry[1].append(kind)
+
+        for row in accounts:
+            key = str(row.get(account_key) or "")
+            if key not in workplaces:
+                if row.get("statecode") == 0:
+                    plan(f"accounts({row['accountid']})", {"statecode": 1}, "accounts", key)
+            elif str(row.get("_parentaccountid_value") or "").lower() in gone:
+                plan(f"accounts({row['accountid']})", {"parentaccountid": None}, "parents", key)
+        for row in contacts:
+            key = str(row.get(contact_key) or "")
+            if key not in individuals and row.get("statecode") == 0:
+                plan(f"contacts({row['contactid']})", {"statecode": 1}, "contacts", key)
+            cleared = {nav: None for field, nav in lookups.items() if str(row.get(f"_{field}_value") or "").lower() in gone}
+            if cleared:
+                plan(f"contacts({row['contactid']})", cleared, "placements", key)
+        for row in affiliations:
+            key = str(row.get(affiliation_key) or "")
+            if " - " in key:
+                # HCO–HCO: "{from} - {to} - {linkCode}".
+                stale = any(end not in workplaces for end in key.split(" - ")[:2])
+            else:
+                stale = key not in activities
+            if stale:
+                plan(f"{entity_set}({row['ts_affiliationid']})", {"statecode": 1}, "affiliations", key)
+        for row in role_rows:
+            key = str(row.get("ts_name") or "")
+            if key not in roles:
+                plan(f"{role_set}({row['ts_affiliationroleid']})", {"statecode": 1}, "roles", key)
+
+        planned = dict(_EMPTY_CONTRACT)
+        for _, kinds, _ in writes.values():
+            for kind in kinds:
+                planned[kind] += 1
+        active = {
+            "accounts": sum(1 for row in accounts if row.get("statecode") == 0),
+            "contacts": sum(1 for row in contacts if row.get("statecode") == 0),
+            "affiliations": len(affiliations),
+            "roles": len(role_rows),
+        }
+        limit = contract_cleanup_max_percent()
+        over = [f"{planned[kind]} of {total} active {kind}" for kind, total in active.items() if planned[kind] * 100 > limit * total]
+        if over:
+            error = (
+                f"{codebase}: out-of-contract cleanup skipped, it would deactivate {', '.join(over)}"
+                f" (more than {limit:g}%, SYNC_CONTRACT_CLEANUP_MAX_PERCENT)"
+            )
+            logger.error(msg("Out-of-contract cleanup skipped", _ctx(self, codbase=codebase), reason=error))
+            return counts, error
+        if dry_run:
+            logger.info(msg("Dry run, would retire out-of-contract records", _ctx(self, codbase=codebase), **planned))
+            return planned, None
+
+        for chunk in chunked(sorted(writes.items()), 100):
+            self._check_deadline("out-of-contract cleanup")
+            outcomes = self.dataverse.batch_write(
+                [("PATCH", path, body) for path, (body, _, _) in chunk], idempotent=True
+            )
+            for (path, (_, kinds, key)), (status, _, error) in zip(chunk, outcomes):
+                if status and status < 400:
+                    counts["written"] += 1
+                    for kind in kinds:
+                        counts[kind] += 1
+                    self.records_written += 1
+                else:
+                    counts["failed"] += 1
+                    logger.warning(msg("Out-of-contract record not updated", _ctx(self), key=key, path=path, error=str(error)[:300]))
+        if writes:
+            logger.info(msg("Out-of-contract records retired", _ctx(self, codbase=codebase), **counts))
+        return counts, None
 
     def _refresh_contact_placement(
         self,
@@ -3353,153 +3544,27 @@ class DynamicSyncEngine:
             else {}
         )
         payloads = []
-        placements = []
         for individual, department in sorted(departments.items()):
             hospital = hospitals.get(department)
-            group = groups.get(hospital) if hospital else None
-            placements.append((individual, department, hospital, group))
             payloads.append({
                 key: individual,
                 **self.transformer.contact_account_binds(
-                    department, hospital, True, group
+                    department, hospital, True, groups.get(hospital) if hospital else None
                 ),
             })
-        results, rejected, unchanged = self._bulk_upsert(
-            "contacts", key, payloads, update_only=True
-        )
+        results, rejected, unchanged = self._bulk_upsert("contacts", key, payloads, update_only=True)
         stats["processed"] = len(payloads)
-        hierarchy_departments: set[str] = set()
-        hierarchy_hospitals: set[str] = set()
-        hierarchy_groups: set[str] = set()
-        for (_individual, department, hospital, group), (match, record_id, _) in zip(
-            placements, results
-        ):
+        for match, record_id, _ in results:
             if not record_id:
                 stats["failed"] += 1
                 if match in rejected:
-                    logger.warning(
-                        msg(
-                            "Contact placement not updated",
-                            _ctx(self),
-                            individual=match,
-                            error=str(rejected[match])[:300],
-                        )
-                    )
+                    logger.warning(msg("Contact placement not updated", _ctx(self), individual=match, error=str(rejected[match])[:300]))
             elif match in unchanged:
                 stats["skipped"] += 1
             else:
                 stats["updated"] += 1
-            if record_id:
-                hierarchy_departments.add(department)
-                if hospital:
-                    hierarchy_hospitals.add(hospital)
-                if group:
-                    hierarchy_groups.add(group)
-        self._set_account_hierarchy_levels(
-            hierarchy_departments,
-            hierarchy_hospitals,
-            hierarchy_groups,
-        )
-        logger.info(
-            msg(
-                "Contact placement refreshed",
-                _ctx(self),
-                moves=len(applied),
-                **{
-                    key: stats[key]
-                    for key in ("processed", "updated", "skipped", "failed")
-                },
-            )
-        )
+        logger.info(msg("Contact placement refreshed", _ctx(self), moves=len(applied), **{k: stats[k] for k in ("processed", "updated", "skipped", "failed")}))
         return stats, applied
-
-    def _set_account_hierarchy_levels(
-        self,
-        departments=(),
-        hospitals=(),
-        groups=(),
-    ) -> int:
-        """Set Account hierarchy level from the resolved contact placement chain.
-
-        An Account directly referenced by ``contact.ts_department`` is level 3;
-        one referenced by ``contact.ts_hospital`` is level 2; and one referenced
-        by ``contact.ts_hospitalgroup`` is level 1. If an Account has more than
-        one role, the most direct HCP role wins (3 > 2 > 1). A partial delta
-        never lowers an existing level because other unchanged contacts may
-        still reference that Account in the more direct role.
-        """
-        mapped = {
-            fm.target_field for fm in self.config.get_field_mappings("account")
-        }
-        if "ts_hierarchylevel" not in mapped:
-            return 0
-
-        levels: dict[str, int] = {}
-        for account_ids, level in ((groups, 1), (hospitals, 2), (departments, 3)):
-            for account_id in account_ids:
-                if account_id:
-                    key = str(account_id).lower()
-                    levels[key] = max(level, levels.get(key, 0))
-        if not levels:
-            return 0
-
-        existing = self._account_hierarchy_level_cache
-        missing = sorted(account_id for account_id in levels if account_id not in existing)
-        for account_ids in chunked(missing, 50):
-            rows = self.dataverse.retrieve_multiple(
-                "accounts",
-                select=["accountid", "ts_hierarchylevel"],
-                filter=" or ".join(
-                    f"accountid eq {account_id}" for account_id in account_ids
-                ),
-            )
-            # Remember an empty value too, so another placement update in the
-            # same job does not repeat this Account read.
-            for account_id in account_ids:
-                existing[account_id] = None
-            for row in rows:
-                account_id = str(row.get("accountid") or "").lower()
-                try:
-                    current = int(row.get("ts_hierarchylevel"))
-                except (TypeError, ValueError):
-                    continue
-                if account_id:
-                    existing[account_id] = current
-
-        updates = [
-            {"accountid": account_id, "ts_hierarchylevel": level}
-            for account_id, level in sorted(levels.items())
-            if (existing.get(account_id) or 0) < level
-        ]
-        updated = 0
-        for batch in chunked(updates, self.bulk_batch_size):
-            self._check_deadline("contacts")
-            update_multiple = getattr(self.dataverse, "update_multiple", None)
-            if update_multiple:
-                update_multiple("accounts", batch)
-            else:
-                for row in batch:
-                    self.dataverse.update(
-                        "accounts",
-                        row["accountid"],
-                        {"ts_hierarchylevel": row["ts_hierarchylevel"]},
-                    )
-            for row in batch:
-                existing[row["accountid"]] = row["ts_hierarchylevel"]
-            updated += len(batch)
-            self.records_written += len(batch)
-        if updates:
-            logger.info(
-                msg(
-                    "Account hierarchy levels updated",
-                    _ctx(self),
-                    updated=updated,
-                    departments=sum(level == 3 for level in levels.values()),
-                    hospitals=sum(level == 2 for level in levels.values()),
-                    groups=sum(level == 1 for level in levels.values()),
-                )
-            )
-        return updated
 
     def _account_rows(self, account_ids) -> dict[str, dict]:
         """Return ``{account id: row}`` with the structure type and parent account."""
@@ -3507,22 +3572,10 @@ class DynamicSyncEngine:
         for chunk in chunked(sorted({str(i).lower() for i in account_ids if i}), 50):
             for row in self.dataverse.retrieve_multiple(
                 "accounts",
-                select=[
-                    "accountid",
-                    "ts_structuretype",
-                    "_parentaccountid_value",
-                    "ts_hierarchylevel",
-                ],
+                select=["accountid", "ts_structuretype", "_parentaccountid_value"],
                 filter=" or ".join(f"accountid eq {i}" for i in chunk),
             ):
-                account_id = str(row.get("accountid")).lower()
-                rows[account_id] = row
-                if "ts_hierarchylevel" in row:
-                    try:
-                        level = int(row.get("ts_hierarchylevel"))
-                    except (TypeError, ValueError):
-                        level = None
-                    self._account_hierarchy_level_cache[account_id] = level
+                rows[str(row.get("accountid")).lower()] = row
         return rows
 
     def _account_parents(self, workplace_eids) -> dict[str, str | None]:
@@ -3560,37 +3613,21 @@ class DynamicSyncEngine:
                     "accounts",
                     field_name,
                     needed,
-                    select=[field_name, "accountid", "ts_hierarchylevel"],
+                    select=[field_name, "accountid"],
                 )
                 for match_value, row in rows.items():
                     account_id = row.get("accountid")
                     if account_id:
                         self._account_cache[str(match_value)] = account_id
-                        if "ts_hierarchylevel" in row:
-                            try:
-                                level = int(row.get("ts_hierarchylevel"))
-                            except (TypeError, ValueError):
-                                level = None
-                            self._account_hierarchy_level_cache[
-                                str(account_id).lower()
-                            ] = level
             else:
                 for eid in needed:
                     record = self.dataverse.find_one(
                         "accounts",
                         filter=f"{field_name} eq '{eid}'",
-                        select=[field_name, "accountid", "ts_hierarchylevel"],
+                        select=[field_name, "accountid"],
                     )
                     if record and record.get("accountid"):
                         self._account_cache[eid] = record["accountid"]
-                        if "ts_hierarchylevel" in record:
-                            try:
-                                level = int(record.get("ts_hierarchylevel"))
-                            except (TypeError, ValueError):
-                                level = None
-                            self._account_hierarchy_level_cache[
-                                str(record["accountid"]).lower()
-                            ] = level
         except Exception as e:
             # Raise for the reason given in _lookup_contacts_bulk.
             logger.warning(msg("Account lookup failed", _ctx(self), error=str(e)))

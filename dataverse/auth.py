@@ -10,6 +10,7 @@ before expiry, so a long-running sync does not fail halfway through.
 """
 
 import logging
+import random
 import socket
 import threading
 import time
@@ -30,6 +31,12 @@ AUTHORITY = "https://login.microsoftonline.com"
 # Renew this many seconds before the token actually expires, so a request that
 # is in flight when the clock runs out does not get a 401.
 _RENEW_MARGIN_SECONDS = 300
+
+# A token request that gets no answer, throttling or a server error is tried
+# again: renewing the token mid-sync must not end the run on one blip.
+# Refused credentials (4xx other than 429) fail at once.
+_TOKEN_ATTEMPTS = 4
+_TOKEN_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 def get_access_token(
@@ -73,20 +80,37 @@ def get_access_token(
     # A stray slash here yields a confusing "tenant not found"; normalise it.
     url = f"{authority.rstrip('/')}/{str(tenant_id).strip('/')}/oauth2/v2.0/token"
 
-    try:
-        response = requests.post(
-            url,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "scope": scope,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=timeout,
+    for attempt in range(1, _TOKEN_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": scope,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            if attempt == _TOKEN_ATTEMPTS:
+                raise DataverseAuthError(f"Could not reach the token endpoint {url}: {exc}") from exc
+            reason = type(exc).__name__
+        else:
+            if response.status_code not in _TOKEN_RETRY_STATUSES or attempt == _TOKEN_ATTEMPTS:
+                break
+            reason = response.status_code
+        retry_after = _retry_after_seconds(response) if reason == 429 or reason == 503 else None
+        delay = retry_after if retry_after is not None else min(2 ** attempt, 30) + random.uniform(0, 1)
+        logger.warning(
+            "Token request retrying: attempt=%d/%d reason=%s delay_s=%.1f",
+            attempt,
+            _TOKEN_ATTEMPTS,
+            reason,
+            delay,
         )
-    except requests.RequestException as exc:
-        raise DataverseAuthError(f"Could not reach the token endpoint {url}: {exc}")
+        time.sleep(delay)
 
     try:
         payload = response.json()
@@ -105,6 +129,14 @@ def get_access_token(
             correlation_id=payload.get("correlation_id"),
         )
     return payload
+
+
+def _retry_after_seconds(response) -> float | None:
+    """A numeric Retry-After header, capped at a minute, or None."""
+    try:
+        return min(max(float(response.headers.get("Retry-After")), 0.0), 60.0)
+    except (TypeError, ValueError):
+        return None
 
 
 class TokenProvider:

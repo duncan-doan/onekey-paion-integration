@@ -46,6 +46,15 @@ class OneKeyRateLimitError(OneKeyHTTPError):
     """HTTP 429 - too many requests in too short a time."""
 
 
+class OneKeyResponseLostError(OneKeyHTTPError):
+    """A request was sent but no response arrived (a timeout or a reset).
+
+    Whether OneKey acted on it is unknown. Raised instead of resending when
+    the caller asked not to resend: a refreshMyOnekey continuation resumes
+    by packet number instead (Developer Guide 6.13.4).
+    """
+
+
 class OneKeyAPIResponseError(OneKeyError):
     """Raised when OneKey returns HTTP 200 but a payload-level failure.
 

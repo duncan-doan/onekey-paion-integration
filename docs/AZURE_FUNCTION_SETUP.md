@@ -264,6 +264,7 @@ az functionapp config appsettings set \
 | `ONEKEY_SAMPLE` | no | HCOs in `sample_ok_to_dv`. Default `5`. |
 | `SYNC_SKIP_UNCHANGED` | no | Default `true`: a record that already holds every value to write is not updated (counted as skipped, `ts_skipped` on the job). `false` writes every record, makes a full sync of a large country take hours, and stops a paused run from continuing. |
 | `SYNC_TIME_BUDGET_MINUTES` | no | Default `45`. A queued full sync or delta still running after this long stops between batches and queues its next part, before Flex Consumption ends the execution 60 minutes into a scale-in. `0` turns it off. See [Queue architecture](QUEUE_ARCHITECTURE.md#time-budget-and-continuations). |
+| `SYNC_CONTRACT_CLEANUP_MAX_PERCENT` | no | Default `5`. A complete full sync deactivates the accounts, contacts and affiliations that left the OneKey contract, but writes nothing for a codebase when more than this percentage of its active accounts, contacts or affiliations would be deactivated (a sign of an incomplete walk); the job then ends Partially Succeeded with the counts. Raise it for a run that is expected to retire many records. |
 | `SYNC_DELTA_FROM` | no | UTC start for every delta, e.g. `2026-08-01`. Unset: start where the last job stopped reading. See [The delta window](#the-delta-window). |
 | `SYNC_LOG_DIR` | no | Leave unset. The app forces `off` because the package folder is read-only. |
 

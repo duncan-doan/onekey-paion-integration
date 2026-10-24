@@ -567,6 +567,29 @@ def test_bulk_upsert_ts_affiliation_creates_in_one_batch():
 
 
 @pytest.mark.usefixtures("batch_creates")
+@pytest.mark.parametrize("status", [500, 503])
+def test_a_batch_of_creates_is_not_resent_after_a_server_error(status):
+    """A $batch is not one transaction: a 500/503 can come after some creates landed."""
+    landed = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+    created = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # lookup existing
+        FakeResponse(status, {"error": {"message": "server error"}}),  # the $batch
+        FakeResponse(200, {"value": [{"ts_externalid": "A", "ts_affiliationid": landed}]}),
+        FakeResponse(200, {"value": []}),  # upsert_by_field find for B
+        FakeResponse(204, headers={"OData-EntityId": f"https://x/ts_affiliations({created})"}),
+    ])
+    results = client.bulk_upsert_by_field(
+        "ts_affiliations",
+        "ts_externalid",
+        [{"ts_externalid": "A"}, {"ts_externalid": "B"}],
+        batch_size=100,
+    )
+    assert results == [("A", landed, True), ("B", created, True)]
+    assert sum(c["url"].endswith("/$batch") for c in client._session.calls) == 1
+
+
+@pytest.mark.usefixtures("batch_creates")
 def test_batch_create_with_unknown_outcome_creates_only_what_did_not_land():
     """A $batch of creates is not resent: keep the rows that landed, create the rest."""
     landed = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
@@ -1654,3 +1677,52 @@ def test_same_value_only_matches_when_certain(expected, actual, same):
     from dataverse.client import _same_value
 
     assert _same_value(expected, actual) is same
+
+
+def _token_endpoint(monkeypatch, answers):
+    import dataverse.auth as auth_module
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(auth_module.requests, "post", fake_post)
+    monkeypatch.setattr(auth_module.time, "sleep", lambda _: None)
+    return auth_module, calls
+
+
+@pytest.mark.parametrize("blip", [
+    requests.exceptions.ConnectionError("reset"),
+    FakeResponse(503, {"error": "temporarily_unavailable"}),
+    FakeResponse(429, {"error": "throttled"}, headers={"Retry-After": "2"}),
+])
+def test_a_token_request_is_tried_again_after_a_blip(monkeypatch, blip):
+    # Renewing the token mid-sync must not end the run on one blip.
+    auth_module, calls = _token_endpoint(
+        monkeypatch, [blip, FakeResponse(200, {"access_token": "t", "expires_in": 3600})]
+    )
+    assert auth_module.get_access_token("tenant", "c", "s", "scope")["access_token"] == "t"
+    assert len(calls) == 2
+
+
+def test_refused_credentials_are_not_tried_again(monkeypatch):
+    auth_module, calls = _token_endpoint(
+        monkeypatch, [FakeResponse(401, {"error": "invalid_client", "error_description": "bad secret"})]
+    )
+    with pytest.raises(DataverseAuthError):
+        auth_module.get_access_token("tenant", "c", "bad", "scope")
+    assert len(calls) == 1
+
+
+def test_a_token_endpoint_that_stays_down_fails_after_the_last_attempt(monkeypatch):
+    auth_module, calls = _token_endpoint(
+        monkeypatch, [requests.exceptions.ConnectionError("down") for _ in range(4)]
+    )
+    with pytest.raises(DataverseAuthError, match="Could not reach"):
+        auth_module.get_access_token("tenant", "c", "s", "scope")
+    assert len(calls) == 4

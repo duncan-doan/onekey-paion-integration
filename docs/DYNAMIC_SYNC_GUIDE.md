@@ -308,14 +308,17 @@ class ValidationResult:
    (no parent bind yet) with `ts_hierarchylevel` in the same payload
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
 3. Link parentaccountid from managerWorkplaceEid
-4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup
+4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup, then retire what left the
+   contract: deactivate accounts, contacts and affiliations the walk no longer returns and clear
+   lookups to them (complete full sync only; limit SYNC_CONTRACT_CLEANUP_MAX_PERCENT, default 5)
 5. Upsert HCP–HCO affiliations and roles, then set each account's primarycontactid to the
    contact of its active `ts_isprimary` affiliation (earliest start, then activity ID; none clears it)
 ```
 
 The full-sync level derivation uses the same main-activity placement chain as Contacts:
-department = 3, hospital = 2, and hospital group = 1. Partial, HCP-only, and delta runs retain
-a cached batched fallback that promotes levels only.
+department = 3, hospital = 2, and hospital group = 1. Only active HCPs count, and an account no
+active HCP points at is cleared. Only a complete full sync sets levels; delta, retry, sampled
+and HCP-only runs leave them as they are.
 
 Unmapped picklist codes are omitted and written to ``logs/picklist_gaps_*.csv``.
 Specialty, HCO type, and the other large OneKey lists are loaded into the code catalog before this step. See [PICKLIST_GUIDE.md](PICKLIST_GUIDE.md).

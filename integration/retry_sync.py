@@ -402,12 +402,25 @@ def _retry_group(
         if any(row["phase"] == phase and row["entity"] == entity for row in rows)
     }
     result = _empty_retry_result(codebase)
-    if not present:
+    handled = {(phase, entity) for _, phase, entity in PHASE_STEPS}
+    unhandled = [row for row in rows if (row["phase"], row["entity"]) not in handled]
+    if unhandled:
+        # No step replays these. Left Pending they would be selected again on
+        # every run, oldest first, and could fill the codebase's daily limit.
         logger.warning(
-            "Skipping %d failure row(s) for job %s with no retry handler",
-            len(rows),
+            "%s %d failure row(s) for job %s with no retry handler",
+            "Would ignore" if dry_run else "Ignoring",
+            len(unhandled),
             parent_job_id,
         )
+        if not dry_run:
+            result["ignored"] += len(
+                _update_failures(
+                    engine.dataverse,
+                    [(row["id"], _failure_payload(RETRY_IGNORED)) for row in unhandled],
+                )
+            )
+    if not present:
         return result
     if dry_run:
         logger.info(
@@ -421,7 +434,9 @@ def _retry_group(
 
     engine.tracer.trigger = trigger
     engine.tracer.retry_of_job_id = parent_job_id or None
+    engine.tracer.retry = True
     engine._begin_job(_job_type(present), [codebase], dry_run=False)
+    aborted = False
     try:
         for name, phase, entity in PHASE_STEPS:
             matched = [
@@ -431,20 +446,32 @@ def _retry_group(
             if not matched:
                 continue
             _retry_step(engine, name, codebase, matched, result)
-        if result["pending"] or result["ignored"] or result["errors"]:
+        # A row that failed again stays Pending for the next retry, or is
+        # Ignored after its last attempt: an outcome, not a failed run. Only an
+        # error that stopped a step fails the run, and its queue message.
+        if result["errors"]:
             result["success"] = False
-            if result["pending"] or result["ignored"]:
-                result["errors"].append(
-                    f"retry resolved={result['resolved']} "
-                    f"pending={result['pending']} ignored={result['ignored']}"
-                )
+        if result["pending"] or result["ignored"]:
+            logger.info(
+                "Retry of job %s: resolved=%d pending=%d ignored=%d",
+                parent_job_id,
+                result["resolved"],
+                result["pending"],
+                result["ignored"],
+            )
         engine._checkpoint(result)
     except Exception as exc:
         result["success"] = False
         result["errors"].append(str(exc))
         logger.exception("Retry failed for parent job %s", parent_job_id)
+    except BaseException:
+        # Ctrl-C or SystemExit: the retry did not finish.
+        aborted = True
+        result["success"] = False
+        raise
     finally:
-        engine._finish_job(result)
+        engine._finish_job(result, aborted=aborted)
+        engine.tracer.retry = False
         result["job_id"] = engine.tracer.job_id
     return result
 

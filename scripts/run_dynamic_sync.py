@@ -305,6 +305,7 @@ def main():
     )
     engine.tracer.trigger = TRIGGER_BY_NAME[args.trigger]
     engine.tracer.retry_of_job_id = args.retry_of_job
+    engine.tracer.retry = bool(args.retry_of_job)
 
     try:
         if args.delta:

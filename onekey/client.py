@@ -4,7 +4,7 @@ import logging
 import time
 
 from .auth import authenticate
-from .exceptions import OneKeyAPIResponseError
+from .exceptions import OneKeyAPIResponseError, OneKeyHTTPError, OneKeyResponseLostError
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,8 @@ _PACKET_RETRY_SECONDS = 5
 
 # Packets lost in transit that a walk re-fetches by number before giving up.
 _MAX_MISSED_PACKETS = 3
+# Times a walk resumes after a continuation's answer was lost (6.13.4).
+_RESUME_ATTEMPTS = 3
 
 
 def search_field(name, values, method=EXACT, fuzzy_precision=None):
@@ -462,7 +464,10 @@ class OneKeyClient:
         )
         while True:
             packet += 1
-            results, envelope = self._population_packet(payload)
+            if "transactionUniqueIdentifier" in payload:
+                results, envelope = self._next_packet(payload, packet)
+            else:
+                results, envelope = self._population_packet(payload)
             complete = envelope.get("isTransactionComplete")
             transaction_id = envelope.get("transactionUniqueIdentifier")
             if not isinstance(complete, bool):
@@ -523,7 +528,7 @@ class OneKeyClient:
             # Replaying the transaction id is what advances the cursor.
             payload = {**request, "transactionUniqueIdentifier": transaction_id}
 
-    def _population_packet(self, payload):
+    def _population_packet(self, payload, resend_lost=True):
         """Request one refreshMyOnekey packet; return (results, envelope).
 
         A packet answered with ``success: false`` was not delivered, so it is
@@ -531,7 +536,9 @@ class OneKeyClient:
         fails instead of truncating the walk.
         """
         for attempt in range(1, _PACKET_ATTEMPTS + 1):
-            envelope = self.session.post_json("/pop/refreshMyOnekey", payload)
+            envelope = self.session.post_json(
+                "/pop/refreshMyOnekey", payload, resend_lost=resend_lost
+            )
             if envelope.get("success") is not False:
                 break
             message = str(envelope.get("statusMessage") or "success=false")[:300]
@@ -558,6 +565,52 @@ class OneKeyClient:
         if not isinstance(results, list) or any(not isinstance(r, dict) for r in results):
             raise OneKeyAPIResponseError("OneKey population returned invalid results")
         return results, envelope
+
+    def _next_packet(self, payload, expected):
+        """Request the next packet, resuming as Developer Guide 6.13.4 says if its answer is lost.
+
+        A continuation that gets no answer may or may not have been
+        delivered, and sending it again blindly can be refused (HTTP 400) or
+        skip a packet. So it is not resent: the walk asks for packet
+        ``expected`` by number, which OneKey returns if it was delivered,
+        and if it was not (HTTP 400, OKWS-3208) asks for the next packet
+        again. Any other error stops the walk.
+        """
+        try:
+            return self._population_packet(payload, resend_lost=False)
+        except OneKeyResponseLostError as exc:
+            lost = exc
+        by_number = {**payload, "transactionPacketIdentifier": expected}
+        for attempt in range(1, _RESUME_ATTEMPTS + 1):
+            delay = 30 * attempt
+            logger.warning(
+                "OneKey packet %d got no answer, resuming by packet number: "
+                "attempt=%d/%d delay_s=%d error=%s",
+                expected,
+                attempt,
+                _RESUME_ATTEMPTS,
+                delay,
+                lost,
+            )
+            time.sleep(delay)
+            try:
+                results, envelope = self._population_packet(by_number)
+            except OneKeyHTTPError as exc:
+                if exc.status_code != 400:
+                    raise
+                logger.warning("OneKey packet %d was not delivered: %s", expected, exc)
+            else:
+                returned = self._packet_number(envelope)
+                if returned is not None and returned != expected:
+                    raise OneKeyAPIResponseError(
+                        f"OneKey returned packet {returned} when packet {expected} was requested"
+                    )
+                return results, envelope
+            try:
+                return self._population_packet(payload, resend_lost=False)
+            except OneKeyResponseLostError as exc:
+                lost = exc
+        raise lost
 
     @staticmethod
     def _packet_number(envelope):

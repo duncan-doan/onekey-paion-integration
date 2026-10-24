@@ -62,14 +62,15 @@ def test_hierarchy_level_mapping_uses_the_dataverse_logical_name(engine):
     assert mapping.target_field == "ts_hierarchylevel"
     assert mapping.target_field_type == "integer"
 
-    payload = engine.transform_hco(
-        {
-            "workplaceEid": "WUKH10",
-            "officialName": "Cardiology",
-            "hierarchyLevel": 3,
-        }
-    )
-    assert payload["ts_hierarchylevel"] == 3
+
+def test_the_account_transform_leaves_derived_fields_to_the_sync(engine, caplog):
+    # The level (HCO-027) and the primary contact (HCO-028) are not on the
+    # flattened workplace: the sync sets them, and the transform does not warn.
+    payload = engine.transform_hco({"workplaceEid": "WUKH10", "officialName": "Cardiology"})
+    assert "ts_hierarchylevel" not in payload
+    assert not any(key.startswith("primarycontactid") for key in payload)
+    assert "'hierarchyLevel' not present" not in caplog.text
+    assert "'primaryContact' not present" not in caplog.text
 
 
 def test_a_mapped_parentcustomerid_is_bound_to_the_workplace_too():
@@ -220,81 +221,8 @@ def test_contact_sync_writes_the_hospital_group(tmp_path):
     sync._sync_hcps("WUK", composed=[_row("WUKI1", "WUKH10", manager="WUKH20"), _row("WUKI3", "WUKH12")], partial=set())
     assert dataverse.payloads[("contacts", "WUKI1")]["ts_HospitalGroup@odata.bind"] == f"/accounts({GROUP})"
     assert dataverse.payloads[("contacts", "WUKI3")]["ts_HospitalGroup@odata.bind"] is None
-    levels = {
-        account_id: payload["ts_hierarchylevel"]
-        for entity_set, account_id, payload in dataverse.updated
-        if entity_set == "accounts" and "ts_hierarchylevel" in payload
-    }
-    assert levels == {DEPT: 3, "dept-12": 3, HOSP: 2, GROUP: 1}
-
-
-def test_hierarchy_level_uses_the_most_direct_hcp_role_and_never_downgrades(tmp_path):
-    dataverse = HierarchyDataverse(
-        accounts={
-            "account-shared": {"ts_hierarchylevel": 1},
-            "account-existing": {"ts_hierarchylevel": 3},
-        }
-    )
-    sync = DynamicSyncEngine(
-        PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path)
-    )
-
-    updated = sync._set_account_hierarchy_levels(
-        departments={"account-shared"},
-        hospitals={"account-shared"},
-        groups={"account-shared", "account-existing"},
-    )
-
-    levels = {
-        account_id: payload["ts_hierarchylevel"]
-        for entity_set, account_id, payload in dataverse.updated
-        if entity_set == "accounts"
-    }
-    assert updated == 1
-    assert levels == {"account-shared": 3}
-
-
-def test_hierarchy_levels_use_update_multiple_batches_and_skip_matching_rows(tmp_path):
-    class BatchedHierarchyDataverse(HierarchyDataverse):
-        def __init__(self):
-            super().__init__(
-                accounts={
-                    "account-0": {"ts_hierarchylevel": 3},
-                    **{f"account-{index}": {} for index in range(1, 5)},
-                }
-            )
-            self.level_batches = []
-
-        def update_multiple(self, entity_set, records):
-            assert entity_set == "accounts"
-            self.level_batches.append(list(records))
-
-    dataverse = BatchedHierarchyDataverse()
-    sync = DynamicSyncEngine(
-        PopulationOneKey([]),
-        dataverse,
-        sync_logger=SyncLogger(log_dir=tmp_path),
-        bulk_batch_size=2,
-    )
-
-    updated = sync._set_account_hierarchy_levels(
-        departments={f"account-{index}" for index in range(5)}
-    )
-
-    assert updated == 4
-    assert [len(batch) for batch in dataverse.level_batches] == [2, 2]
-    assert {
-        row["accountid"]
-        for batch in dataverse.level_batches
-        for row in batch
-    } == {"account-1", "account-2", "account-3", "account-4"}
-    assert dataverse.updated == []  # no one-by-one fallback on the normal path
-
-    account_reads = sum(es == "accounts" for es, _ in dataverse.filters)
-    assert sync._set_account_hierarchy_levels(
-        departments={f"account-{index}" for index in range(5)}
-    ) == 0
-    assert sum(es == "accounts" for es, _ in dataverse.filters) == account_reads
+    # Levels come only from a complete full sync's account upsert.
+    assert not any(entity_set == "accounts" for entity_set, _, _ in dataverse.updated)
 
 
 def test_full_sync_puts_hierarchy_levels_in_the_account_upsert(tmp_path):
@@ -369,6 +297,36 @@ def test_full_sync_puts_hierarchy_levels_in_the_account_upsert(tmp_path):
         entity_set == "accounts" and "ts_hierarchylevel" in payload
         for entity_set, _account_id, payload in dataverse.updated
     )
+
+
+def test_full_sync_clears_levels_and_skips_inactive_hcps(tmp_path):
+    def workplace(eid):
+        return {"entityType": "WORKPLACE", "workplace": {"workplaceEid": eid, "officialName": eid}}
+
+    def person(eid, state):
+        return {"entityType": "INDIVIDUAL", "individual": {"individualEid": eid, "lastName": "Doe", "stateCode": state}}
+
+    def activity(activity_eid, individual_eid, workplace_eid):
+        return {"entityType": "ACTIVITY", "activity": {
+            "activityEid": activity_eid, "individualEid": individual_eid,
+            "workplaceEid": workplace_eid, "isMainActivity": True}}
+
+    records = [
+        workplace("WUKD1"), workplace("WUKD2"), workplace("WUKD3"),
+        person("WUKI1", "ACT"), activity("WUKA1", "WUKI1", "WUKD1"),
+        person("WUKI2", "RET"), activity("WUKA2", "WUKI2", "WUKD2"),  # retired: an inactive contact
+    ]
+    dataverse = PayloadDataverse()
+    sync = DynamicSyncEngine(PopulationOneKey(records), dataverse, sync_logger=SyncLogger(log_dir=tmp_path))
+
+    sync.sync_full(["WUK"], sync_picklists=False, sync_addresses=False, sync_hierarchy=False,
+                   sync_hco_relations=False, sync_activity_affiliations=False)
+
+    levels = {eid: dataverse.payloads[("accounts", eid)] for eid in ("WUKD1", "WUKD2", "WUKD3")}
+    assert levels["WUKD1"]["ts_hierarchylevel"] == 3
+    # Sent as None, so a level left from an earlier run is cleared.
+    assert "ts_hierarchylevel" in levels["WUKD2"] and levels["WUKD2"]["ts_hierarchylevel"] is None
+    assert "ts_hierarchylevel" in levels["WUKD3"] and levels["WUKD3"]["ts_hierarchylevel"] is None
 
 
 def test_a_workplace_without_a_parent_account_takes_its_hie_group_as_hospital(tmp_path):
@@ -446,18 +404,7 @@ def test_refresh_moves_a_contact_and_recomputes_those_under_a_changed_workplace(
     assert four["ts_Department@odata.bind"] == "/accounts(dept-20)"
     assert four["ts_Hospital@odata.bind"] == "/accounts(hosp-20)"
     assert four["ts_HospitalGroup@odata.bind"] is None
-    levels = {
-        account_id: payload["ts_hierarchylevel"]
-        for entity_set, account_id, payload in dataverse.updated
-        if entity_set == "accounts" and "ts_hierarchylevel" in payload
-    }
-    assert levels == {
-        "dept-10": 3,
-        "dept-20": 3,
-        "hosp-10": 2,
-        "hosp-20": 2,
-        "grp-10": 1,
-    }
+    assert not any(entity_set == "accounts" for entity_set, _, _ in dataverse.updated)  # no level in a delta
     assert ("contacts", "I3") not in dataverse.payloads and ("contacts", "I2") not in dataverse.payloads
     assert all(kw.get("update_only") is True for kw in dataverse.upsert_kwargs)
     lookup_filter = next(f for es, f in dataverse.filters if es == "contacts")

@@ -28,7 +28,7 @@
 | `typeCode` | → | `sic` | direct |
 | `statusCode` | → | `statecode` | map: 3→0, 9→1 |
 | `managerWorkplaceEid` | → | `parentaccountid` | lookup |
-| main-activity Contact placement chain | → | `ts_hierarchylevel` | full sync: included in Account upsert; department=3, hospital=2, hospital group=1 |
+| main-activity Contact placement chain | → | `ts_hierarchylevel` | complete full sync only, in the Account upsert; department=3, hospital=2, hospital group=1; active HCPs only; none clears it |
 | active `ts_isprimary` HCP–HCO affiliation | → | `primarycontactid` | set after the activity affiliation phase; earliest start, then activity ID; none clears it |
 | `address_street` | → | `address1_line1` | direct |
 | `address_city` | → | `address1_city` | direct |

@@ -56,6 +56,26 @@ def time_budget_seconds():
     return minutes * 60 if minutes > 0 else None
 
 
+# A full sync's walk that lost packets makes valid records look out of contract.
+DEFAULT_CONTRACT_CLEANUP_MAX_PERCENT = 5.0
+
+
+def contract_cleanup_max_percent():
+    """Largest share of a codebase's active records a full sync may deactivate.
+
+    ``SYNC_CONTRACT_CLEANUP_MAX_PERCENT`` (default 5) applies to its accounts,
+    contacts and affiliations separately; above it the out-of-contract cleanup
+    writes nothing and the job records an error. Raise it for a run that is
+    expected to retire many records, such as the first one. A value that is
+    not a number falls back to the default.
+    """
+    raw = os.environ.get("SYNC_CONTRACT_CLEANUP_MAX_PERCENT", "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_CONTRACT_CLEANUP_MAX_PERCENT
+    except ValueError:
+        return DEFAULT_CONTRACT_CLEANUP_MAX_PERCENT
+
+
 def load_env(path=None, override=False):
     """Read a ``.env`` file into ``os.environ``.
 

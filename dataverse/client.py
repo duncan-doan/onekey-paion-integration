@@ -526,10 +526,17 @@ class DataverseClient:
 
                 if response.status_code == 429:
                     self.stats.throttled += 1
-                if not idempotent and response.status_code in _GATEWAY_TIMEOUT_STATUSES:
+                # A write that must not run twice may still have committed when
+                # a gateway (502/504) gave up waiting on the backend. A $batch is
+                # not one transaction: a 500/503 can come after some of its
+                # operations were written. A single write or CreateMultiple is.
+                if not idempotent and (
+                    response.status_code in _GATEWAY_TIMEOUT_STATUSES
+                    or (path.split("?", 1)[0] == "$batch" and response.status_code >= 500)
+                ):
                     raise DataverseAmbiguousWriteError(
                         f"{method} {_log_path(path)} may or may not have been applied: "
-                        f"gateway returned {response.status_code}",
+                        f"Dataverse returned {response.status_code}",
                         status_code=response.status_code,
                         url=url,
                     )

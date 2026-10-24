@@ -81,6 +81,9 @@ def test_a_replay_of_an_old_window_does_not_move_the_start():
         },
     ])
     assert last_window_start(jobs, ["WUK"]) == "2026-10-07T00:00:10Z"
+    # A retry job is never the anchor, linked to its parent job or not.
+    query = jobs.queries[0][1]["filter"]
+    assert "_ts_retryofjob_value eq null" in query and "not contains(ts_name, ' Retry ')" in query
 
 
 def test_a_job_that_lost_its_window_is_not_an_anchor():
@@ -123,7 +126,7 @@ def test_active_job_ignores_only_the_jobs_the_delivery_replaces():
     active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", part=2)
     assert jobs.queries[0][1]["filter"].endswith(
         " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
-        " and (_ts_retryofjob_value ne null or endswith(ts_name, ' part=2')))"
+        " and ((_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')) or endswith(ts_name, ' part=2')))"
     )
 
 
@@ -132,7 +135,7 @@ def test_a_retry_replaces_only_the_runs_retry_jobs():
     active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", retry=True)
     assert jobs.queries[0][1]["filter"].endswith(
         " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
-        " and _ts_retryofjob_value ne null)"
+        " and (_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')))"
     )
 
 
@@ -489,7 +492,7 @@ def test_a_redelivered_full_sync_takes_over_its_stopped_job(fake_engine):
     assert takeover == (
         f"ts_codebase eq 'WDE' and ts_status eq {STATUS_RUNNING}"
         f" and contains(ts_name, 'run={RUN}')"
-        " and (_ts_retryofjob_value ne null or endswith(ts_name, ' part=1'))"
+        " and ((_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')) or endswith(ts_name, ' part=1'))"
     )
     [(entity_set, record_id, payload)] = fake_engine.dataverse.updates
     assert (entity_set, record_id) == (JOBS, "guid-1")
@@ -539,7 +542,8 @@ def test_run_tries_counts_the_parts_jobs_since_the_message_was_queued():
     assert jobs.queries[0][1]["filter"] == (
         f"ts_codebase eq 'WDE' and contains(ts_name, 'run={RUN}')"
         " and endswith(ts_name, ' part=2')"
-        " and _ts_retryofjob_value eq null and ts_startedon ge 2026-10-14T15:26:40Z"
+        " and _ts_retryofjob_value eq null and not contains(ts_name, ' Retry ')"
+        " and ts_startedon ge 2026-10-14T15:26:40Z"
     )
 
 

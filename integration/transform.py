@@ -7,6 +7,7 @@ OneKey records into Dataverse payloads.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from .hco_name import nameless_account_name
@@ -41,6 +42,23 @@ CATALOG_NAVIGATION = {
 def catalog_bind_name(logical_name: str) -> str:
     """Return the ``@odata.bind`` property for a catalog lookup column."""
     return CATALOG_NAVIGATION.get(logical_name, logical_name)
+
+
+# Numbered slots flattened from a OneKey list (onekey.parse: specialty_slots,
+# _telephone_slots). The flattener sets every slot of a record it read, an
+# empty one to None, so an empty slot means OneKey no longer has that value.
+_SLOT_FIELD = re.compile(r"^(specialtyCode|telephone)\d+$")
+
+
+# Mapped account fields that are not on the flattened workplace: the sync
+# derives them outside this transform (HCO-027 level in a full sync's account
+# phase, HCO-028 primary contact after the activity phase).
+_DERIVED_ACCOUNT_FIELDS = frozenset({"hierarchyLevel", "primaryContact"})
+
+
+def affiliation_role_name(activity_eid: str, code: str) -> str:
+    """``ts_name`` of a ``ts_affiliationrole`` row: ``{activityEid} - {code}``."""
+    return f"{activity_eid} - {code}"[:100]
 
 
 # Contact lookups to account that the sync resolves to account ids itself:
@@ -86,6 +104,9 @@ class TransformEngine:
             logger.debug("include_address is ignored; use customeraddress phase")
         self.begin_record("account", source.get("workplaceEid"))
         payload = {}
+        # Slots OneKey left empty: None clears them, so they skip the filter
+        # that drops empty values below.
+        emptied = {}
         description_parts = []
 
         mappings = self.config.get_field_mappings("account")
@@ -93,7 +114,12 @@ class TransformEngine:
         for fm in mappings:
             if fm.target_field.startswith("address1_"):
                 continue
-            if fm.target_field == "parentaccountid":
+            if fm.target_field == "parentaccountid" or fm.source_field in _DERIVED_ACCOUNT_FIELDS:
+                continue
+
+            cleared = self._cleared_slot(fm, source)
+            if cleared is not None:
+                emptied.update(cleared)
                 continue
 
             bound = self._bound_lookup(fm, source)
@@ -134,7 +160,7 @@ class TransformEngine:
             # and one HCP. noname remains only when all three parts are blank.
             payload["name"] = nameless_account_name(source, limit=160)
 
-        return {k: v for k, v in payload.items() if v is not None}
+        return {**{k: v for k, v in payload.items() if v is not None}, **emptied}
 
     def transform_hcp(
         self,
@@ -160,6 +186,9 @@ class TransformEngine:
             logger.debug("include_address is ignored; use customeraddress phase")
         self.begin_record("contact", source.get("individualEid"))
         payload = {}
+        # Slots OneKey left empty: None clears them, so they skip the filter
+        # that drops empty values below.
+        emptied = {}
         description_parts = []
         jobtitle_parts = []
 
@@ -169,6 +198,11 @@ class TransformEngine:
             if fm.target_field.startswith("address1_"):
                 continue
             if fm.target_field in CONTACT_ACCOUNT_LOOKUPS:
+                continue
+
+            cleared = self._cleared_slot(fm, source)
+            if cleared is not None:
+                emptied.update(cleared)
                 continue
 
             bound = self._bound_lookup(fm, source)
@@ -224,7 +258,7 @@ class TransformEngine:
                 source.get("individualEid"), fallback
             )
 
-        payload = {k: v for k, v in payload.items() if v is not None}
+        payload = {**{k: v for k, v in payload.items() if v is not None}, **emptied}
         payload.update(
             self.contact_account_binds(account_id, hospital_id, hospital_known, group_id)
         )
@@ -445,6 +479,19 @@ class TransformEngine:
 
         return {k: v for k, v in payload.items() if v is not None}
 
+    def affiliation_role_codes(self, source: dict) -> list[str]:
+        """The TIH role codes ``AFF-007``..``AFF-016`` read from an activity, each once."""
+        codes: list[str] = []
+        for fm in self.config.get_field_mappings("ts_affiliationrole"):
+            if not fm.mapping_id.startswith("AFF-") or fm.target_field != "ts_role":
+                continue
+            if fm.source_field not in source:
+                continue
+            code = str(self._extract_value(source, fm.source_field) or "").strip()
+            if code and code not in codes:
+                codes.append(code)
+        return codes
+
     def affiliation_role_rows(
         self,
         source: dict,
@@ -477,11 +524,13 @@ class TransformEngine:
             if not code or code in seen:
                 continue
             seen.add(code)
-            name = f"{activity_eid} - {code}"
             rows.append(
                 {
-                    "ts_name": name[:100],
+                    "ts_name": affiliation_role_name(activity_eid, code),
                     "ts_Affiliation@odata.bind": f"/{affiliation_set}({affiliation_id})",
+                    # Active: a full sync deactivates a role the activity lost,
+                    # and writing it again brings it back.
+                    "statecode": 0,
                     **catalog,
                 }
             )
@@ -661,6 +710,20 @@ class TransformEngine:
         if isinstance(value, str):
             return value.strip().lower() in ("true", "1", "yes", "y")
         return bool(value)
+
+    def _cleared_slot(self, mapping: "FieldMapping", source: dict) -> dict | None:
+        """Clear a numbered slot OneKey left empty, or return None to transform it.
+
+        A record that lost its first specialty moves the others up a slot;
+        without clearing, the last slot would keep its old value (A, B, C
+        becoming B, C, C). Only a slot the record carries is cleared.
+        """
+        field = mapping.source_field or ""
+        if not _SLOT_FIELD.match(field) or field not in source or source[field] not in (None, ""):
+            return None
+        if mapping.is_lookup:
+            return {f"{catalog_bind_name(mapping.target_field)}@odata.bind": None}
+        return {mapping.target_field: None}
 
     def _bound_lookup(self, mapping: "FieldMapping", source: dict) -> dict | None:
         """Bind a country or code-list lookup, or return None to keep the normal transform."""

@@ -111,7 +111,14 @@ returns `transactionUniqueIdentifier`. Each following call sends that id again, 
 
 - A full sync calls it with the territory only. OneKey returns the contracted population.
 - A delta sync calls it with `isoDateFrom` and `isoDateTo`. OneKey returns entities that changed in
-  that window. Each packet row carries `processCode`: I (insert), U (update), R (remove).
+  that window. Each packet row carries `processCode`: I (insert), U (update), R (refresh, upserted
+  like an update). A delta has no removal signal: only a full sync sees what left the contract.
+
+A packet whose answer is lost (a timeout or a reset) is not requested again blindly, which OneKey
+can refuse with HTTP 400. Following Developer Guide 6.13.4, the walk asks for that packet by
+number; if OneKey says it was never delivered (OKWS-3208), it asks for the next packet again, up
+to three times. The connection keeps OneKey's load-balancer cookie, which ties the walk to the
+server holding its transaction, and a refused request reports OneKey's reason (the OKWS code).
 
 Each row has `entityType` of WORKPLACE, INDIVIDUAL, or ACTIVITY. The engine keeps only contracted
 ids from this walk. A later search is not used to add organisations or people that are outside the contract.
@@ -217,7 +224,7 @@ phase.
     2  Addresses
     3  HCO parent hierarchy
     4  HCO–HCO affiliations
-    5  HCP contacts
+    5  HCP contacts, then (full sync) records that left the contract are retired
     6  HCP–HCO affiliations and role rows, then account primary contacts
 ```
 
@@ -261,6 +268,9 @@ Each entry in `workplace.relations[]` becomes a `ts_affiliation` between two acc
 #### Phase 5 — HCP contacts
 
 Individuals are composed with their main activity and that activity's workplace, then upserted to `contact`.
+An activity OneKey marks inactive (its `stateCode` decodes to Inactive) is not used: the next active one
+places the contact, and a person with only inactive activities is still written (name, state) with
+their department, hospital and group left as they are. Inactive activities give no level either.
 `ts_department` points at the main workplace account, `ts_hospital` at that workplace's parent and
 `ts_hospitalgroup` at the hospital's parent. Each parent is OneKey's `managerWorkplaceEid` first, then the
 HIE ("Is managed by") parent when that is a group of organisations (structure GOR or POR); a contact
@@ -271,10 +281,34 @@ workplace is outside the contracted set for this extract is skipped.
 The same resolved lookup chain sets `account.ts_hierarchylevel`: an Account referenced by
 `ts_department` is level 3, by `ts_hospital` is level 2, and by `ts_hospitalgroup` is level 1.
 If the same Account has several roles, the most direct HCP role wins (3 before 2 before 1).
+Only active HCPs count: one whose OneKey stateCode makes the contact inactive (such as INA or
+RET) gives no level, and an Account no active HCP points at has its level cleared.
 During a complete full sync these values are derived in memory from the population and included
-in the existing Account upsert, so this adds no Dataverse read or write pass. Partial, HCP-only,
-and delta runs use a cached, batched, promotion-only fallback because they do not see the whole
-population and therefore cannot safely lower an existing level.
+in the existing Account upsert, so this adds no Dataverse read or write pass. Only such a full
+sync sets levels: a delta, a retry, a sampled run and an HCP-only run leave them as they are,
+since they do not see the whole population.
+
+After the contacts, a full sync over the complete population (not a sample, HCO-only or
+HCP-only run, nor a delta) retires what left the contract. An account or contact of the
+codebase that the walk did not return is deactivated. So is each active affiliation the sync
+will not write again: an HCP–HCO row whose activity is gone or has an end outside the contract,
+and an HCO–HCO row with an end outside it. A contact's `ts_department`, `ts_hospital` or
+`ts_hospitalgroup`, and an account's `parentaccountid`, that point at an out-of-contract account
+are cleared, and a parent outside the contract is no longer taken as a contact's hospital. A role row
+whose activity no longer has that role is deactivated too, and comes back when OneKey sends it again.
+Nothing
+is deleted: a record that returns to the contract is written with its OneKey state, which
+reactivates it. This runs before Phase 6, so the primary contacts see the result.
+
+A walk that lost packets would make valid records look gone. When more than
+`SYNC_CONTRACT_CLEANUP_MAX_PERCENT` (default 5) of a codebase's active accounts, contacts or
+affiliations would be deactivated, nothing is written and the job ends Partially Succeeded
+with the counts in its error summary. Check them, then raise the setting for one run if the
+cleanup is expected, such as the first one. `--dry-run` reports the counts without writing.
+A delta never deactivates an affiliation, not even an HCO–HCO relation a changed workplace no
+longer lists; it writes only what OneKey sends, including an inactive state OneKey sends for an
+activity. A delta can still link a new activity to a retired account; the next full sync retires
+it again.
 
 #### Phase 6 — HCP–HCO affiliations and roles
 
@@ -287,7 +321,8 @@ wins, then the lowest activity ID, so an HCP who joins later does not replace th
 account without one is cleared, and a value set by hand is overwritten: the sync owns the column
 (mapping row HCO-028; remove it to stop). A full sync reads the codebase's accounts and primary
 affiliations once; a delta re-checks the accounts it wrote affiliations to and the accounts whose
-primary contact is one of the contacts it wrote. The writes are PATCHes in a `$batch`.
+primary contact is one of the contacts it wrote, or reads the whole codebase when that is more
+than 1,000 accounts and contacts. The writes are PATCHes in a `$batch`.
 
 After a successful job, pending failure rows whose OneKey id was written successfully in this run are
 marked resolved. Section 4 describes that path.
@@ -427,7 +462,7 @@ Current lookup tables:
 | OneKey list | Dataverse table | Used on |
 | --- | --- | --- |
 | TET | `ts_hcotype_ref` | Account type |
-| SP | `ts_specialty_ref` | Account and contact specialty slots 1–5 |
+| SP | `ts_specialty_ref` | Account and contact specialty slots 1–5. A slot OneKey no longer fills is cleared, so removing a specialty does not leave the old one in the last slot (account telephones 1–2 work the same way) |
 | LEX | `ts_hcocategory_ref` | Account category |
 | CAJ | `ts_hcolegalcategory_ref` | Account legal category |
 | TIT | `ts_title_ref` | Contact title |
@@ -823,6 +858,7 @@ hierarchy, HCO affiliations, contacts, then HCP affiliations.
 ```
     Pending row
         │
+        ├─ no step replays its phase and table ──▶ Ignored
         ▼
     Mark Retried (claim)
         │
@@ -841,7 +877,11 @@ hierarchy, HCO affiliations, contacts, then HCP affiliations.
 
 The retry reads the current OneKey record by id and sends it through the normal mapping. It does not reuse
 the payload from the night it failed. A retry job is written to `ts_integrationjob` with a link back to the
-parent job (`ts_retryofjob`). That job is not used as a delta watermark, because it only replays listed ids.
+parent job (`ts_retryofjob`) and "Retry" in its name (`WUK Retry Full …`), so it is recognised even when
+the parent could not be looked up. That job is not used as a delta watermark, because it only replays
+listed ids. A row that fails again is an outcome, not a failed run: only an error that stops a step
+fails the retry and its queue message. A role failure is recorded against its activity, so the replay
+rewrites the activity with its roles.
 
 While the row is in progress its status is Retried, so a second worker does not take it. If the worker is killed
 before it records the outcome, the claim expires after two hours and the next run takes the row back. Each

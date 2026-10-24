@@ -37,6 +37,7 @@ from .exceptions import (
     OneKeyHTTPError,
     OneKeyNotFoundError,
     OneKeyRateLimitError,
+    OneKeyResponseLostError,
 )
 from .parse import flatten_hco, flatten_hcp, compose_hcp_result, primary_address, specialties
 
@@ -59,6 +60,7 @@ __all__ = [
     "OneKeyHTTPError",
     "OneKeyNotFoundError",
     "OneKeyRateLimitError",
+    "OneKeyResponseLostError",
     "OneKeySession",
     "PHONETIC",
     "STARTS_WITH",

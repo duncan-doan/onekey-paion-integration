@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+import requests
 
 from onekey import (
     ACTIVITY,
@@ -17,6 +18,7 @@ from onekey import (
     OneKeyConfig,
     OneKeyConfigError,
     OneKeyForbiddenError,
+    OneKeyHTTPError,
     OneKeyRateLimitError,
     OneKeySession,
     basic_auth_header,
@@ -50,7 +52,10 @@ class FakeTransport:
 
     def request(self, method, url, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
-        return self.responses.pop(0)
+        answer = self.responses.pop(0)
+        if isinstance(answer, Exception):  # no response arrived
+            raise answer
+        return answer
 
     def close(self):
         pass
@@ -477,6 +482,76 @@ def test_iter_population_refetches_a_packet_lost_in_transit(monkeypatch):
     assert refetch["transactionUniqueIdentifier"] == "tx1"
     assert refetch["codBase"] == "WDE"
     assert "transactionPacketIdentifier" not in session._session.calls[3]["json"]
+
+
+def _refused(code):
+    return FakeResponse(400, {"response": {"status": "ERROR", "statusMessage": f"{code} refused"}})
+
+
+def test_a_continuation_without_an_answer_resumes_with_the_delivered_packet(monkeypatch):
+    # 23 Oct: a continuation timed out, was sent again, and OneKey refused it with
+    # a 400. Developer Guide 6.13.4: ask for the delivered packet by number instead.
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            requests.ReadTimeout("read timed out"),
+            _packet([{"onekeyEid": "B"}], 2, False),  # packet 2, asked for by number
+            _packet([{"onekeyEid": "C"}], 3, True),
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert [r["onekeyEid"] for r in records] == ["A", "B", "C"]
+    calls = [call["json"] for call in session._session.calls]
+    assert len(calls) == 4  # the lost continuation was not sent again blindly
+    assert calls[2]["transactionPacketIdentifier"] == 2 and calls[2]["transactionUniqueIdentifier"] == "tx1"
+    assert "transactionPacketIdentifier" not in calls[3]
+
+
+def test_a_continuation_without_an_answer_asks_again_when_it_was_not_delivered(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            requests.ConnectionError("connection reset"),
+            _refused("OKWS-3208"),  # packet 2 by number: never delivered
+            _packet([{"onekeyEid": "B"}], 2, True),  # so the next packet again
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert [r["onekeyEid"] for r in records] == ["A", "B"]
+    assert "transactionPacketIdentifier" not in session._session.calls[3]["json"]
+
+
+def test_a_walk_stops_when_the_resumed_continuation_is_refused(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            requests.ReadTimeout("read timed out"),
+            _refused("OKWS-3208"),
+            _refused("OKWS-3653"),  # the next packet again: transaction sealed
+        ]
+    )
+    with pytest.raises(OneKeyHTTPError, match="OKWS-3653"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+
+
+def test_a_refused_continuation_keeps_onekeys_reason_in_the_error(monkeypatch):
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session([_packet([{"onekeyEid": "A"}], 1, False), _refused("OKWS-3650")])
+    with pytest.raises(OneKeyHTTPError, match="OKWS-3650"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+
+
+def test_dropping_pooled_sockets_keeps_the_session_and_its_load_balancer_cookie():
+    transport = requests.Session()
+    transport.cookies.set("BIGipServerokws.ok.imshealth.com_prod_http_pool", "node-2")
+    config = OneKeyConfig("https://okws-uat.onekey.iqvia.com", "u", "p", "494")
+    session = OneKeySession(config, session=transport)
+    session._reset_connection_pool()
+    assert session._session is transport
+    assert transport.cookies.get("BIGipServerokws.ok.imshealth.com_prod_http_pool") == "node-2"
 
 
 def test_iter_population_stops_when_too_many_packets_were_lost(monkeypatch):

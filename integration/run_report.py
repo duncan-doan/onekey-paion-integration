@@ -30,6 +30,7 @@ from dataverse.client import escape_odata
 from integration.job_trace import (
     JOB_LABELS,
     JOBS,
+    RETRY_NAME_MARKER,
     STATUS_LABELS,
     STATUS_PARTIAL,
     STATUS_RUNNING,
@@ -135,7 +136,7 @@ def summarize_run(run_id: str, jobs: list[dict], *, now: datetime | None = None)
     rows = []
     finished: set[str] = set()
     for job in jobs:
-        retry = bool(job.get("_ts_retryofjob_value"))
+        retry = bool(job.get("_ts_retryofjob_value")) or RETRY_NAME_MARKER in (job.get("ts_name") or "")
         if not retry and _done(job) and job.get("ts_codebase"):
             finished.add(job["ts_codebase"])
         started = _parse(job.get("ts_startedon"))

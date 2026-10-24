@@ -104,6 +104,9 @@ ENTITY_BY_NAME = {
     "contact": ENTITY_CONTACT,
     "customeraddress": ENTITY_ADDRESS,
     "ts_affiliation": ENTITY_AFFILIATION,
+    # A role failure is recorded against its activity, and the
+    # activity_affiliations retry step replays the activity with its roles.
+    "ts_affiliationrole": ENTITY_AFFILIATION,
 }
 
 ENTITY_LABELS = {
@@ -203,6 +206,12 @@ def run_marker(run_id: str) -> str:
     return f"run={run_id}"
 
 
+# The word after the codebases in a retry job's ts_name ("WUK Retry Full ...").
+# The ts_retryofjob link also marks one, but it is set only when the parent
+# job can be looked up; the name does not depend on that.
+RETRY_NAME_MARKER = " Retry "
+
+
 def part_marker(part: int) -> str:
     """The text that ends a scheduled job's ts_name: which part of its work it ran."""
     return f"part={int(part)}"
@@ -243,6 +252,11 @@ def summarize_results(results: dict | None) -> dict:
     totals["failed"] += int(hierarchy.get("failed") or 0)
     totals["failed"] += int(hierarchy.get("missing_child") or 0)
     totals["failed"] += int(hierarchy.get("missing_parent") or 0)
+
+    cleanup = results.get("contract_cleanup") or {}
+    totals["processed"] += int(cleanup.get("written") or 0)
+    totals["updated"] += int(cleanup.get("written") or 0)
+    totals["failed"] += int(cleanup.get("failed") or 0)
     return totals
 
 
@@ -396,6 +410,9 @@ class JobTracer:
         self.dataverse = dataverse
         self.trigger = trigger
         self.retry_of_job_id = retry_of_job_id
+        # A retry job, named with RETRY_NAME_MARKER so the scheduler never
+        # takes it for a Full or Delta job that covered its window.
+        self.retry = False
         # Scheduled run the jobs belong to. ts_name carries it (run_marker), so
         # all the countries' jobs of one timer run can be read back together.
         self.run_id: str | None = None
@@ -827,6 +844,8 @@ class JobTracer:
         joined = ",".join(codes) or "NA"
         codebase = job_codebase(codebases)
         label = JOB_LABELS.get(job_type, "Sync")
+        if self.retry:
+            label = f"{RETRY_NAME_MARKER.strip()} {label}"
         started = self._started_at or datetime.now(timezone.utc)
         name = f"{joined} {label} {started.strftime('%Y-%m-%d %H:%M')}"
         if self.run_id:

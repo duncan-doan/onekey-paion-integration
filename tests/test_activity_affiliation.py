@@ -102,11 +102,13 @@ def test_affiliation_role_rows_bind_parent_and_role():
         {
             "ts_name": "WUKM0000000101 - 28",
             "ts_Affiliation@odata.bind": "/ts_affiliations(affiliation-guid)",
+            "statecode": 0,
             "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.28')",
         },
         {
             "ts_name": "WUKM0000000101 - AD",
             "ts_Affiliation@odata.bind": "/ts_affiliations(affiliation-guid)",
+            "statecode": 0,
             "ts_Role@odata.bind": "/ts_role_refs(ts_externalid='WUK.TIH.AD')",
         },
     ]

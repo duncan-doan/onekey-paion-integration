@@ -51,6 +51,7 @@ from integration.job_trace import (
     JOB_DELTA,
     JOB_FULL,
     JOBS,
+    RETRY_NAME_MARKER,
     STATUS_ABANDONED,
     STATUS_PARTIAL,
     STATUS_RUNNING,
@@ -151,7 +152,8 @@ def last_window_start(dataverse, codebases: list[str]) -> str | None:
     started today must not move the next window back to that old end, nor
     forward to today. Retry jobs are excluded: a retry that spans several
     phases is typed Full, but it only replays failed IDs. They are the jobs
-    with ts_retryofjob set.
+    with ts_retryofjob set, or named with RETRY_NAME_MARKER: the link is
+    left empty when the parent job cannot be looked up.
     """
     jobs = dataverse.retrieve_multiple(
         JOBS,
@@ -161,6 +163,7 @@ def last_window_start(dataverse, codebases: list[str]) -> str | None:
             f" and (ts_jobtype eq {JOB_FULL} or ts_jobtype eq {JOB_DELTA})"
             f" and (ts_status eq {STATUS_SUCCEEDED} or ts_status eq {STATUS_PARTIAL})"
             " and _ts_retryofjob_value eq null"
+            f" and not contains(ts_name, '{RETRY_NAME_MARKER}')"
         ),
         order_by="ts_startedon desc",
         top=_START_SCAN,
@@ -225,10 +228,11 @@ def own_jobs_filter(run_id: str, part: int = 1, *, retry: bool = False) -> str:
     message replaces its own part's jobs and the run's retry jobs.
     """
     marker = f"contains(ts_name, '{escape_odata(run_marker(run_id))}')"
+    retry_job = f"(_ts_retryofjob_value ne null or contains(ts_name, '{RETRY_NAME_MARKER}'))"
     if retry:
-        return f"{marker} and _ts_retryofjob_value ne null"
+        return f"{marker} and {retry_job}"
     return (
-        f"{marker} and (_ts_retryofjob_value ne null"
+        f"{marker} and ({retry_job}"
         f" or endswith(ts_name, ' {escape_odata(part_marker(part))}'))"
     )
 
@@ -357,6 +361,7 @@ def run_tries(dataverse, codebase: str, run_id: str, part: int, since: datetime)
             f" and contains(ts_name, '{escape_odata(run_marker(run_id))}')"
             f" and endswith(ts_name, ' {escape_odata(part_marker(part))}')"
             " and _ts_retryofjob_value eq null"
+            f" and not contains(ts_name, '{RETRY_NAME_MARKER}')"
             f" and ts_startedon ge {_iso(since)}"
         ),
     )

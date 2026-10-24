@@ -37,6 +37,7 @@ from .exceptions import (
     OneKeyHTTPError,
     OneKeyNotFoundError,
     OneKeyRateLimitError,
+    OneKeyResponseLostError,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,13 +108,17 @@ class OneKeySession:
         )
 
     def _reset_connection_pool(self) -> None:
-        """Drop pooled sockets after ConnectionReset / aborted TLS sessions."""
+        """Drop pooled sockets after ConnectionReset / aborted TLS sessions.
+
+        Closing the session closes its connection pools; the session stays in
+        use with its cookies. OneKey prod sets a load-balancer cookie
+        (BIGipServer...) that keeps a client on one server, which holds the
+        refreshMyOnekey transaction: a new session would lose it.
+        """
         try:
             self._session.close()
         except Exception:  # noqa: BLE001
             pass
-        self._session = requests.Session()
-        self._apply_default_headers()
 
     # -- plumbing ---------------------------------------------------------
 
@@ -142,16 +147,20 @@ class OneKeySession:
             429: "OneKey rate limit hit (429). Slow down and retry later.",
         }
         raise cls(
-            messages.get(status, f"OneKey returned HTTP {status} for {url}"),
+            # The body carries OneKey's reason (an OKWS-nnnn code); keep it in the message.
+            messages.get(status, f"OneKey returned HTTP {status} for {url}: {body[:300]}"),
             status_code=status,
             body=body,
             url=url,
         )
 
-    def request(self, method, path, with_connector=True, **kwargs):
+    def request(self, method, path, with_connector=True, resend_lost=True, **kwargs):
         """Issue one authenticated request, with retries on transient failures.
 
-        Each call is logged at DEBUG as ``onekey_call`` and added to ``stats``.
+        ``resend_lost=False`` raises :class:`OneKeyResponseLostError` when a
+        request gets no response, instead of sending it again: for a request
+        OneKey may have acted on already. Each call is logged at DEBUG as
+        ``onekey_call`` and added to ``stats``.
         """
         url = self.config.url(path, with_connector=with_connector)
         kwargs.setdefault("timeout", self.config.timeout)
@@ -162,7 +171,7 @@ class OneKeySession:
         status = None
         self.stats.calls += 1
         try:
-            response = self._send(method, url, path, **kwargs)
+            response = self._send(method, url, path, resend_lost=resend_lost, **kwargs)
             status = response.status_code
             return response
         except Exception as exc:
@@ -224,7 +233,7 @@ class OneKeySession:
                 return None
         return max(delay, 0) if math.isfinite(delay) else None
 
-    def _send(self, method, url, path, **kwargs):
+    def _send(self, method, url, path, resend_lost=True, **kwargs):
         """The retry loop behind :meth:`request`."""
         last_error = None
         for attempt in range(1, self.config.max_retries + 1):
@@ -238,6 +247,10 @@ class OneKeySession:
                 # Stale keep-alive sockets often surface as ConnectionResetError;
                 # rebuild the pool before the next attempt.
                 self._reset_connection_pool()
+                if not resend_lost:
+                    raise OneKeyResponseLostError(
+                        f"No response from OneKey at {url}: {exc}", url=url
+                    ) from exc
                 if attempt < self.config.max_retries:
                     delay = min(30 * attempt, 180) + random.uniform(0, 2)
                     logger.warning(
@@ -304,7 +317,7 @@ class OneKeySession:
 
         raise last_error
 
-    def post_json(self, path, payload, with_connector=True):
+    def post_json(self, path, payload, with_connector=True, resend_lost=True):
         """POST a JSON body and return the decoded ``response`` envelope.
 
         OneKey wraps successful payloads in a top-level ``response`` object and
@@ -317,7 +330,12 @@ class OneKeySession:
         # The guide is explicit that the charset must be declared for UTF-8.
         headers = {"Content-Type": "application/json; charset=utf-8"}
         raw = self.request(
-            "POST", path, with_connector=with_connector, json=payload, headers=headers
+            "POST",
+            path,
+            with_connector=with_connector,
+            resend_lost=resend_lost,
+            json=payload,
+            headers=headers,
         )
 
         try:

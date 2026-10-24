@@ -452,9 +452,17 @@ bindings create the new queues on first use.
 - A retry whose instance is killed on every delivery is poisoned by Azure
   without running the worker, so it queues no delta. The next day's delta
   starts from the last covering job, so no window is lost.
-- Records that leave the OneKey population are not deactivated in Dataverse.
-  HCO–HCO relations a processed workplace no longer sends are, and a parent
-  account is cleared when OneKey no longer sends its `managerWorkplaceEid`.
+- Only a complete full sync deactivates. It retires the accounts, contacts
+  and affiliations that left the OneKey population, deactivates the HCO–HCO
+  relations a workplace no longer sends, and clears lookups to retired
+  accounts. A delta never deactivates an affiliation; it writes what OneKey
+  sends, including an inactive state OneKey sends for an activity. A parent
+  account is cleared when OneKey sends a workplace without its
+  `managerWorkplaceEid`, in a delta too.
+- A run stopped by Ctrl-C or a shutdown (`KeyboardInterrupt`, `SystemExit`) is
+  recorded as stopped, not Succeeded, so the next delta reads its window again.
+- A retry whose rows fail again is not a failed delivery: they stay Pending for
+  the next day. Only an error that stops a retry step fails the message.
 - Log sampling is on in `host.json`; some worker trace lines can be missing.
   Add `Trace` to `excludedTypes` to keep all of them.
 - Settings changes reach running instances only after they restart, so wait a

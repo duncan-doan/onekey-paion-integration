@@ -1204,9 +1204,25 @@ def test_relations_onekey_no_longer_sends_are_deactivated(tmp_path):
 def test_the_relation_phase_deactivates_even_without_relations_left(tmp_path):
     dataverse = RelationDataverse([{"ts_externalid": "WNLH2 - WNLG0 - HIE", "ts_affiliationid": "gone"}])
     engine, _ = _engine(tmp_path, dataverse)
+    engine._partial_population = False  # a full sync's complete walk
     result = engine._sync_hco_relations([_workplace_with_hie("WNLH2")], allowed_workplace_eids={"WNLH2"})
     assert dataverse.batches == [("PATCH", "ts_affiliations(gone)", {"statecode": 1})]
     assert result["updated"] == 1
+
+
+def test_a_delta_never_deactivates_a_relation(tmp_path):
+    dataverse = RelationDataverse([{"ts_externalid": "WNLH2 - WNLG0 - HIE", "ts_affiliationid": "gone"}])
+    engine, _ = _engine(tmp_path, dataverse)
+    result = _delta(tmp_path, dataverse, [_workplace_with_hie("WNLH2")])
+    assert dataverse.batches == []
+    assert result["affiliations"]["updated"] == 0
+
+
+def test_an_affiliations_only_walk_deactivates_relations_like_a_full_sync(tmp_path):
+    dataverse = RelationDataverse([{"ts_externalid": "WNLH2 - WNLG0 - HIE", "ts_affiliationid": "gone"}])
+    engine, _ = _engine(tmp_path, dataverse, [_workplace_with_hie("WNLH2")])
+    engine.sync_affiliations_only(["WNL"])
+    assert ("PATCH", "ts_affiliations(gone)", {"statecode": 1}) in dataverse.batches
 
 
 def test_an_hco_relation_is_written_active():
@@ -1309,6 +1325,24 @@ def test_a_delta_rechecks_the_accounts_it_wrote_and_those_its_contacts_led(tmp_p
     assert not any("startswith" in f for _, f in dataverse.filters)
 
 
+def test_a_large_delta_reads_the_codebase_instead_of_by_account(tmp_path):
+    dataverse = PrimaryContactDataverse(
+        accounts=[{"accountid": "acc-1", "ts_externalid": "WNLH1", "_primarycontactid_value": None}],
+        affiliations=[_primary_row("WNLA1", "con-1", "acc-1", "2020-01-01T00:00:00Z")],
+    )
+    engine, _ = _engine(tmp_path, dataverse)  # a delta: partial population
+    touched = {f"acc-{n}" for n in range(1, 1002)}
+
+    engine._set_primary_contacts(touched, set(), {"WNL"}, {"failed": 0})
+
+    assert [f for _, f in dataverse.filters] == [
+        "startswith(ts_externalid,'WNL')",
+        "(startswith(ts_externalid,'WNL')) and ts_isprimary eq true and statecode eq 0"
+        " and not contains(ts_externalid,' - ')",
+    ]
+    assert dataverse.batches == [("PATCH", "accounts(acc-1)", {"primarycontactid@odata.bind": "/contacts(con-1)"})]
+
+
 def test_a_rejected_primary_contact_counts_as_failed_and_the_rest_are_written(tmp_path):
     dataverse = PrimaryContactDataverse(
         accounts=[
@@ -1352,3 +1386,339 @@ def test_the_account_transform_leaves_the_primary_contact_to_its_own_step():
     assert any(fm.target_field == "primarycontactid" for fm in config.get_field_mappings("account"))
     payload = create_transform_engine(config).transform_hco({"workplaceEid": "WUKH1", "officialName": "One"})
     assert not any(key.startswith("primarycontactid") for key in payload)
+
+
+class ContractDataverse(BulkDataverse):
+    """Rows per table that $batch PATCHes change; read by key prefix, ``field eq value``, state and primary flag."""
+
+    IDS = {"accounts": "accountid", "contacts": "contactid", "ts_affiliations": "ts_affiliationid",
+           "ts_affiliationroles": "ts_affiliationroleid"}
+
+    def __init__(self, **tables):
+        super().__init__()
+        self.tables = tables
+        self.batches = []
+
+    def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+        text = filter or ""
+        prefixes = re.findall(r"startswith\((\w+),'([^']+)'\)", text)
+        equals = [(f, v.lower()) for f, v in re.findall(r"(\w+) eq ([\w-]+)", text)
+                  if f not in ("statecode", "ts_isprimary")]
+
+        def keep(row):
+            if "statecode eq 0" in text and row.get("statecode", 0) != 0:
+                return False
+            if "ts_isprimary eq true" in text and not row.get("ts_isprimary"):
+                return False
+            if "not contains(ts_externalid,' - ')" in text and " - " in row.get("ts_externalid", ""):
+                return False
+            if prefixes and not any(str(row.get(f, "")).startswith(p) for f, p in prefixes):
+                return False
+            return not equals or any(str(row.get(f)).lower() == v for f, v in equals)
+
+        return [dict(row) for row in self.tables.get(entity_set, []) if keep(row)]
+
+    def batch_write(self, operations, idempotent):
+        self.batches.extend(operations)
+        for _, path, body in operations:
+            entity_set, row_id = path[:-1].split("(")
+            row = next(r for r in self.tables[entity_set] if r[self.IDS[entity_set]].lower() == row_id.lower())
+            for field, value in body.items():
+                if field == "statecode":
+                    row["statecode"] = value
+                elif field.endswith("@odata.bind"):
+                    row[f"_{field[:-len('@odata.bind')].lower()}_value"] = value[value.index("(") + 1:-1]
+                else:
+                    row[f"_{field.lower()}_value"] = None
+        return [(204, None, None) for _ in operations]
+
+
+def _contract_packets():
+    workplaces = [{"entityType": "WORKPLACE", "workplace": {"workplaceEid": eid}} for eid in ("WUKH1", "WUKH2")]
+    individuals = [{"entityType": "INDIVIDUAL", "individual": {"individualEid": "WUKI1"}}]
+    activities = [
+        {"entityType": "ACTIVITY", "activity": {"activityEid": "WUKA1", "individualEid": "WUKI1", "workplaceEid": "WUKH1"}},
+        # Moved to a workplace outside the contract: the activity phase skips it.
+        {"entityType": "ACTIVITY", "activity": {"activityEid": "WUKA2", "individualEid": "WUKI1", "workplaceEid": "WUKH9"}},
+    ]
+    return workplaces, individuals, activities
+
+
+def _contract_dataverse():
+    return ContractDataverse(
+        accounts=[
+            {"accountid": "acc-1", "ts_externalid": "WUKH1", "statecode": 0, "_parentaccountid_value": "acc-9"},
+            {"accountid": "acc-2", "ts_externalid": "WUKH2", "statecode": 0},
+            {"accountid": "acc-9", "ts_externalid": "WUKH9", "statecode": 0},  # left the contract
+            {"accountid": "acc-8", "ts_externalid": "WUKH8", "statecode": 1},  # left earlier, already inactive
+        ],
+        contacts=[
+            {"contactid": "con-1", "ts_externalid": "WUKI1", "statecode": 0, "_ts_department_value": "acc-1",
+             "_ts_hospital_value": "acc-9", "_ts_hospitalgroup_value": "acc-8"},
+            {"contactid": "con-9", "ts_externalid": "WUKI9", "statecode": 0, "_ts_department_value": "acc-9"},
+        ],
+        ts_affiliations=[
+            {"ts_affiliationid": "aff-1", "ts_externalid": "WUKA1", "statecode": 0},
+            {"ts_affiliationid": "aff-2", "ts_externalid": "WUKA2", "statecode": 0},              # workplace outside
+            {"ts_affiliationid": "aff-3", "ts_externalid": "WUKA3", "statecode": 0},              # activity gone
+            {"ts_affiliationid": "aff-4", "ts_externalid": "WUKH1 - WUKH2 - HIE", "statecode": 0},
+            {"ts_affiliationid": "aff-5", "ts_externalid": "WUKH1 - WUKH9 - HIE", "statecode": 0},  # end outside
+            {"ts_affiliationid": "aff-6", "ts_externalid": "WDEA1", "statecode": 0},              # another codebase
+        ],
+    )
+
+
+def test_a_complete_walk_retires_what_left_the_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNC_CONTRACT_CLEANUP_MAX_PERCENT", "100")
+    dataverse = _contract_dataverse()
+    engine, _ = _engine(tmp_path, dataverse)
+
+    counts, error = engine._retire_out_of_contract("WUK", _contract_packets())
+
+    assert error is None
+    assert sorted(dataverse.batches) == [
+        ("PATCH", "accounts(acc-1)", {"parentaccountid": None}),
+        ("PATCH", "accounts(acc-9)", {"statecode": 1}),
+        ("PATCH", "contacts(con-1)", {"ts_Hospital": None, "ts_HospitalGroup": None}),
+        ("PATCH", "contacts(con-9)", {"statecode": 1, "ts_Department": None}),  # one PATCH per record
+        ("PATCH", "ts_affiliations(aff-2)", {"statecode": 1}),
+        ("PATCH", "ts_affiliations(aff-3)", {"statecode": 1}),
+        ("PATCH", "ts_affiliations(aff-5)", {"statecode": 1}),
+    ]
+    assert counts == {"accounts": 1, "contacts": 1, "affiliations": 3, "placements": 2, "parents": 1,
+                      "roles": 0, "written": 7, "failed": 0}
+
+
+def test_the_cleanup_writes_nothing_when_it_would_retire_too_much(tmp_path):
+    dataverse = _contract_dataverse()
+    engine, _ = _engine(tmp_path, dataverse)
+
+    counts, error = engine._retire_out_of_contract("WUK", _contract_packets())  # default limit 5%
+
+    assert dataverse.batches == []
+    assert counts["written"] == 0
+    assert "1 of 3 active accounts" in error and "SYNC_CONTRACT_CLEANUP_MAX_PERCENT" in error
+
+
+def test_a_dry_run_counts_the_cleanup_without_writing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNC_CONTRACT_CLEANUP_MAX_PERCENT", "100")
+    dataverse = _contract_dataverse()
+    engine, _ = _engine(tmp_path, dataverse)
+
+    counts, error = engine._retire_out_of_contract("WUK", _contract_packets(), dry_run=True)
+
+    assert dataverse.batches == []
+    assert (counts["accounts"], counts["contacts"], counts["affiliations"], counts["written"]) == (1, 1, 3, 0)
+
+
+def test_after_a_complete_walk_a_parent_outside_the_contract_is_no_hospital(tmp_path):
+    engine, _ = _engine(tmp_path, BulkDataverse())
+    engine._account_cache.update({"WUKH1": "acc-1", "WUKH9": "acc-9"})
+    engine._contracted_workplace_eids = {"WUKH1"}
+    row = {"workplaceLoaded": True, "hospitalWorkplaceEid": "WUKH9"}
+
+    assert engine._hospital_of(row, {}) == (True, "acc-9")  # a delta cannot tell
+    engine._partial_population = False
+    assert engine._hospital_of(row, {}) == (True, None)
+    assert engine._hospital_of({"workplaceLoaded": True, "hospitalWorkplaceEid": "WUKH1"}, {}) == (True, "acc-1")
+
+
+def test_the_full_sync_retires_before_the_primary_contact_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNC_CONTRACT_CLEANUP_MAX_PERCENT", "100")
+    dataverse = ContractDataverse(
+        accounts=[
+            {"accountid": "accounts-WUKH1", "ts_externalid": "WUKH1", "statecode": 0},
+            {"accountid": "accounts-WUKH2", "ts_externalid": "WUKH2", "statecode": 0, "_primarycontactid_value": "con-7"},
+            {"accountid": "acc-9", "ts_externalid": "WUKH9", "statecode": 0},
+        ],
+        contacts=[
+            {"contactid": "contacts-WUKI1", "ts_externalid": "WUKI1", "statecode": 0},
+            {"contactid": "con-7", "ts_externalid": "WUKI7", "statecode": 0},
+        ],
+        ts_affiliations=[
+            {"ts_affiliationid": "aff-1", "ts_externalid": "WUKA1", "statecode": 0, "ts_isprimary": True,
+             "_ts_fromid_value": "contacts-WUKI1", "_ts_toid_value": "accounts-WUKH1", "ts_startdate": "2020-01-01T00:00:00Z"},
+            {"ts_affiliationid": "aff-7", "ts_externalid": "WUKA7", "statecode": 0, "ts_isprimary": True,
+             "_ts_fromid_value": "con-7", "_ts_toid_value": "accounts-WUKH2", "ts_startdate": "2010-01-01T00:00:00Z"},
+        ],
+    )
+    records = [
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH1", "officialName": "One"}},
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH2", "officialName": "Two"}},
+        *POPULATION[2:],
+    ]
+    engine, _ = _engine(tmp_path, dataverse, records)
+
+    result = engine.sync_full(["WUK"], sync_picklists=False)
+
+    assert result["success"] is True and result["errors"] == []
+    state = {row["ts_externalid"]: row for table in dataverse.tables.values() for row in table}
+    assert state["WUKH9"]["statecode"] == 1 and state["WUKI7"]["statecode"] == 1 and state["WUKA7"]["statecode"] == 1
+    # The primary contact step ran after the cleanup, so WUKH2 lost its departed HCP.
+    assert state["WUKH2"]["_primarycontactid_value"] is None
+    assert state["WUKH1"]["_primarycontactid_value"] == "contacts-wuki1"
+    assert result["contract_cleanup"]["written"] == 3
+
+
+def test_job_totals_count_the_cleanup():
+    from integration.job_trace import summarize_results
+    totals = summarize_results({"contract_cleanup": {"written": 4, "failed": 1}})
+    assert (totals["processed"], totals["updated"], totals["failed"]) == (4, 4, 1)
+
+
+def test_a_delta_never_writes_a_hierarchy_level(tmp_path):
+    dataverse = KnownDataverse(contacts={"WNLI1"}, accounts={"WNLH1", "WNLH2"})
+    _delta(tmp_path, dataverse, [
+        {"entityType": "WORKPLACE", "codBase": "WNL",
+         "workplace": {"workplaceEid": "WNLH1", "officialName": "Dept", "managerWorkplaceEid": "WNLH2"}},
+        _individual("WNLI1", "Doe"),
+        _activity("WNLA1", "WNLI1", "WNLH1"),
+    ])
+    accounts = [record for (entity_set, _), record in dataverse.records.items() if entity_set == "accounts"]
+    assert accounts and not any("ts_hierarchylevel" in record for record in accounts)
+    assert not any(entity_set == "accounts" for entity_set, _, _ in dataverse.updated)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_an_interrupted_sync_is_recorded_as_aborted(tmp_path, mode):
+    # Ctrl-C used to finish the job as Succeeded, and the next delta started
+    # past the window the run never read.
+    class Interrupted(PopulationOneKey):
+        def iter_population(self, **kwargs):
+            raise KeyboardInterrupt
+
+    engine = DynamicSyncEngine(Interrupted([]), BulkDataverse(), sync_logger=SyncLogger(log_dir=tmp_path))
+    finished = []
+    engine._finish_job = lambda results, aborted=False: finished.append(aborted)
+    with pytest.raises(KeyboardInterrupt):
+        if mode == "full":
+            engine.sync_full(["WUK"], sync_picklists=False)
+        else:
+            engine.sync_delta(["WNL"], *DELTA_WINDOW, sync_picklists=False)
+    assert finished == [True]
+
+
+def test_a_delta_refreshes_a_contact_it_wrote_without_its_workplace(tmp_path):
+    # WNLI1 changed, but its main activity's workplace is neither in the window
+    # nor an account: the contact phase leaves its placement, so the refresh
+    # must not skip it.
+    dataverse = KnownDataverse(contacts={"WNLI1", "WNLI2"}, accounts={"WNLH1"})
+    engine, _ = _engine(tmp_path, dataverse, [
+        {"entityType": "WORKPLACE", "codBase": "WNL", "workplace": {"workplaceEid": "WNLH1", "officialName": "One"}},
+        _individual("WNLI1", "Renamed"),
+        _activity("WNLA1", "WNLI1", "WNLH9"),
+        _individual("WNLI2", "Placed"),  # its workplace is in the window: fully placed
+        _activity("WNLA2", "WNLI2", "WNLH1"),
+    ])
+    seen = {}
+
+    def refresh(moves, changed, skip):
+        seen["skip"] = skip
+        return {"processed": 0, "created": 0, "updated": 0, "skipped": 0, "failed": 0}, set()
+
+    engine._refresh_contact_placement = refresh
+    engine.sync_delta(["WNL"], *DELTA_WINDOW, sync_picklists=False, sync_activity_affiliations=False)
+    assert seen["skip"] == {"WNLI2"}
+
+
+def test_a_parent_that_cannot_be_cleared_stays_counted_as_failed(tmp_path):
+    class RefusingParentDataverse(ParentDataverse):
+        def batch_write(self, operations, idempotent):
+            self.batches.extend(operations)
+            return [(400, None, "refused") for _ in operations]
+
+    dataverse = RefusingParentDataverse({
+        "WUKH1": {"accountid": "child-1", "_parentaccountid_value": "old-parent"},  # manager removed
+        "WUKH2": {"accountid": "child-2"},
+        "WUKH3": {"accountid": "parent-3"},
+    })
+    engine, _ = _engine(tmp_path, dataverse)
+    result = engine._sync_hierarchy([
+        {"workplaceEid": "WUKH1", "parentWorkplaceEid": None},
+        {"workplaceEid": "WUKH2", "parentWorkplaceEid": "WUKH3"},
+    ], allowed_workplace_eids={"WUKH1", "WUKH2", "WUKH3"})
+    assert result["linked"] == 1
+    assert result["failed"] == 1  # the refused clear, no longer overwritten by the link count
+
+
+def test_a_rejected_role_row_is_recorded_against_its_activity(tmp_path):
+    # So the activity_affiliations retry step replays the activity and its roles.
+    engine, _ = _engine(tmp_path, BulkDataverse(reject={"WUKA1 - AD"}))
+    engine._upsert_affiliation_roles([{"ts_name": "WUKA1 - AD"}])
+    [failure] = engine.tracer.recent_failures
+    assert (failure["source_id"], failure["entity"]) == ("WUKA1", ENTITY_AFFILIATION)
+
+
+def _stated_activity(activity_eid, individual_eid, workplace_eid, main, state):
+    return {"entityType": "ACTIVITY", "activity": {
+        "activityEid": activity_eid, "individualEid": individual_eid, "workplaceEid": workplace_eid,
+        "isMainActivity": main, "stateCode": state}}
+
+
+def test_an_inactive_activity_places_no_contact_in_a_full_sync(tmp_path):
+    records = [
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH1", "officialName": "One"}},
+        {"entityType": "WORKPLACE", "workplace": {"workplaceEid": "WUKH2", "officialName": "Two"}},
+        {"entityType": "INDIVIDUAL", "codBase": "WUK", "individual": {"individualEid": "WUKI1", "lastName": "Moved"}},
+        {"entityType": "INDIVIDUAL", "codBase": "WUK",
+         "individual": {"individualEid": "WUKI2", "lastName": "Retired", "stateCode": "RET"}},
+        # WUKI1: its main activity closed; the active one places the contact.
+        _stated_activity("WUKA1", "WUKI1", "WUKH1", True, "INA"),
+        _stated_activity("WUKA2", "WUKI1", "WUKH2", False, "ACT"),
+        # WUKI2: only an inactive activity. Still written (it is inactive now),
+        # its placement left as it is.
+        _stated_activity("WUKA3", "WUKI2", "WUKH1", True, "INA"),
+    ]
+    dataverse = KnownDataverse()
+    engine, _ = _engine(tmp_path, dataverse, records)
+    engine.sync_full(["WUK"], sync_picklists=False, sync_addresses=False, sync_hierarchy=False,
+                     sync_hco_relations=False, sync_activity_affiliations=False)
+    contacts = dataverse.contacts()
+    assert contacts["WUKI1"]["ts_Department@odata.bind"] == "/accounts(accounts-WUKH2)"
+    assert not any(key.startswith(("ts_Department", "ts_Hospital")) for key in contacts["WUKI2"])
+    assert str(contacts["WUKI2"]["statecode"]) == "1"
+
+
+def test_an_inactive_main_activity_does_not_move_a_contact_in_a_delta(tmp_path):
+    dataverse = KnownDataverse(contacts={"WNLI1"}, accounts={"WNLH2"})
+    engine, _ = _engine(tmp_path, dataverse, [_stated_activity("WNLA2", "WNLI1", "WNLH2", True, "INA")])
+    seen = {}
+
+    def refresh(moves, changed, skip):
+        seen["moves"] = moves
+        return {"processed": 0, "created": 0, "updated": 0, "skipped": 0, "failed": 0}, set()
+
+    engine._refresh_contact_placement = refresh
+    engine.sync_delta(["WNL"], *DELTA_WINDOW, sync_picklists=False, sync_activity_affiliations=False)
+    assert seen["moves"] == {}
+
+
+def test_an_inactive_activity_gives_no_level(tmp_path):
+    engine, _ = _engine(tmp_path, BulkDataverse())
+    levels = engine._population_hierarchy_levels(
+        [{"entityType": "WORKPLACE", "workplace": {"workplaceEid": eid}} for eid in ("WUKH1", "WUKH2")],
+        [{"entityType": "INDIVIDUAL", "individual": {"individualEid": "WUKI1"}}],
+        [_stated_activity("WUKA1", "WUKI1", "WUKH1", True, "INA"),
+         _stated_activity("WUKA2", "WUKI1", "WUKH2", False, "ACT")],
+    )
+    assert levels == {"WUKH2": 3}
+
+
+def test_the_cleanup_retires_role_rows_an_activity_no_longer_has(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNC_CONTRACT_CLEANUP_MAX_PERCENT", "100")
+    dataverse = _contract_dataverse()
+    dataverse.tables["ts_affiliationroles"] = [
+        {"ts_affiliationroleid": "role-1", "ts_name": "WUKA1 - AD", "statecode": 0},  # still on the activity
+        {"ts_affiliationroleid": "role-2", "ts_name": "WUKA1 - 28", "statecode": 0},  # OneKey dropped it
+        {"ts_affiliationroleid": "role-3", "ts_name": "WUKA3 - AD", "statecode": 0},  # its activity is gone
+    ]
+    workplaces, individuals, activities = _contract_packets()
+    activities[0]["activity"]["ada"] = {"TIH,1": {"listCode": "TIH", "code": "AD", "rank": 1}}
+    engine, _ = _engine(tmp_path, dataverse)
+
+    counts, error = engine._retire_out_of_contract("WUK", (workplaces, individuals, activities))
+
+    roles = sorted(op[1] for op in dataverse.batches if op[1].startswith("ts_affiliationroles"))
+    assert error is None
+    assert roles == ["ts_affiliationroles(role-2)", "ts_affiliationroles(role-3)"]
+    assert counts["roles"] == 2

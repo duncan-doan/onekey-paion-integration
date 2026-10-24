@@ -17,11 +17,13 @@ from integration.job_trace import (
     JOBS,
     MAX_RETRY_ATTEMPTS,
     PHASE_HCO,
+    PHASE_HCP_ACTIVITY,
     RETRY_IGNORED,
     RETRY_PENDING,
     RETRY_RESOLVED,
     RETRY_RETRIED,
     STATUS_RUNNING,
+    STATUS_SUCCEEDED,
     TRIGGER_MANUAL,
     TRIGGER_TIMER,
     JobTracer,
@@ -263,7 +265,8 @@ def test_retryable_failure_returns_to_pending_and_increments():
     engine._sync_hcos = fail_sync
     summary = retry_pending_failures(engine, rows=[_row(attempt=2)])
     assert summary["pending"] == 1
-    assert summary["success"] is False
+    # Failing again is an outcome, not a failed run: no redelivery.
+    assert summary["success"] is True
     final = _failure_updates(dataverse)[-1][2]
     assert final["ts_retrystatus"] == RETRY_PENDING
     assert final["ts_attemptcount"] == 3
@@ -847,3 +850,45 @@ def test_fetch_keeps_only_rows_of_the_requested_codebase():
     assert [row["id"] for row in fetch_pending_failures(dataverse, codebase="WUK")] == ["f2", "f3"]
     assert [row["id"] for row in fetch_pending_failures(dataverse, codebase="wde")] == ["f1"]
     assert len(fetch_pending_failures(dataverse)) == 3
+
+
+def test_a_failure_no_step_replays_is_ignored_not_left_pending():
+    # A role failure recorded against an account (before 2026-10-24) has no
+    # retry step. Left Pending it was picked again every run, oldest first,
+    # and could fill the daily limit.
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+    summary = retry_pending_failures(
+        engine, rows=[_row(phase=PHASE_HCP_ACTIVITY, entity=ENTITY_ACCOUNT)]
+    )
+    assert summary["success"] is True
+    assert summary["ignored"] == 1
+    assert [payload["ts_retrystatus"] for _, _, payload in _failure_updates(dataverse)] == [RETRY_IGNORED]
+    assert not any(entity_set == JOBS for entity_set, _ in dataverse.created)
+
+
+@pytest.mark.parametrize("parent", ["parent-job", "job-that-cannot-be-found"])
+def test_a_retry_job_is_named_retry_even_without_its_parent_link(parent):
+    # The scheduler must never take a retry job for a Full job that covered
+    # its window, and the ts_retryofjob link is set only when the lookup works.
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+    retry_pending_failures(engine, rows=[_row(parent=parent)])
+    [job] = [data for entity_set, data in dataverse.created if entity_set == JOBS]
+    assert job["ts_name"].startswith("WUK Retry ")
+    assert ("ts_Retryofjob@odata.bind" in job) is (parent == "parent-job")
+    assert engine.tracer.retry is False  # the next job of this engine is not a retry
+
+
+def test_an_interrupted_retry_is_not_recorded_as_succeeded():
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    engine._sync_hcos = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        retry_pending_failures(engine, rows=[_row()])
+    final = [data for entity_set, _id, data in dataverse.updated if entity_set == JOBS][-1]
+    assert final["ts_status"] != STATUS_SUCCEEDED
