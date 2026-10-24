@@ -218,7 +218,7 @@ phase.
     3  HCO parent hierarchy
     4  HCO–HCO affiliations
     5  HCP contacts
-    6  HCP–HCO affiliations and role rows
+    6  HCP–HCO affiliations and role rows, then account primary contacts
 ```
 
 #### Phase 0 — Picklists and code lookups
@@ -280,6 +280,14 @@ population and therefore cannot safely lower an existing level.
 
 Every activity, not only the main one, becomes a `ts_affiliation` from the contact to the account. Each
 TIH role code on that activity becomes a `ts_affiliationrole` row looking up `ts_role_ref`.
+
+Then each account's `primarycontactid` is set to its primary HCP: the contact of the account's
+active affiliation with `ts_isprimary` (OneKey `isMainActivity`). Of several, the earliest start
+wins, then the lowest activity ID, so an HCP who joins later does not replace the current one. An
+account without one is cleared, and a value set by hand is overwritten: the sync owns the column
+(mapping row HCO-028; remove it to stop). A full sync reads the codebase's accounts and primary
+affiliations once; a delta re-checks the accounts it wrote affiliations to and the accounts whose
+primary contact is one of the contacts it wrote. The writes are PATCHes in a `$batch`.
 
 After a successful job, pending failure rows whose OneKey id was written successfully in this run are
 marked resolved. Section 4 describes that path.

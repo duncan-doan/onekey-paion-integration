@@ -150,7 +150,8 @@ class DynamicSyncEngine:
       3. HCO hierarchy (managerWorkplaceEid → parentaccountid)
       4. HCO–HCO affiliations (workplace.relations[] → ts_affiliation)
       5. HCP contacts (INDIVIDUAL+main ACTIVITY → contact + ts_department / ts_hospital / ts_hospitalgroup)
-      6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation)
+      6. HCP–HCO affiliations (all ACTIVITY → ts_affiliation), then each
+         account's primarycontactid from its primary affiliation
 
     Bulk write notes: ``customeraddress`` has no CreateMultiple or
     UpdateMultiple, so its creates and updates are per-row POSTs and
@@ -2164,6 +2165,10 @@ class DynamicSyncEngine:
             return result
 
         role_rows: list[dict] = []
+        # Whose primary contact may have changed: the accounts written to,
+        # and the accounts a written contact may be the primary of.
+        written_accounts: set[str] = set()
+        written_contacts: set[str] = set()
         done = 0
         for batch in chunked(prepared, self.bulk_batch_size):
             self._check_deadline("activity affiliations", "activity_affiliations", result)
@@ -2221,6 +2226,8 @@ class DynamicSyncEngine:
                 role_rows.extend(
                     self.transformer.affiliation_role_rows(flat, record_id, entity_set)
                 )
+                written_accounts.add(str(self._account_cache[flat["workplaceEid"]]).lower())
+                written_contacts.add(str(self._contact_cache[flat["individualEid"]]).lower())
 
             self.sync_logger.log_progress("activity_affiliations", done, len(prepared))
 
@@ -2235,6 +2242,9 @@ class DynamicSyncEngine:
                 failed=roles["failed"],
             )
         )
+        # Every OneKey ID starts with its codebase (WUK, WDE, ...).
+        prefixes = {str(flat["workplaceEid"])[:3] for _, _, _, flat in prepared}
+        self._set_primary_contacts(written_accounts, written_contacts, prefixes, result)
         return result
 
     def _upsert_affiliation_roles(
@@ -2302,6 +2312,124 @@ class DynamicSyncEngine:
     def _role_entity_set(self) -> str:
         ed = self.config.get_entity("Dataverse", "ts_affiliationrole")
         return ed.entity_set if ed and ed.entity_set else "ts_affiliationroles"
+
+    def _set_primary_contacts(
+        self,
+        accounts: set[str],
+        contacts: set[str],
+        prefixes: set[str],
+        stats: dict,
+    ) -> dict[str, int]:
+        """Point each account's primarycontactid at its primary HCP.
+
+        The primary HCP is the contact of the account's active HCP–HCO
+        affiliation with ``ts_isprimary`` (OneKey isMainActivity). Of several,
+        the earliest start wins, then the lowest activity ID, so an HCP who
+        joins later does not replace the current one. The sync owns the
+        column: an account without a primary affiliation is cleared, and a
+        value set by hand is overwritten.
+
+        A complete population reads the codebase's accounts and primary rows
+        once, by ``prefixes``. A partial run (delta, sample, retry) reads
+        ``accounts``, the accounts it wrote affiliations to, and the accounts
+        whose primary contact is one of ``contacts``, which covers a primary
+        HCP who left. The writes are PATCHes in a $batch, which also clear
+        the lookup (dev 2026-10-24); failures add to ``stats["failed"]``.
+        Returns ``{"set", "cleared", "failed"}`` counts.
+        """
+        counts = {"set": 0, "cleared": 0, "failed": 0}
+        mapped = {fm.target_field for fm in self.config.get_field_mappings("account")}
+        if "primarycontactid" not in mapped or not accounts:
+            return counts
+        account_key = self.config.require_key_field("account")
+        affiliation_key = self.config.require_key_field("ts_affiliation")
+        entity_set = self._affiliation_entity_set()
+        account_columns = ["accountid", account_key, "_primarycontactid_value"]
+        affiliation_columns = [affiliation_key, "_ts_fromid_value", "_ts_toid_value", "ts_startdate"]
+        # HCO–HCO keys are "{from} - {to} - {linkCode}"; HCP–HCO keys are activity IDs.
+        primary = f"ts_isprimary eq true and statecode eq 0 and not contains({affiliation_key},' - ')"
+
+        if not self._partial_population:
+            starts = [f"'{escape_odata(prefix)}'" for prefix in sorted(prefixes)]
+            account_rows = self.dataverse.retrieve_multiple(
+                "accounts",
+                select=account_columns,
+                filter=" or ".join(f"startswith({account_key},{s})" for s in starts),
+            )
+            primary_rows = self.dataverse.retrieve_multiple(
+                entity_set,
+                select=affiliation_columns,
+                filter="(" + " or ".join(f"startswith({affiliation_key},{s})" for s in starts) + f") and {primary}",
+            )
+        else:
+            account_rows = []
+            for chunk in chunked(sorted(contacts), 50):
+                account_rows += self.dataverse.retrieve_multiple(
+                    "accounts",
+                    select=account_columns,
+                    filter=" or ".join(f"_primarycontactid_value eq {c}" for c in chunk),
+                )
+            known = {str(row.get("accountid")).lower() for row in account_rows}
+            for chunk in chunked(sorted(accounts - known), 50):
+                account_rows += self.dataverse.retrieve_multiple(
+                    "accounts",
+                    select=account_columns,
+                    filter=" or ".join(f"accountid eq {a}" for a in chunk),
+                )
+            primary_rows = []
+            for chunk in chunked(sorted({str(row.get("accountid")).lower() for row in account_rows}), 50):
+                primary_rows += self.dataverse.retrieve_multiple(
+                    entity_set,
+                    select=affiliation_columns,
+                    filter="(" + " or ".join(f"_ts_toid_value eq {a}" for a in chunk) + f") and {primary}",
+                )
+
+        best: dict[str, tuple[tuple[str, str], str]] = {}
+        for row in primary_rows:
+            account = str(row.get("_ts_toid_value") or "").lower()
+            contact = str(row.get("_ts_fromid_value") or "").lower()
+            if not account or not contact:
+                continue
+            # A row without a start sorts last.
+            rank = (str(row.get("ts_startdate") or "9999"), str(row.get(affiliation_key) or ""))
+            if account not in best or rank < best[account][0]:
+                best[account] = (rank, contact)
+        changes: dict[str, tuple[str, str | None]] = {}
+        for row in account_rows:
+            account = str(row.get("accountid") or "").lower()
+            wanted = best[account][1] if account in best else None
+            held = str(row.get("_primarycontactid_value") or "").lower() or None
+            if account and wanted != held:
+                changes[account] = (str(row.get(account_key) or account), wanted)
+
+        for chunk in chunked(sorted(changes.items()), 100):
+            self._check_deadline("primary contacts", "activity_affiliations", stats)
+            outcomes = self.dataverse.batch_write(
+                [
+                    (
+                        "PATCH",
+                        f"accounts({account})",
+                        {"primarycontactid@odata.bind": f"/contacts({contact})"}
+                        if contact
+                        else {"primarycontactid": None},
+                    )
+                    for account, (_, contact) in chunk
+                ],
+                idempotent=True,
+            )
+            for (_, (workplace_eid, contact)), (status, _, error) in zip(chunk, outcomes):
+                if status and status < 400:
+                    counts["set" if contact else "cleared"] += 1
+                    self.records_written += 1
+                else:
+                    counts["failed"] += 1
+                    logger.warning(
+                        msg("Primary contact not written", _ctx(self), workplace=workplace_eid, error=str(error)[:300])
+                    )
+        stats["failed"] += counts["failed"]
+        if changes:
+            logger.info(msg("Account primary contacts written", _ctx(self), **counts))
+        return counts
 
     def _collect_population_hcps(
         self,

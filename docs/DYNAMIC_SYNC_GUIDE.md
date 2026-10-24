@@ -309,6 +309,8 @@ class ValidationResult:
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
 3. Link parentaccountid from managerWorkplaceEid
 4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup
+5. Upsert HCP–HCO affiliations and roles, then set each account's primarycontactid to the
+   contact of its active `ts_isprimary` affiliation (earliest start, then activity ID; none clears it)
 ```
 
 The full-sync level derivation uses the same main-activity placement chain as Contacts:

@@ -1,5 +1,7 @@
 """Offline tests for the sync engine's phases on a fake OneKey and Dataverse."""
 
+import re
+
 import pytest
 
 from dataverse.exceptions import DataverseHTTPError
@@ -1215,3 +1217,138 @@ def test_an_hco_relation_is_written_active():
         from_account_id="a", to_account_id="b",
     )
     assert payload["statecode"] == 0
+
+
+class PrimaryContactDataverse(BulkDataverse):
+    """Accounts and active primary HCP-HCO rows, read by key prefix or ``field eq value``."""
+
+    def __init__(self, accounts, affiliations, fail=()):
+        super().__init__()
+        self.accounts = accounts
+        self.affiliations = affiliations
+        self.fail = set(fail)
+        self.filters = []
+        self.batches = []
+
+    def retrieve_multiple(self, entity_set, select=None, filter=None, **kwargs):
+        if entity_set not in ("accounts", "ts_affiliations"):
+            return []
+        self.filters.append((entity_set, filter))
+        rows = self.accounts if entity_set == "accounts" else self.affiliations
+        prefixes = re.findall(r"startswith\(ts_externalid,'(\w+)'\)", filter or "")
+        equals = [(f, v) for f, v in re.findall(r"(\w+) eq ([\w-]+)", filter or "")
+                  if f not in ("ts_isprimary", "statecode")]
+        return [
+            row for row in rows
+            if any(row["ts_externalid"].startswith(p) for p in prefixes)
+            or any(str(row.get(f)) == v for f, v in equals)
+        ]
+
+    def batch_write(self, operations, idempotent):
+        self.batches.extend(operations)
+        return [(400, None, "rejected") if op[1] in self.fail else (204, None, None) for op in operations]
+
+
+def _primary_row(activity_eid, contact, account, start):
+    return {"ts_externalid": activity_eid, "_ts_fromid_value": contact, "_ts_toid_value": account,
+            "ts_startdate": start}
+
+
+def test_a_full_sync_sets_the_earliest_primary_hcp_and_clears_accounts_without_one(tmp_path):
+    dataverse = PrimaryContactDataverse(
+        accounts=[
+            {"accountid": "acc-1", "ts_externalid": "WUKH1", "_primarycontactid_value": None},
+            {"accountid": "acc-2", "ts_externalid": "WUKH2", "_primarycontactid_value": "con-old"},  # no primary left
+            {"accountid": "acc-3", "ts_externalid": "WUKH3", "_primarycontactid_value": "con-a"},    # already right
+            {"accountid": "acc-9", "ts_externalid": "WDEH9", "_primarycontactid_value": "con-z"},    # another codebase
+        ],
+        affiliations=[
+            _primary_row("WUKA1", "con-b", "acc-1", "2020-01-01T00:00:00Z"),
+            _primary_row("WUKA3", "con-d", "acc-1", "2018-05-01T00:00:00Z"),
+            _primary_row("WUKA2", "con-c", "acc-1", "2018-05-01T00:00:00Z"),  # same start, lower activity ID
+            _primary_row("WUKA4", "con-a", "acc-3", "2019-01-01T00:00:00Z"),
+        ],
+    )
+    engine, _ = _engine(tmp_path, dataverse)
+    engine._partial_population = False
+    stats = {"failed": 0}
+
+    counts = engine._set_primary_contacts({"acc-1"}, {"con-b"}, {"WUK"}, stats)
+
+    assert dataverse.batches == [
+        ("PATCH", "accounts(acc-1)", {"primarycontactid@odata.bind": "/contacts(con-c)"}),
+        ("PATCH", "accounts(acc-2)", {"primarycontactid": None}),
+    ]
+    assert counts == {"set": 1, "cleared": 1, "failed": 0}
+    assert all("startswith(ts_externalid,'WUK')" in f for _, f in dataverse.filters)
+    assert "not contains(ts_externalid,' - ')" in dataverse.filters[1][1]
+
+
+def test_a_delta_rechecks_the_accounts_it_wrote_and_those_its_contacts_led(tmp_path):
+    dataverse = PrimaryContactDataverse(
+        accounts=[
+            {"accountid": "acc-old", "ts_externalid": "WNLH1", "_primarycontactid_value": "con-x"},
+            {"accountid": "acc-new", "ts_externalid": "WNLH2", "_primarycontactid_value": None},
+            {"accountid": "acc-other", "ts_externalid": "WNLH3", "_primarycontactid_value": None},
+        ],
+        # con-x's main activity moved from acc-old to acc-new; acc-other was not in the delta.
+        affiliations=[
+            _primary_row("WNLA2", "con-x", "acc-new", "2026-10-01T00:00:00Z"),
+            _primary_row("WNLA3", "con-y", "acc-other", "2026-01-01T00:00:00Z"),
+        ],
+    )
+    engine, _ = _engine(tmp_path, dataverse)
+    stats = {"failed": 0}
+
+    engine._set_primary_contacts({"acc-new"}, {"con-x"}, {"WNL"}, stats)
+
+    assert sorted(dataverse.batches) == [
+        ("PATCH", "accounts(acc-new)", {"primarycontactid@odata.bind": "/contacts(con-x)"}),
+        ("PATCH", "accounts(acc-old)", {"primarycontactid": None}),
+    ]
+    assert not any("startswith" in f for _, f in dataverse.filters)
+
+
+def test_a_rejected_primary_contact_counts_as_failed_and_the_rest_are_written(tmp_path):
+    dataverse = PrimaryContactDataverse(
+        accounts=[
+            {"accountid": "acc-1", "ts_externalid": "WUKH1", "_primarycontactid_value": None},
+            {"accountid": "acc-2", "ts_externalid": "WUKH2", "_primarycontactid_value": None},
+        ],
+        affiliations=[
+            _primary_row("WUKA1", "con-1", "acc-1", "2020-01-01T00:00:00Z"),
+            _primary_row("WUKA2", "con-2", "acc-2", "2020-01-01T00:00:00Z"),
+        ],
+        fail={"accounts(acc-1)"},
+    )
+    engine, _ = _engine(tmp_path, dataverse)
+    stats = {"failed": 0}
+
+    counts = engine._set_primary_contacts({"acc-1", "acc-2"}, set(), {"WUK"}, stats)
+
+    assert counts == {"set": 1, "cleared": 0, "failed": 1}
+    assert stats["failed"] == 1
+
+
+def test_the_full_sync_sets_the_primary_contact_after_the_activity_phase(tmp_path):
+    dataverse = PrimaryContactDataverse(
+        accounts=[{"accountid": "accounts-WUKH1", "ts_externalid": "WUKH1", "_primarycontactid_value": None}],
+        affiliations=[_primary_row("WUKA1", "contacts-WUKI1", "accounts-WUKH1", "2020-01-01T00:00:00Z")],
+    )
+    engine, _ = _engine(tmp_path, dataverse)
+
+    result = engine.sync_full(["WUK"], sync_picklists=False)
+
+    assert result["success"] is True
+    assert dataverse.batches == [
+        ("PATCH", "accounts(accounts-wukh1)", {"primarycontactid@odata.bind": "/contacts(contacts-wuki1)"}),
+    ]
+    assert result["activity_affiliations"]["failed"] == 0
+
+
+def test_the_account_transform_leaves_the_primary_contact_to_its_own_step():
+    from integration import create_transform_engine, load_mapping_config
+    config = load_mapping_config()
+    assert any(fm.target_field == "primarycontactid" for fm in config.get_field_mappings("account"))
+    payload = create_transform_engine(config).transform_hco({"workplaceEid": "WUKH1", "officialName": "One"})
+    assert not any(key.startswith("primarycontactid") for key in payload)
