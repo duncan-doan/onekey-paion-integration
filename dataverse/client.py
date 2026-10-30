@@ -110,6 +110,9 @@ def _parse_batch_response(response) -> list[tuple]:
             break  # closing delimiter
         status_match = _BATCH_STATUS.search(part)
         if not status_match:
+            # Keep the part's place: skipping it would give every later
+            # operation the result of the one after it.
+            results.append((None, None, "unreadable $batch response part"))
             continue
         status = int(status_match.group(1))
         id_match = _ENTITY_ID.search(part)
@@ -118,11 +121,34 @@ def _parse_batch_response(response) -> list[tuple]:
             body = re.split(r"\r?\n\r?\n", part[status_match.end():], maxsplit=1)
             text = body[1].strip() if len(body) > 1 else ""
             try:
-                error = json.loads(text).get("error", {}).get("message") or text[:500]
+                error = _error_message(json.loads(text)) or text[:500]
             except ValueError:
                 error = text[:500] or f"HTTP {status}"
         results.append((status, id_match.group(1) if id_match else None, error))
     return results
+
+
+def _error_message(body: object) -> str | None:
+    """``error.message`` from a Web API error body, whatever JSON shape it has."""
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        return error.get("message")
+    return str(error) if error else None
+
+
+# Dataverse's answers to a create whose alternate key value already exists.
+_DUPLICATE_KEY_CODES = ("0x80060892", "0x80040237")
+
+
+def _duplicate_key(exc: DataverseHTTPError) -> bool:
+    """Whether Dataverse refused a create because its alternate key value exists."""
+    text = f"{getattr(exc, 'code', '') or ''} {getattr(exc, 'body', '') or ''}"
+    return any(code in text for code in _DUPLICATE_KEY_CODES)
+
+
+def _fold(value: object) -> str:
+    """A key as Dataverse compares text: case and surrounding spaces ignored."""
+    return str(value).strip().casefold()
 
 
 # Customer lookups: the Web API navigation name carries the target table
@@ -433,11 +459,13 @@ class DataverseClient:
 
         code = message = None
         try:
-            error = response.json().get("error", {})
-            code = error.get("code")
-            message = error.get("message")
+            body = response.json()
         except ValueError:
             message = response.text[:500]
+        else:
+            error = body.get("error") if isinstance(body, dict) else None
+            code = error.get("code") if isinstance(error, dict) else None
+            message = _error_message(body) or response.text[:500]
 
         raise DataverseHTTPError(
             f"Dataverse returned HTTP {response.status_code} for {url}: {message}",
@@ -716,8 +744,9 @@ class DataverseClient:
         if existing:
             # Read the primary key by name: ts_externalid also ends in "id".
             record_id = existing[primary_id]
-            self.update(entity_set, record_id, data)
+            self.update(entity_set, record_id, _clear_binds(data, create=False))
             return record_id, False
+        original, data = data, _clear_binds(data, create=True)
         try:
             return self.create(entity_set, data), True
         except DataverseAmbiguousWriteError:
@@ -734,6 +763,21 @@ class DataverseClient:
                     self.update(entity_set, landed[primary_id], state)
                 return landed[primary_id], True
             return self.create(entity_set, data), True
+        except DataverseHTTPError as exc:
+            # The alternate key (ts_externalid) already holds the value: an
+            # earlier write whose outcome was unknown landed after all.
+            if not _duplicate_key(exc):
+                raise
+            landed = self.find_one(entity_set, filter=match_filter, select=[primary_id])
+            if not landed:
+                raise
+            logger.info(
+                "Create of %s %s found it already there: id=%s",
+                entity_set, match_value, landed[primary_id],
+            )
+            # The update form: the create form leaves out the lookups to clear.
+            self.update(entity_set, landed[primary_id], _clear_binds(original, create=False))
+            return landed[primary_id], True
 
     # -- bulk writes ------------------------------------------------------
 
@@ -762,6 +806,10 @@ class DataverseClient:
             if col not in columns:
                 columns.append(col)
 
+        # Dataverse matches text ignoring case and trailing spaces; key each row
+        # by the value asked for, so "WUKH1" finds a stored "wukh1" and is not
+        # created a second time.
+        requested = {_fold(value): value for value in unique}
         found = {}
         for filter_expr in _filter_chunks(match_field, unique, chunk_size):
             # No $top: a value already stored twice would take a second slot
@@ -773,7 +821,7 @@ class DataverseClient:
             for row in rows:
                 match_value = row.get(match_field)
                 if match_value is not None:
-                    found[str(match_value)] = row
+                    found[requested.get(_fold(match_value), str(match_value))] = row
         return found
 
     def create_multiple(self, entity_set, records, logical_name=None):
@@ -1073,6 +1121,7 @@ class DataverseClient:
         # Preserve input order in the final result list.
         results = [None] * len(prepared)
         creates = []  # (index, match_value, payload)
+        originals: dict[int, dict] = {}  # index -> payload before _clear_binds
         updates = []  # (index, match_value, payload_with_id)
         unchanged = 0
 
@@ -1093,6 +1142,7 @@ class DataverseClient:
                 results[index] = (match_value, None, False)
             else:
                 creates.append((index, match_value, _clear_binds(payload, create=True)))
+                originals[index] = payload
         if skip_unchanged:
             logger.info(
                 "Unchanged %s skipped: unchanged=%d updates=%d creates=%d",
@@ -1100,8 +1150,10 @@ class DataverseClient:
             )
 
         def _create_one(index, match_value, payload):
+            # The record may exist by now; then it is updated with the original
+            # payload, whose cleared lookups the create form left out.
             record_id, created = self.upsert_by_field(
-                entity_set, match_field, match_value, payload
+                entity_set, match_field, match_value, originals.get(index, payload)
             )
             results[index] = (match_value, record_id, created)
 

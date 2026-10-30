@@ -10,6 +10,7 @@ from integration.dynamic_sync import DynamicSyncEngine
 from integration.job_trace import (
     ENTITY_ACCOUNT,
     ENTITY_AFFILIATION,
+    ENTITY_CONTACT,
     FAILURES,
     JOB_DELTA,
     JOB_FULL,
@@ -17,6 +18,7 @@ from integration.job_trace import (
     JOBS,
     MAX_RETRY_ATTEMPTS,
     PHASE_HCO,
+    PHASE_HCP,
     PHASE_HCP_ACTIVITY,
     RETRY_IGNORED,
     RETRY_PENDING,
@@ -553,7 +555,10 @@ def test_resolve_pending_scans_once_for_large_id_sets():
     ids = {f"WUKE{n:08d}" for n in range(1, 1500)}
     assert resolve_pending_for_ids(dataverse, ids) == 1
     assert len(dataverse.queries) == 1
-    assert dataverse.queries[0][1]["filter"] == f"ts_retrystatus eq {RETRY_PENDING}"
+    # Only this codebase's pending rows are read.
+    assert dataverse.queries[0][1]["filter"] == (
+        f"ts_retrystatus eq {RETRY_PENDING} and (startswith(ts_sourceid,'WUK'))"
+    )
     assert dataverse.updated == [(FAILURES, "fail-1", {"ts_retrystatus": RETRY_RESOLVED})]
 
 
@@ -647,13 +652,14 @@ def test_one_failed_outcome_write_does_not_spoil_the_others():
 
     dataverse.update = update
     summary = retry_pending_failures(engine, rows=TWO_ROWS)
-    # fail-2's outcome is still written; fail-1 counts as a failed attempt.
+    # fail-2's outcome is still written. fail-1's could not be: that is
+    # Dataverse, not the row, so it stays Pending without spending an attempt.
     assert summary["resolved"] == 1
     assert summary["pending"] == 1
     last = {record_id: data for _, record_id, data in _failure_updates(dataverse)}
     assert last["fail-2"]["ts_retrystatus"] == RETRY_RESOLVED
     assert last["fail-1"]["ts_retrystatus"] == RETRY_PENDING
-    assert last["fail-1"]["ts_attemptcount"] == 2
+    assert last["fail-1"]["ts_attemptcount"] == 1
 
 
 def test_resolve_skips_rows_written_by_the_same_job():
@@ -892,3 +898,134 @@ def test_an_interrupted_retry_is_not_recorded_as_succeeded():
         retry_pending_failures(engine, rows=[_row()])
     final = [data for entity_set, _id, data in dataverse.updated if entity_set == JOBS][-1]
     assert final["ts_status"] != STATUS_SUCCEEDED
+
+
+class ActivityOneKey:
+    """Activities by individual and by id. Like OneKey outside the US, it refuses
+    a search by individual id (HTTP 400, OKWS-3007)."""
+
+    def __init__(self, activities):
+        self.activities = {record["activity"]["activityEid"]: record for record in activities}
+        self.calls = []
+
+    def search(self, entity_type, fields, cod_base=None, result_size=None, **kwargs):
+        self.calls.append(("search", entity_type))
+        wanted = fields[0]["values"][0]
+        return [
+            {"activity": {key: record["activity"][key]
+                          for key in ("activityEid", "individualEid", "workplaceEid", "isMainActivity", "stateCode")}}
+            for record in self.activities.values()
+            if record["activity"]["individualEid"] == wanted
+        ]
+
+    def get_by_id(self, eid, entity_type, cod_base=None):
+        self.calls.append(("get_by_id", entity_type))
+        if entity_type == "INDIVIDUAL":
+            raise DataverseHTTPError("OKWS-3007 individual search is US only", status_code=400)
+        if entity_type == "WORKPLACE":
+            return {"codBase": cod_base, "workplace": {"workplaceEid": eid, "officialName": "Ward"}}
+        return self.activities.get(eid)
+
+
+class ContactEngine(Engine):
+    """Accounts exist for ``accounts``; ``retired`` ones the out-of-contract cleanup retired."""
+
+    def __init__(self, dataverse, onekey, accounts=("WUKH1", "WUKH2"), retired=()):
+        super().__init__(dataverse, onekey)
+        self.composed = []
+        self.update_only = set()
+        self.accounts = set(accounts)
+        self._retired_account_eids = set(retired)
+
+    def _active_activity(self, activity):
+        return activity.get("stateCode") != "INA"
+
+    def _lookup_accounts_bulk(self, workplace_eids):
+        return {eid: f"account-{eid}" for eid in workplace_eids if eid in self.accounts}
+
+    def _sync_hcps(self, codebase, composed=None, update_only=None, **kwargs):
+        self.composed.extend(composed or [])
+        self.update_only |= set(update_only or ())
+        return {"processed": len(composed or []), "created": 0, "updated": len(composed or []), "failed": 0}
+
+
+def _activity_record(activity_eid, workplace_eid, main, state="ACT"):
+    return {
+        "codBase": "WUK",
+        "activity": {"activityEid": activity_eid, "individualEid": "WUKI1", "workplaceEid": workplace_eid,
+                     "isMainActivity": main, "stateCode": state},
+        "individual": {"individualEid": "WUKI1", "lastName": "Doe",
+                       "ada": {"SP,1": {"listCode": "SP", "code": "AA", "rank": 1}}},
+    }
+
+
+def test_a_contact_is_retried_through_its_activity_never_by_individual_id():
+    # Outside the US OneKey refuses a search by individual id, so a contact
+    # failure row was never replayed: every retry failed until it was Ignored.
+    onekey = ActivityOneKey([_activity_record("WUKA2", "WUKH2", False), _activity_record("WUKA1", "WUKH1", True)])
+    engine = ContactEngine(FakeDataverse(), onekey)
+    summary = retry_pending_failures(
+        engine, rows=[_row(source_id="WUKI1", phase=PHASE_HCP, entity=ENTITY_CONTACT)]
+    )
+    [row] = engine.composed
+    assert row["individual"]["individualEid"] == "WUKI1" and row["individual"]["ada"]  # full detail
+    assert row["workplace"]["workplaceEid"] == "WUKH1"  # the main activity places it
+    assert ("get_by_id", "INDIVIDUAL") not in onekey.calls
+    assert summary["success"] is True and summary["resolved"] == 1
+
+
+def test_a_contact_with_only_inactive_activities_is_retried_without_placement():
+    onekey = ActivityOneKey([_activity_record("WUKA1", "WUKH1", True, state="INA")])
+    engine = ContactEngine(FakeDataverse(), onekey)
+    retry_pending_failures(engine, rows=[_row(source_id="WUKI1", phase=PHASE_HCP, entity=ENTITY_CONTACT)])
+    [row] = engine.composed
+    assert row["individual"]["individualEid"] == "WUKI1"
+    assert row["workplace"] == {} and row["activity"] == {}
+
+
+def test_a_contact_retry_places_it_only_at_a_contracted_workplace():
+    # The main activity is at a workplace the cleanup retired; the full sync
+    # places the contact through the secondary one, and so must the retry.
+    onekey = ActivityOneKey([_activity_record("WUKA1", "WUKH9", True), _activity_record("WUKA2", "WUKH2", False)])
+    engine = ContactEngine(FakeDataverse(), onekey, accounts={"WUKH2", "WUKH9"}, retired={"WUKH9"})
+    retry_pending_failures(engine, rows=[_row(source_id="WUKI1", phase=PHASE_HCP, entity=ENTITY_CONTACT)])
+    [row] = engine.composed
+    assert row["workplace"]["workplaceEid"] == "WUKH2"
+    assert engine.update_only == set()
+
+
+def test_a_contact_retry_with_no_contracted_workplace_only_updates():
+    # As in the full sync: no activity at a contracted workplace, so the
+    # contact is refreshed if it exists but never created.
+    onekey = ActivityOneKey([_activity_record("WUKA1", "WUKH9", True), _activity_record("WUKA2", "WUKH8", False)])
+    engine = ContactEngine(FakeDataverse(), onekey, accounts={"WUKH9"}, retired={"WUKH9"})
+    retry_pending_failures(engine, rows=[_row(source_id="WUKI1", phase=PHASE_HCP, entity=ENTITY_CONTACT)])
+    [row] = engine.composed
+    assert row["workplace"] == {} and row["activity"] == {}
+    assert engine.update_only == {"WUKI1"}
+
+
+def test_a_contact_retry_keeps_the_individuals_privacy_flag():
+    record = _activity_record("WUKA1", "WUKH1", True, state="INA")
+    record["isPrivacyLaw"] = False  # the activity record's own flag
+    record["individual"]["isPrivacyLaw"] = True
+    engine = ContactEngine(FakeDataverse(), ActivityOneKey([record]))
+    retry_pending_failures(engine, rows=[_row(source_id="WUKI1", phase=PHASE_HCP, entity=ENTITY_CONTACT)])
+    [row] = engine.composed
+    assert row["isPrivacyLaw"] is True  # HCP-013 msdyn_gdproptout
+
+
+def test_an_outage_during_a_retry_does_not_spend_the_rows_attempts():
+    # Two deliveries a day used up the 5 attempts of good rows in about two
+    # days of a OneKey or Dataverse outage, and Ignored rows never come back.
+    dataverse = FakeDataverse()
+    engine = Engine(dataverse)
+
+    def outage(*args, **kwargs):
+        raise DataverseHTTPError("Service unavailable", status_code=503)
+
+    engine._sync_hcos = outage
+    summary = retry_pending_failures(engine, rows=[_row(attempt=4)])
+    assert summary["success"] is False and summary["pending"] == 1
+    final = _failure_updates(dataverse)[-1][2]
+    assert (final["ts_retrystatus"], final["ts_attemptcount"]) == (RETRY_PENDING, 4)

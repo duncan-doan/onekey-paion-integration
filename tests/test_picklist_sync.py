@@ -56,6 +56,7 @@ def test_substatus_targets_the_shared_global_choice():
         126870010: "Retired",
         126870011: "Temporarily Closed",
         126870012: "Temporarily Inactive",
+        126870013: "Out of contract",  # written by the out-of-contract cleanup
     }
 
 

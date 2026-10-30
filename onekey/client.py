@@ -50,6 +50,12 @@ _PACKET_RETRY_SECONDS = 5
 _MAX_MISSED_PACKETS = 3
 # Times a walk resumes after a continuation's answer was lost (6.13.4).
 _RESUME_ATTEMPTS = 3
+# A by-number read refused with these cannot be resumed: the transaction is
+# unknown (OKWS-3650) or sealed (OKWS-3653). Any other 400 means the packet
+# was not delivered (OKWS-3208, OKWS-3651, or a gateway's bare 400), so the
+# walk asks for the next packet again; the packet-number and total checks
+# still catch one that was lost.
+_UNRESUMABLE_CODES = ("OKWS-3650", "OKWS-3653")
 
 
 def search_field(name, values, method=EXACT, fuzzy_precision=None):
@@ -485,6 +491,7 @@ class OneKeyClient:
                         received,
                         transaction_id or payload.get("transactionUniqueIdentifier"),
                         request,
+                        reposition=not complete,
                     )
                 )
                 packet = received
@@ -518,6 +525,7 @@ class OneKeyClient:
             )
 
             if complete:
+                self._check_total(envelope, yielded)
                 return
 
             # Pace packets to stay under OneKey rate limits.
@@ -574,7 +582,8 @@ class OneKeyClient:
         skip a packet. So it is not resent: the walk asks for packet
         ``expected`` by number, which OneKey returns if it was delivered,
         and if it was not (HTTP 400, OKWS-3208) asks for the next packet
-        again. Any other error stops the walk.
+        again. A closed or unknown transaction (_UNRESUMABLE_CODES) and any
+        other error stop the walk.
         """
         try:
             return self._population_packet(payload, resend_lost=False)
@@ -596,7 +605,9 @@ class OneKeyClient:
             try:
                 results, envelope = self._population_packet(by_number)
             except OneKeyHTTPError as exc:
-                if exc.status_code != 400:
+                if exc.status_code != 400 or any(
+                    code in str(exc.body or exc) for code in _UNRESUMABLE_CODES
+                ):
                     raise
                 logger.warning("OneKey packet %d was not delivered: %s", expected, exc)
             else:
@@ -625,7 +636,14 @@ class OneKeyClient:
                 f"OneKey population returned packet identifier {value!r}"
             ) from None
 
-    def _recover_packets(self, expected, received, transaction_id, request):
+    def _recover_packets(
+        self,
+        expected: int,
+        received: int,
+        transaction_id: str | None,
+        request: dict,
+        reposition: bool = True,
+    ) -> list[list[dict]]:
         """Fetch the packets OneKey sent but this walk never received.
 
         A response lost in transit is retried, and OneKey answers the retry
@@ -657,7 +675,36 @@ class OneKeyClient:
                     f"OneKey returned packet {returned} when packet {number} was requested"
                 )
             recovered.append(results)
+        # The vendor sample reads the last good packet again before asking for
+        # the next, which suggests a by-number read moves the cursor. Reading
+        # ``received`` again leaves it there whichever way OneKey behaves; a
+        # finished walk asks for nothing more.
+        if reposition:
+            self._population_packet(
+                {
+                    **request,
+                    "transactionUniqueIdentifier": transaction_id,
+                    "transactionPacketIdentifier": received,
+                }
+            )
         return recovered
+
+    @staticmethod
+    def _check_total(envelope: dict, yielded: int) -> None:
+        """Fail a finished walk that yielded fewer records than OneKey counted.
+
+        A packet lost without a packet number to show the gap would otherwise
+        pass as a complete population (checked on prod: full and delta walks
+        report ``totalNumberOfResults`` equal to the records sent).
+        """
+        try:
+            total = int(envelope.get("totalNumberOfResults"))
+        except (TypeError, ValueError):
+            return
+        if yielded < total:
+            raise OneKeyAPIResponseError(
+                f"OneKey population returned {yielded} of its {total} records"
+            )
 
     def close(self):
         self.session.close()

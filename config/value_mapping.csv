@@ -992,3 +992,8 @@ VAL-SST-009,substatus,RED,Reduced Activity,126870009,Reduced Activity,Reduced Ac
 VAL-SST-010,substatus,RET,Retired,126870010,Retired,Retired
 VAL-SST-011,substatus,TCL,Temporarily Closed,126870011,Temporarily Closed,Temporarily Closed
 VAL-SST-012,substatus,TIN,Temporarily Inactive,126870012,Temporarily Inactive,Temporarily Inactive
+VAL-SST-013,substatus,OOC,Out of contract,126870013,Out of contract,Not a OneKey code: the full sync's out-of-contract cleanup writes it on what it retires
+VAL-SST-N01,substatus,3,Valid,126870001,Active,OneKey statusCode 3=Valid when stateCode is blank
+VAL-SST-N02,substatus,9,Invalid,126870005,Inactive,OneKey statusCode 9=Invalid when stateCode is blank
+VAL-SST-N03,substatus,1,Created,126870005,Inactive,OneKey statusCode 1=Created when stateCode is blank (Inactive as statecode)
+VAL-SST-N04,substatus,6,Deceased,126870003,Deceased,OneKey statusCode 6=Deceased when stateCode is blank

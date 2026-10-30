@@ -639,3 +639,12 @@ def test_a_queue_part_ends_the_job_name():
     name = dataverse.created[0][1]["ts_name"]
     assert name.endswith(" run=full-20261101T000000Z-7 part=3")
     assert run_id_of({"ts_name": name}) == "full-20261101T000000Z-7"
+
+
+def test_a_date_with_an_offset_is_stored_in_utc():
+    # "...-05:00" became "...-05:00Z", and the job row failed to create.
+    from integration.job_trace import as_dataverse_datetime
+    assert as_dataverse_datetime("2026-10-01T00:00:00-05:00") == "2026-10-01T05:00:00Z"
+    assert as_dataverse_datetime("2026-10-01") == "2026-10-01T00:00:00Z"
+    assert as_dataverse_datetime("2026-10-01T08:30:00Z") == "2026-10-01T08:30:00Z"
+    assert as_dataverse_datetime("yesterday") is None

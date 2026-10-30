@@ -892,7 +892,9 @@ class TransformEngine:
         rule = mapping.transform_rule or "direct"
         
         if rule == "direct":
-            return value
+            # A mapped default (AFF-005 isMainActivity FALSE) when OneKey leaves
+            # the value out, as map: and coalesce: rules do.
+            return value if value is not None else mapping.default_value
         
         if rule.startswith("coalesce:"):
             if value is not None and (not isinstance(value, str) or value.strip()):

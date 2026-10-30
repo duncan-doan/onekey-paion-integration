@@ -43,8 +43,8 @@ A scheduled retry message looks like:
 | Field | Meaning |
 | --- | --- |
 | `mode` | `full`, `retry` or `delta`, matching the queue. May be left out; the queue supplies it. A message on another mode's queue goes to the poison queue. |
-| `codebase` | One OneKey territory. |
-| `date_to` | Leave `null`. The delta reads changes up to the moment it runs. Set it only to replay an old window by hand (delta only). |
+| `codebase` | One OneKey territory of three capital letters, such as `WUK`. Anything else goes to the poison queue at once. |
+| `date_to` | Leave `null`. The delta reads changes up to the moment it runs. Set it only to replay an old window by hand (delta only), as an ISO date or date-time; anything else goes to the poison queue at once. |
 | `retry_limit` | Pending failures one retry replays. |
 | `choices` | `false` when the timer already synced the choice options. Defaults to `true`. The retry passes it on to the delta it queues. |
 | `run_id`, `enqueued_at` | Set by the timer: the run the message belongs to (e.g. `delta-20261012T000001Z-7`, ending in the number of countries queued) and when it was queued (UTC). The retry passes them on to its delta. Leave them out of manual messages. `scripts/sync_run_report.py` uses them to report how long a run took (see [QUEUE_ARCHITECTURE.md](QUEUE_ARCHITECTURE.md#how-long-a-run-took)). |
@@ -59,7 +59,11 @@ stopped reading at the earlier of `ts_watermarkto` (its window end) and
 `ts_startedon`; the latest such end among recent jobs wins. A message that waited
 in the queue, or failed and came back, therefore leaves no gap: the next delta
 starts from the end it actually read, not from when it ran. A manual replay of
-an old window does not move the next window either.
+an old window does not move the next window either, and neither does a manual
+delta for a later period: the days between were never read, so the next delta
+reads them. A job whose only errors are a picklist failure or an
+out-of-contract cleanup held back by `SYNC_CONTRACT_CLEANUP_MAX_PERCENT` still
+covered its window.
 
 A country with no such job yet (newly added to `ONEKEY_CODBASE`, or whose
 earlier runs all failed) gets a **full sync instead of its delta**, so its
@@ -220,7 +224,7 @@ visible before the first run. Azure always poisons a message into
 | Delta fails | Raises; Azure retries after 30 minutes, up to 5 deliveries. |
 | Retry fails | Retries once, and the delta waits. On the second failed delivery it goes to `onekey-retry-poison` and the delta is queued anyway; the failure rows stay Pending for the next retry. |
 | Full sync fails | Retries once. On the second failed delivery it goes to `onekey-full-poison`, because every retry restarts hours of work. A busy delivery (below) counts as a delivery. |
-| Another live job is syncing the same codebase | Retry or delta: skipped and completed, and a skipped retry queues no delta, since the next delta starts where the last covering job stopped. Full: deferred; Azure retries after 30 minutes. |
+| A live job is syncing the same codebase | Retry or delta: skipped and completed, and a skipped retry queues no delta, since the next delta starts where the last covering job stopped. Full: deferred; Azure retries after 30 minutes. A live job of the same message defers any mode, so a delivery that comes back after its worker was killed does not drop the work. |
 
 A job counts as live while its `ts_integrationjob` row is Running and its
 `ts_lastheartbeat` is under 20 minutes old. A running job refreshes the
@@ -228,7 +232,9 @@ heartbeat at most every 5 minutes, after any OneKey or Dataverse request and
 during OneKey retry waits, so a long phase stays live. Dataverse retry waits
 are capped at 5 minutes, so even a throttled request goes no more than about
 18 minutes between heartbeats. A run killed by a restart stays Running, but its
-heartbeat stops, so it blocks nothing after 20 minutes. Its failure rows become
+heartbeat stops, so it blocks nothing after 20 minutes. Its message comes back
+about 10 minutes after the worker stopped, is deferred while the job still looks
+live, and the next delivery marks it Abandoned and takes over. Its failure rows become
 retryable after an hour.
 
 ## 3. App settings

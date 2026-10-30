@@ -22,10 +22,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,7 +38,9 @@ from integration import (
     MappingValidator,
 )
 from integration.job_trace import TRIGGER_BY_NAME
-from integration.env import REPO_ROOT, load_env
+from integration.retry_sync import resolve_pending_for_ids
+from integration.scheduled_sync import delta_window
+from integration.env import load_env
 
 
 def parse_args():
@@ -72,7 +73,7 @@ def parse_args():
 
     parser.add_argument(
         "--date-from",
-        help="Start date for delta sync (ISO: YYYY-MM-DD). Defaults to watermark or yesterday.",
+        help="Start date for delta sync (ISO: YYYY-MM-DD). Defaults to where the last covering Full or Delta jobs stopped reading, as the scheduler does (yesterday in a dry run).",
     )
     parser.add_argument(
         "--date-to",
@@ -141,12 +142,6 @@ def parse_args():
         "--config-dir",
         help="Path to config directory with CSV mapping files",
     )
-    parser.add_argument(
-        "--watermark-dir",
-        type=Path,
-        default=REPO_ROOT / "logs",
-        help="Directory for delta watermarks (default: logs/)",
-    )
 
     parser.add_argument(
         "--trigger",
@@ -166,38 +161,6 @@ def parse_args():
     )
 
     return parser.parse_args()
-
-
-def _watermark_path(directory: Path, codebase: str) -> Path:
-    return Path(directory) / f"sync_watermark_{codebase.upper()}.json"
-
-
-def load_watermark(directory: Path, codebase: str) -> str | None:
-    path = _watermark_path(directory, codebase)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("date_to")
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def save_watermark(directory: Path, codebase: str, date_to: str) -> None:
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = _watermark_path(directory, codebase)
-    path.write_text(
-        json.dumps(
-            {
-                "codbase": codebase.upper(),
-                "date_to": date_to,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
 
 
 class MockDataverse:
@@ -311,19 +274,17 @@ def main():
         if args.delta:
             date_from = args.date_from
             date_to = args.date_to or datetime.now().strftime("%Y-%m-%d")
-            if not date_from:
-                # Prefer earliest watermark across codebases, else yesterday − 1h overlap.
-                marks = [
-                    load_watermark(args.watermark_dir, cb) for cb in codebases
-                ]
-                marks = [m for m in marks if m]
-                if marks:
-                    date_from = min(marks)
-                    # 1-hour overlap: rewind calendar day if time present, else keep date.
-                    logger.info("Using watermark date_from=%s", date_from)
-                else:
-                    yesterday = datetime.now() - timedelta(days=1)
-                    date_from = yesterday.strftime("%Y-%m-%d")
+            if not date_from and not args.dry_run:
+                # Where the scheduler would start: the end of the windows the
+                # jobs read without a gap. A local file or "yesterday" could
+                # move past days nobody read. Several countries start at the
+                # earliest of theirs; reading an overlap again is safe.
+                date_from = min(delta_window(dataverse, [cb])[0] for cb in codebases)
+                logger.info("Delta starts where the last covering jobs stopped: %s", date_from)
+            elif not date_from:
+                # A dry run has no Dataverse to read the jobs from.
+                yesterday = datetime.now() - timedelta(days=1)
+                date_from = yesterday.strftime("%Y-%m-%d")
 
             logger.info("Starting delta sync: %s to %s", date_from, date_to)
             result = engine.sync_delta(
@@ -339,9 +300,6 @@ def main():
                 sync_activity_affiliations=sync_activity_affiliations,
                 sync_picklists=sync_picklists,
             )
-            if result.get("success") and not args.dry_run:
-                for cb in codebases:
-                    save_watermark(args.watermark_dir, cb, date_to)
         else:
             if args.affiliations_only:
                 logger.info(
@@ -367,6 +325,16 @@ def main():
                     sync_activity_affiliations=sync_activity_affiliations,
                     sync_picklists=sync_picklists,
                 )
+
+        # As the scheduled runs do: pending failures of IDs this run wrote are
+        # resolved, unless it paused (the part that finishes resolves them).
+        if result.get("success") and not result.get("paused") and not args.dry_run:
+            resolved = resolve_pending_for_ids(
+                engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid,
+                succeeded_records=engine.succeeded_records,
+                failed_records=engine.tracer.recent_failures,
+            )
+            logger.info("Pending failures resolved by this run: %d", resolved)
 
         print("\n" + "=" * 60)
         print("SYNC SUMMARY")

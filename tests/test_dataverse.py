@@ -1726,3 +1726,65 @@ def test_a_token_endpoint_that_stays_down_fails_after_the_last_attempt(monkeypat
     with pytest.raises(DataverseAuthError, match="Could not reach"):
         auth_module.get_access_token("tenant", "c", "s", "scope")
     assert len(calls) == 4
+
+
+def test_a_key_stored_in_another_case_is_updated_not_created_again():
+    # Dataverse's filter matched the stored "a " but the lookup keyed it by
+    # that text, so "A" looked missing and was created a second time.
+    client = make_client([
+        FakeResponse(200, {"value": [{"accountnumber": "a ", "accountid": GUID_1}]}),
+        FakeResponse(204),  # UpdateMultiple
+    ])
+    results = client.bulk_upsert_by_field("accounts", "accountnumber", [{"accountnumber": "A", "name": "a"}])
+    assert results == [("A", GUID_1, False)]
+    assert not any("CreateMultiple" in call["url"] for call in client._session.calls)
+
+
+def test_a_create_that_finds_the_record_still_clears_its_lookup(no_sleep):
+    # The create form drops a cleared lookup; the fallback found the record and
+    # updated it with that form, so the lookup kept its old value.
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # not there yet
+        FakeResponse(400, {"error": {"message": "rejected"}}),  # CreateMultiple
+        FakeResponse(200, {"value": [{"contactid": GUID_1}]}),  # there now
+        FakeResponse(204),  # PATCH
+    ])
+    client.bulk_upsert_by_field(
+        "contacts", "ts_externalid", [{"ts_externalid": "A", "lastname": "Doe", "ts_Hospital@odata.bind": None}]
+    )
+    patch = client._session.calls[-1]
+    assert patch["method"] == "PATCH" and patch["json"]["ts_Hospital"] is None
+
+
+def test_a_create_refused_as_a_duplicate_key_is_taken_as_landed():
+    client = make_client([
+        FakeResponse(200, {"value": []}),  # find_one: not visible yet
+        FakeResponse(412, {"error": {"code": "0x80060892", "message": "A record with matching key values already exists."}}),
+        FakeResponse(200, {"value": [{"contactid": GUID_1}]}),  # find_one: there
+        FakeResponse(204),  # PATCH
+    ])
+    payload = {"ts_externalid": "A", "ts_Hospital@odata.bind": None}  # the hospital is gone
+    assert client.upsert_by_field("contacts", "ts_externalid", "A", payload) == (GUID_1, True)
+    patch = client._session.calls[-1]
+    # The update clears the lookup the create form had left out.
+    assert patch["method"] == "PATCH" and patch["json"]["ts_Hospital"] is None
+
+
+def test_an_unreadable_batch_part_keeps_the_others_in_place():
+    from dataverse.client import _parse_batch_response
+    response = batch_response((204, GUID_1, None), (204, GUID_2, None))
+    garbled = response.text.replace("HTTP/1.1 204 No Content", "garbled", 1)
+    parsed = _parse_batch_response(FakeResponse(200, headers=response.headers, text=garbled))
+    assert [entity_id for _, entity_id, _ in parsed] == [None, GUID_2]
+
+
+def test_an_error_body_that_is_not_an_object_still_raises_the_http_error():
+    client = make_client([FakeResponse(400, ["unexpected"])])
+    with pytest.raises(DataverseHTTPError, match="HTTP 400"):
+        client.retrieve_multiple("accounts")
+
+
+def test_a_token_body_that_is_not_an_object_is_an_auth_error(monkeypatch):
+    auth_module, _ = _token_endpoint(monkeypatch, [FakeResponse(200, ["unexpected"])])
+    with pytest.raises(DataverseAuthError, match="unexpected JSON"):
+        auth_module.get_access_token("tenant", "c", "s", "scope")

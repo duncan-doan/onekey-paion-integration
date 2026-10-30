@@ -188,17 +188,40 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def as_dataverse_datetime(value: str | None) -> str | None:
-    if not value:
-        return None
-    text = str(value).strip()
+def parse_utc(value: object) -> datetime | None:
+    """An ISO date or date-time (``Z`` or an offset), aware; naive is taken as UTC.
+
+    None for an empty or unparsable value. The one parser for job rows, queue
+    messages and windows, so what a queue message passes the job row keeps.
+    """
+    text = str(value or "").strip()
     if not text:
         return None
-    if "T" not in text:
-        return f"{text}T00:00:00Z"
-    if text.endswith("Z") or "+" in text[10:]:
-        return text
-    return text + "Z"
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def as_dataverse_datetime(value: str | None) -> str | None:
+    """An ISO date or date-time as UTC ``YYYY-MM-DDTHH:MM:SSZ``, or None.
+
+    An offset such as -05:00 is converted (appending a Z to it made the job
+    row fail to create); a date-time without one is taken as UTC.
+    """
+    moment = parse_utc(value)
+    if moment is None:
+        if str(value or "").strip():
+            logger.warning("Not an ISO date or date-time, left off the job: %r", value)
+        return None
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Errors that do not stop a job from covering its window: a picklist sync
+# that failed (the HCO/HCP phases still ran) and an out-of-contract cleanup
+# held back by its limit (the walk and the writes finished).
+TOLERATED_ERROR_PREFIXES = ("picklists:", "contract cleanup:")
 
 
 def run_marker(run_id: str) -> str:
@@ -308,10 +331,14 @@ def error_summary(results: dict | None, aborted: bool = False) -> str | None:
             text = str(err).strip()
             if text and text not in parts:
                 parts.append(text)
-    if aborted and not parts:
-        parts.append("Sync stopped before completion")
+    if aborted:
+        # First, always: with a tolerated error alone the job would read as
+        # covering its window (scheduled_sync.covered_window).
+        parts.insert(0, "Sync stopped before completion")
     if not parts:
         return None
+    # Tolerated errors last, so the clip cannot leave one standing alone.
+    parts.sort(key=lambda part: part.startswith(TOLERATED_ERROR_PREFIXES))
     return clip(" | ".join(parts), 2000)
 
 

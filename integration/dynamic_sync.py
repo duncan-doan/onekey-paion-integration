@@ -70,7 +70,8 @@ _EMPTY_HIERARCHY = {
     "unlinked": 0,
 }
 # Out-of-contract cleanup: records deactivated and lookups cleared, by kind;
-# ``written`` counts the PATCHes, one per record.
+# ``marked`` counts records already inactive that took the out-of-contract
+# substatus, and ``written`` the PATCHes, one per record.
 _EMPTY_CONTRACT = {
     "accounts": 0,
     "contacts": 0,
@@ -78,9 +79,14 @@ _EMPTY_CONTRACT = {
     "placements": 0,
     "parents": 0,
     "roles": 0,
+    "marked": 0,
     "written": 0,
     "failed": 0,
 }
+# The value_mapping.csv substatus code the out-of-contract cleanup writes on
+# the accounts and contacts it retires. OneKey never sends it, so it tells a
+# retired record from one OneKey itself closed: both are inactive.
+OUT_OF_CONTRACT_SUBSTATUS = "OOC"
 
 
 class SyncPaused(RuntimeError):
@@ -127,8 +133,9 @@ def _operation(created: bool, unchanged: bool) -> str:
 def main_activity_by_individual(activity_records, active=None) -> dict[str, dict]:
     """One ACTIVITY per individual: the first marked ``isMainActivity``, else the first.
 
-    ``active`` (activity dict -> bool) leaves out inactive activities, so an
-    individual with only inactive ones is missing from the result. The full
+    ``active`` (activity dict -> bool) leaves out the activities it rejects, so
+    an individual with none left is missing from the result. Of several, the
+    lowest activityEid wins, whatever order OneKey sent them in. The full
     sync and the delta both pick a contact's activity with this, so they
     agree on which workplace is its parent.
     """
@@ -139,12 +146,24 @@ def main_activity_by_individual(activity_records, active=None) -> dict[str, dict
         if not individual_eid or (active is not None and not active(activity)):
             continue
         existing = picked.get(individual_eid)
-        if existing is None or (
-            activity.get("isMainActivity")
-            and not (existing.get("activity") or {}).get("isMainActivity")
-        ):
+        if existing is None or _activity_rank(record) < _activity_rank(existing):
             picked[individual_eid] = record
     return picked
+
+
+def _activity_rank(record: dict) -> tuple[bool, str]:
+    activity = record.get("activity") or {}
+    return (not activity.get("isMainActivity"), str(activity.get("activityEid") or ""))
+
+
+def _unique_workplaces(records: list[dict]) -> list[dict]:
+    """One record per workplaceEid, the last OneKey sent: a repeated workplace
+    would number its addresses twice (address_rows)."""
+    by_eid: dict[str, dict] = {}
+    for record in records:
+        eid = workplace_eid_from_record(record)
+        by_eid[str(eid) if eid else f"no-id-{id(record)}"] = record
+    return list(by_eid.values())
 
 
 def _empty_hierarchy_stats() -> dict:
@@ -209,6 +228,11 @@ class DynamicSyncEngine:
 
         # Cache for account lookups (workplaceEid -> accountid)
         self._account_cache: dict[str, str] = {}
+        # Accounts and contacts the lookups found retired by
+        # _retire_out_of_contract (_retired). A partial run does not take them
+        # as contracted; one OneKey itself made inactive still is.
+        self._retired_account_eids: set[str] = set()
+        self._retired_contact_eids: set[str] = set()
         # Contracted workplace EIDs from the latest refreshMyOnekey extract
         self._contracted_workplace_eids: set[str] = set()
         self._contracted_individual_eids: set[str] = set()
@@ -241,7 +265,9 @@ class DynamicSyncEngine:
         An inactive activity places no contact (department, hospital, group)
         and gives no level. A missing or unknown code counts as active.
         """
-        return self.config.get_value("statecode", activity.get("stateCode")) != "1"
+        # The same code AFF-018 writes: stateCode, else statusCode.
+        state = activity.get("stateCode") or activity.get("statusCode")
+        return self.config.get_value("statecode", state) != "1"
 
     def _check_deadline(
         self, before: str, phase: str | None = None, stats: dict | None = None
@@ -628,13 +654,13 @@ class DynamicSyncEngine:
 
                     if not hco_only:
                         if packets is not None:
-                            composed, stats = self._compose_population_hcps(*packets)
+                            composed, stats, update_only = self._compose_population_hcps(*packets)
                             activity_packets = packets[2]
                             logger.info(
                                 msg("HCP rows composed", _ctx(self, codbase=codebase), **stats)
                             )
                         else:
-                            composed, activity_packets = self._collect_population_hcps(
+                            composed, activity_packets, update_only = self._collect_population_hcps(
                                 codebase, max_records=max_records
                             )
                         hcp_result = self._sync_hcps(
@@ -642,6 +668,7 @@ class DynamicSyncEngine:
                             max_records=max_records,
                             dry_run=dry_run,
                             composed=composed,
+                            update_only=update_only,
                         )
                         self._merge_entity(results["contacts"], hcp_result)
                         self._checkpoint(results)
@@ -854,7 +881,7 @@ class DynamicSyncEngine:
                 individuals.append(record)
             elif entity_type == "ACTIVITY":
                 activities.append(record)
-        return workplaces, individuals, activities
+        return _unique_workplaces(workplaces), individuals, activities
 
     def _collect_population_packets(
         self,
@@ -907,12 +934,12 @@ class DynamicSyncEngine:
             for record in individual_records
             if (eid := individual_eid_from_record(record))
         }
-        if not workplaces or not people:
+        if not workplaces or not people or not activity_records:
             return None
         individuals = {
             eid
             for eid, person in people.items()
-            if self.config.get_value("statecode", person.get("stateCode")) != "1"
+            if self.config.get_value("statecode", person.get("stateCode") or person.get("statusCode")) != "1"
         }
 
         allowed = set(workplaces)
@@ -936,7 +963,8 @@ class DynamicSyncEngine:
             manager = (workplaces.get(workplace_eid) or {}).get(
                 "managerWorkplaceEid"
             )
-            if manager and str(manager) in workplaces:
+            # A workplace that manages itself has no parent.
+            if manager and str(manager) in workplaces and str(manager) != workplace_eid:
                 return str(manager)
             hie = latest_hie.get(workplace_eid)
             if not hie:
@@ -954,7 +982,9 @@ class DynamicSyncEngine:
                 levels[workplace_eid] = max(level, levels.get(workplace_eid, 0))
 
         for individual_eid, record in main_activity_by_individual(
-            activity_records, active=self._active_activity
+            activity_records,
+            active=lambda activity: self._active_activity(activity)
+            and str(activity.get("workplaceEid")) in workplaces,
         ).items():
             activity = record.get("activity") or {}
             department = activity.get("workplaceEid")
@@ -1375,6 +1405,8 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._account_cache[workplace_eid] = account_id
+                # Written from OneKey: in the contract, with OneKey's substatus.
+                self._retired_account_eids.discard(str(workplace_eid))
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -1634,6 +1666,7 @@ class DynamicSyncEngine:
             for (eid, row_id), (status, _, error) in zip(steps, outcomes):
                 # 404 on a delete: a stopped run deleted it already.
                 if status is not None and (status < 300 or (method == "DELETE" and status == 404)):
+                    self.records_written += 1
                     continue
                 failed.append((eid, row_id))
                 if report:
@@ -2338,7 +2371,7 @@ class DynamicSyncEngine:
                         str(match).split(" - ")[0],
                         "upsert",
                         str(rejected.get(match) or "Dataverse rejected the role row"),
-                        external_id=match,
+                        external_id=str(match).split(" - ")[0],
                         exc=rejected.get(match),
                     )
                     continue
@@ -2491,11 +2524,11 @@ class DynamicSyncEngine:
         max_records: int = None,
         date_from: str = None,
         date_to: str = None,
-    ) -> tuple[list[dict], list[dict]]:
+    ) -> tuple[list[dict], list[dict], set[str]]:
         """Collect HCP contact rows + all ACTIVITY packets from population.
 
         Returns:
-            ``(composed_hcp_rows, all_activity_packets)``
+            ``(composed_hcp_rows, all_activity_packets, update_only)``
 
         Contact composition keeps one ACTIVITY per individual (prefer
         ``isMainActivity``). Affiliation sync uses ``all_activity_packets``.
@@ -2509,19 +2542,23 @@ class DynamicSyncEngine:
                 date_to=date_to,
             )
         )
-        composed, stats = self._compose_population_hcps(workplaces, individuals, activities)
+        composed, stats, update_only = self._compose_population_hcps(workplaces, individuals, activities)
         self.sync_logger.phase_finished(
             "extract", started, stats, codbase=codebase, entity="hcp"
         )
-        return composed, activities
+        return composed, activities, update_only
 
     def _compose_population_hcps(
         self,
         workplace_records: list[dict],
         individual_records: list[dict],
         activity_records: list[dict],
-    ) -> tuple[list[dict], dict]:
-        """Join population packets into HCP contact rows; return them and the counts."""
+    ) -> tuple[list[dict], dict, set[str]]:
+        """Join population packets into HCP contact rows.
+
+        Returns the rows, the counts, and the individuals whose contact may only
+        be updated, never created (no activity in the walk).
+        """
         workplaces: dict[str, dict] = {}
         for record in workplace_records:
             workplace_eid = (record.get("workplace") or {}).get("workplaceEid")
@@ -2532,37 +2569,37 @@ class DynamicSyncEngine:
             individual_eid = (record.get("individual") or {}).get("individualEid")
             if individual_eid:
                 individuals[individual_eid] = record
-        activities_by_individual = main_activity_by_individual(activity_records)
-        # An inactive activity places no contact: an individual with only
-        # inactive ones is still written, its department, hospital and group
-        # left as they are.
-        placing = main_activity_by_individual(activity_records, active=self._active_activity)
+        # A contact is placed by an active activity at a workplace in the walk,
+        # its main one first. An individual with activities in the walk but
+        # none active is still written, its department, hospital and group left
+        # as they are. One with no activity in the walk is written the same way
+        # but only if its contact exists: only an activity at a contracted
+        # workplace creates a contact, as in a delta.
+        placing = main_activity_by_individual(
+            activity_records,
+            active=lambda activity: activity.get("workplaceEid") in workplaces
+            and self._active_activity(activity),
+        )
+        with_activity: set[str] = set()
+        in_walk: set[str] = set()
+        for record in activity_records:
+            activity = record.get("activity") or {}
+            if activity.get("individualEid"):
+                with_activity.add(activity["individualEid"])
+                if activity.get("workplaceEid") in workplaces:
+                    in_walk.add(activity["individualEid"])
 
         composed = []
-        skipped_unjoined = 0
-        for individual_eid, any_state_record in activities_by_individual.items():
+        update_only: set[str] = set()
+        skipped_unjoined = sum(1 for eid in with_activity if eid not in individuals)
+        for individual_eid, individual_record in individuals.items():
             activity_record = placing.get(individual_eid)
-            activity = (activity_record or any_state_record).get("activity") or {}
-            workplace_eid = activity.get("workplaceEid")
-            # Only process IDs present in refreshMyOnekey packets — do not
-            # fall back to search/get_by_id for missing workplace/individual.
-            if individual_eid not in individuals:
-                skipped_unjoined += 1
-                continue
-            if workplace_eid and workplace_eid not in workplaces:
-                skipped_unjoined += 1
-                logger.debug(
-                    "Activity skipped, workplace outside contracted population: "
-                    "individual=%s workplace=%s | job=%s",
-                    individual_eid, workplace_eid, short_job(self.tracer.job_id),
-                )
-                continue
-            if not workplace_eid:
-                skipped_unjoined += 1
-                continue
+            if activity_record is None and individual_eid not in in_walk:
+                update_only.add(individual_eid)
+            workplace_eid = ((activity_record or {}).get("activity") or {}).get("workplaceEid")
             composed.append(
                 compose_hcp_result(
-                    individuals.get(individual_eid),
+                    individual_record,
                     activity_record,
                     workplaces.get(workplace_eid) if activity_record else None,
                 )
@@ -2574,12 +2611,13 @@ class DynamicSyncEngine:
         stats = {
             "hcps": len(composed),
             "individuals": len(individuals),
-            "main_activities": len(activities_by_individual),
+            "main_activities": len(with_activity),  # one per individual with an activity
             "activity_packets": len(activity_records),
             "workplaces": len(workplaces),
             "skipped_out_of_contract": skipped_unjoined,
+            "update_only": len(update_only),
         }
-        return composed, stats
+        return composed, stats, update_only
 
     def _compose_delta_hcps(
         self,
@@ -2634,7 +2672,8 @@ class DynamicSyncEngine:
             activity = (activity_record or {}).get("activity") or {}
             workplace_eid = activity.get("workplaceEid")
             known_workplace = bool(workplace_eid) and (
-                workplace_eid in workplace_index or workplace_eid in self._account_cache
+                workplace_eid in workplace_index
+                or (workplace_eid in self._account_cache and workplace_eid not in self._retired_account_eids)
             )
             if not (dry_run or individual_eid in self._contact_cache or known_workplace):
                 left_out += 1
@@ -2658,6 +2697,7 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
+        update_only: set[str] | None = None,
     ) -> dict:
         with self._phase(PHASE_HCP, "contacts", codbase=codebase) as phase:
             phase["stats"] = self._sync_hcps_impl(
@@ -2668,6 +2708,7 @@ class DynamicSyncEngine:
                 date_to=date_to,
                 composed=composed,
                 partial=partial,
+                update_only=update_only,
             )
             return phase["stats"]
 
@@ -2680,18 +2721,21 @@ class DynamicSyncEngine:
         date_to: str = None,
         composed: list[dict] | None = None,
         partial: set[str] | None = None,
+        update_only: set[str] | None = None,
     ) -> dict:
         """Sync HCPs for a single codebase using bulk upserts.
 
         ``partial`` holds individuals whose row leaves out the parent or the
         department (a delta, see _compose_delta_hcps). Writing them does not
         resolve their pending failures: what failed may be the part left out.
+        ``update_only`` holds individuals whose contact is written only if it
+        exists (no activity in the walk).
         """
 
         result = _empty_entity_stats()
 
         if composed is None:
-            composed, _activity_packets = self._collect_population_hcps(
+            composed, _activity_packets, update_only = self._collect_population_hcps(
                 codebase,
                 max_records=max_records,
                 date_from=date_from,
@@ -2744,6 +2788,7 @@ class DynamicSyncEngine:
 
         total = len(flattened)
         prepared = []
+        unplaced: set[str] = set()
 
         for i, hcp in enumerate(flattened, 1):
             individual_eid = hcp.get("individualEid")
@@ -2780,6 +2825,12 @@ class DynamicSyncEngine:
                     self.sync_logger.log_orphan_contact(individual_eid, workplace_eid)
 
             hospital_known, hospital_id = hospitals[individual_eid]
+            if workplace_eid and not account_id:
+                # Its department account is missing (or failed this run):
+                # placing only the hospital and group would describe a
+                # workplace the contact is not linked to.
+                hospital_known, hospital_id = False, None
+                unplaced.add(individual_eid)
             payload = self.transformer.transform_hcp(
                 hcp,
                 account_id=account_id,
@@ -2818,11 +2869,25 @@ class DynamicSyncEngine:
 
         key_name = prepared[0][1]
         done = 0
-        for batch in chunked(prepared, self.bulk_batch_size):
+        update_only = update_only or set()
+        # Not resolving their pending failures: part of the row was left out.
+        open_failures = set(partial or ()) | unplaced | update_only
+        groups_of_rows = (
+            [row for row in prepared if row[0] not in update_only],
+            [row for row in prepared if row[0] in update_only],
+        )
+        batches = [
+            (batch, only)
+            for rows, only in zip(groups_of_rows, (False, True))
+            for batch in chunked(rows, self.bulk_batch_size)
+        ]
+        for batch, only in batches:
             self._check_deadline("contacts", "contacts", result)
             payloads = [item[2] for item in batch]
             try:
-                bulk_results, rejected, unchanged = self._bulk_upsert("contacts", key_name, payloads)
+                bulk_results, rejected, unchanged = self._bulk_upsert(
+                    "contacts", key_name, payloads, update_only=only
+                )
             except Exception as e:
                 result["failed"] += len(batch)
                 for individual_eid, _, payload, _ in batch:
@@ -2840,6 +2905,8 @@ class DynamicSyncEngine:
                 batch, bulk_results
             ):
                 if not contact_id:
+                    if only and match not in rejected:
+                        continue  # no contact to update, and none is created
                     error = rejected.get(match)
                     result["failed"] += 1
                     self._fail(
@@ -2852,6 +2919,7 @@ class DynamicSyncEngine:
                     )
                     continue
                 self._contact_cache[str(individual_eid)] = contact_id
+                self._retired_contact_eids.discard(str(individual_eid))
                 if created:
                     result["created"] += 1
                 elif match in unchanged:
@@ -2860,7 +2928,7 @@ class DynamicSyncEngine:
                     result["updated"] += 1
                 result["processed"] += 1
                 done += 1
-                if individual_eid not in (partial or ()):
+                if individual_eid not in open_failures:
                     self._note_success(
                         individual_eid, entity="contact", external_id=payload.get(key_name)
                     )
@@ -2933,6 +3001,7 @@ class DynamicSyncEngine:
             elif entity_type == "ACTIVITY":
                 all_activities.append(record)
 
+        workplaces = _unique_workplaces(workplaces)
         activities_by_individual = main_activity_by_individual(
             all_activities, active=self._active_activity
         )
@@ -3070,12 +3139,14 @@ class DynamicSyncEngine:
                     "contacts",
                     field_name,
                     needed,
-                    select=[field_name, "contactid"],
+                    select=[field_name, "contactid", "statecode", "ts_substatus"],
                 )
                 for match_value, row in rows.items():
                     contact_id = row.get("contactid")
                     if contact_id:
                         self._contact_cache[str(match_value)] = contact_id
+                        if self._retired(row):
+                            self._retired_contact_eids.add(str(match_value))
             else:
                 for eid in needed:
                     record = self.dataverse.find_one(
@@ -3111,20 +3182,25 @@ class DynamicSyncEngine:
         to one that did not, such as a new activity at an existing workplace,
         would be dropped as outside the contract. Accounts and contacts are
         loaded only from the contracted population, so one that exists is in
-        it. Returns the workplace EIDs it added.
+        it, unless the out-of-contract cleanup retired it (_retired). Returns
+        the workplace EIDs it added.
         """
         wanted = {
             str(eid) for eid in workplace_eids
             if eid and str(eid) not in self._contracted_workplace_eids
         }
-        admitted = set(self._lookup_accounts_bulk(wanted)) if wanted else set()
+        admitted = (
+            set(self._lookup_accounts_bulk(wanted)) - self._retired_account_eids if wanted else set()
+        )
         self._contracted_workplace_eids |= admitted
         wanted = {
             str(eid) for eid in individual_eids
             if eid and str(eid) not in self._contracted_individual_eids
         }
         if wanted:
-            self._contracted_individual_eids |= set(self._lookup_contacts_bulk(wanted))
+            self._contracted_individual_eids |= (
+                set(self._lookup_contacts_bulk(wanted)) - self._retired_contact_eids
+            )
         return admitted
 
     def _keep_existing_nameless_names(self, prepared: list[tuple]) -> None:
@@ -3150,6 +3226,20 @@ class DynamicSyncEngine:
             if workplace_eid in existing:
                 payload.pop("name", None)
 
+    def _out_of_contract_substatus(self) -> int | None:
+        """The ts_substatus option of OUT_OF_CONTRACT_SUBSTATUS, or None when unmapped."""
+        value = str(self.config.get_value("substatus", OUT_OF_CONTRACT_SUBSTATUS) or "").strip()
+        return int(value) if value.isdigit() else None
+
+    def _retired(self, row: dict) -> bool:
+        """Whether an account or contact row is one _retire_out_of_contract retired.
+
+        Inactive alone is not enough: OneKey closes records that stay in the
+        contract, and the full sync writes them inactive too.
+        """
+        marker = self._out_of_contract_substatus()
+        return marker is not None and row.get("statecode") == 1 and row.get("ts_substatus") == marker
+
     def _hospital_of(self, hcp: dict, parent_accounts: dict) -> tuple[bool, str | None]:
         """Return ``(known, hospital account id)`` for one contact row.
 
@@ -3158,11 +3248,16 @@ class DynamicSyncEngine:
         workplace without a parent account gives ``(True, None)``, which
         clears it; an unknown one ``(False, None)``, which leaves it as it is.
         After a complete walk, a parent outside the contract counts as none:
-        _retire_out_of_contract deactivates its account.
+        _retire_out_of_contract deactivates its account. So does one it
+        retired before. A parent OneKey made inactive is still the hospital.
         """
         if hcp.get("workplaceLoaded"):
             manager = hcp.get("hospitalWorkplaceEid") or ""
-            if not self._partial_population and manager not in self._contracted_workplace_eids:
+            if (
+                manager == (hcp.get("workplaceEid") or "")  # manages itself: no parent
+                or manager in self._retired_account_eids
+                or (not self._partial_population and manager not in self._contracted_workplace_eids)
+            ):
                 return True, None
             return True, self._account_cache.get(manager)
         workplace_eid = hcp.get("workplaceEid")
@@ -3232,12 +3327,18 @@ class DynamicSyncEngine:
         cannot clear parentaccountid (HTTP 400, dev 2026-10-23), so the clears
         are PATCHes in a $batch. Returns ``(cleared, failed)``.
         """
+        complete = not self._partial_population and allow is not None
         orphans = sorted({
             str(hco["workplaceEid"])
             for hco in hcos
             if hco.get("workplaceEid")
-            and not hco.get("parentWorkplaceEid")
             and (allow is None or hco["workplaceEid"] in allow)
+            and (
+                not hco.get("parentWorkplaceEid")
+                or str(hco["parentWorkplaceEid"]) == str(hco["workplaceEid"])
+                # The hierarchy phase will not link a manager outside the contract.
+                or (complete and str(hco["parentWorkplaceEid"]) not in allow)
+            )
         })
         if not orphans:
             return 0, 0
@@ -3257,6 +3358,7 @@ class DynamicSyncEngine:
             for (eid, _), (status, _, error) in zip(chunk, outcomes):
                 if status and status < 400:
                     cleared += 1
+                    self.records_written += 1
                 else:
                     failed += 1
                     logger.warning(msg("Parent account not cleared", _ctx(self), workplace=eid, error=str(error)[:300]))
@@ -3323,6 +3425,7 @@ class DynamicSyncEngine:
             for row, (status, _, error) in zip(chunk, outcomes):
                 if status and status < 400:
                     deactivated += 1
+                    self.records_written += 1
                 else:
                     logger.warning(msg("HCO relation not deactivated", _ctx(self), key=row.get(key), error=str(error)[:300]))
         if stale:
@@ -3345,6 +3448,11 @@ class DynamicSyncEngine:
         has. Contacts' department, hospital and group, and accounts' parent,
         that point at an out-of-contract account are cleared. Nothing is deleted: a record that comes back is written with
         its OneKey state, which reactivates it (dev 2026-10-24).
+
+        Retired accounts and contacts also take the OUT_OF_CONTRACT_SUBSTATUS
+        substatus, and so do inactive ones that left the contract, so a delta
+        tells them from records OneKey itself made inactive (_retired). The
+        OneKey write of a record that comes back replaces it.
 
         A walk that lost packets makes valid records look gone, so when more
         than ``contract_cleanup_max_percent()`` of the codebase's active
@@ -3385,12 +3493,12 @@ class DynamicSyncEngine:
         parents = any(fm.target_field == "parentaccountid" for fm in self.config.get_field_mappings("account"))
         accounts = self.dataverse.retrieve_multiple(
             "accounts",
-            select=["accountid", account_key, "statecode"] + (["_parentaccountid_value"] if parents else []),
+            select=["accountid", account_key, "statecode", "ts_substatus"] + (["_parentaccountid_value"] if parents else []),
             filter=f"startswith({account_key},'{prefix}')",
         )
         contacts = self.dataverse.retrieve_multiple(
             "contacts",
-            select=["contactid", contact_key, "statecode"] + [f"_{field}_value" for field in lookups],
+            select=["contactid", contact_key, "statecode", "ts_substatus"] + [f"_{field}_value" for field in lookups],
             filter=f"startswith({contact_key},'{prefix}')",
         )
         affiliations = self.dataverse.retrieve_multiple(
@@ -3414,17 +3522,24 @@ class DynamicSyncEngine:
             entry[0].update(body)
             entry[1].append(kind)
 
+        marker = self._out_of_contract_substatus()
+
+        def retire(path: str, row: dict, kind: str, key: str) -> None:
+            if row.get("statecode") == 0:
+                plan(path, {"statecode": 1, **({"ts_substatus": marker} if marker else {})}, kind, key)
+            elif marker and row.get("ts_substatus") != marker:
+                plan(path, {"ts_substatus": marker}, "marked", key)
+
         for row in accounts:
             key = str(row.get(account_key) or "")
             if key not in workplaces:
-                if row.get("statecode") == 0:
-                    plan(f"accounts({row['accountid']})", {"statecode": 1}, "accounts", key)
+                retire(f"accounts({row['accountid']})", row, "accounts", key)
             elif str(row.get("_parentaccountid_value") or "").lower() in gone:
                 plan(f"accounts({row['accountid']})", {"parentaccountid": None}, "parents", key)
         for row in contacts:
             key = str(row.get(contact_key) or "")
-            if key not in individuals and row.get("statecode") == 0:
-                plan(f"contacts({row['contactid']})", {"statecode": 1}, "contacts", key)
+            if key not in individuals:
+                retire(f"contacts({row['contactid']})", row, "contacts", key)
             cleared = {nav: None for field, nav in lookups.items() if str(row.get(f"_{field}_value") or "").lower() in gone}
             if cleared:
                 plan(f"contacts({row['contactid']})", cleared, "placements", key)
@@ -3456,7 +3571,7 @@ class DynamicSyncEngine:
         over = [f"{planned[kind]} of {total} active {kind}" for kind, total in active.items() if planned[kind] * 100 > limit * total]
         if over:
             error = (
-                f"{codebase}: out-of-contract cleanup skipped, it would deactivate {', '.join(over)}"
+                f"contract cleanup: {codebase} skipped, it would deactivate {', '.join(over)}"
                 f" (more than {limit:g}%, SYNC_CONTRACT_CLEANUP_MAX_PERCENT)"
             )
             logger.error(msg("Out-of-contract cleanup skipped", _ctx(self, codbase=codebase), reason=error))
@@ -3515,7 +3630,13 @@ class DynamicSyncEngine:
             self._lookup_contacts_bulk(list(moves))
             self._lookup_accounts_bulk(set(moves.values()))
             for individual, workplace in moves.items():
-                if individual in self._contact_cache and workplace in self._account_cache:
+                # As in the full sync, a retired workplace places nobody; the
+                # delta cannot see the other activities, so nothing moves.
+                if (
+                    individual in self._contact_cache
+                    and workplace in self._account_cache
+                    and workplace not in self._retired_account_eids
+                ):
                     departments[individual] = str(self._account_cache[workplace]).lower()
         applied = set(departments)
         if changed_workplace_eids:
@@ -3552,17 +3673,19 @@ class DynamicSyncEngine:
                     department, hospital, True, groups.get(hospital) if hospital else None
                 ),
             })
-        results, rejected, unchanged = self._bulk_upsert("contacts", key, payloads, update_only=True)
-        stats["processed"] = len(payloads)
-        for match, record_id, _ in results:
-            if not record_id:
-                stats["failed"] += 1
-                if match in rejected:
-                    logger.warning(msg("Contact placement not updated", _ctx(self), individual=match, error=str(rejected[match])[:300]))
-            elif match in unchanged:
-                stats["skipped"] += 1
-            else:
-                stats["updated"] += 1
+        for chunk in chunked(payloads, self.bulk_batch_size):
+            self._check_deadline("contact placement", "contacts", stats)
+            results, rejected, unchanged = self._bulk_upsert("contacts", key, chunk, update_only=True)
+            stats["processed"] += len(chunk)
+            for match, record_id, _ in results:
+                if not record_id:
+                    stats["failed"] += 1
+                    if match in rejected:
+                        logger.warning(msg("Contact placement not updated", _ctx(self), individual=match, error=str(rejected[match])[:300]))
+                elif match in unchanged:
+                    stats["skipped"] += 1
+                else:
+                    stats["updated"] += 1
         logger.info(msg("Contact placement refreshed", _ctx(self), moves=len(applied), **{k: stats[k] for k in ("processed", "updated", "skipped", "failed")}))
         return stats, applied
 
@@ -3613,12 +3736,14 @@ class DynamicSyncEngine:
                     "accounts",
                     field_name,
                     needed,
-                    select=[field_name, "accountid"],
+                    select=[field_name, "accountid", "statecode", "ts_substatus"],
                 )
                 for match_value, row in rows.items():
                     account_id = row.get("accountid")
                     if account_id:
                         self._account_cache[str(match_value)] = account_id
+                        if self._retired(row):
+                            self._retired_account_eids.add(str(match_value))
             else:
                 for eid in needed:
                     record = self.dataverse.find_one(

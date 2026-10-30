@@ -250,7 +250,7 @@ so to each worker; the timers only ever need one instance.
 | Same message | Hidden while one instance runs it |
 | Different countries | Nothing shared: accounts and contacts are keyed by OneKey ID, which carries the country (`WUKE…`, `WDEH…`); lookup rows by `{codBase}.{list}.{code}`; each retry replays only its own country's failures; choice options are synced once by the timer before enqueueing |
 | Retry and delta of one country | Chained, never queued together: the retry worker queues the delta when the retry is over |
-| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred. The message's own earlier tries do not count: a Running job of the same run and part (`part=N` ends its name), or for a delta a retry job of its run, was left by a killed delivery. The new delivery marks it **Abandoned** (ended at its last heartbeat) and takes over at once; the time budget keeps it under the 60-minute scale-in limit. Any other live job, including the next part of the same run, still counts as busy |
+| Same country twice (duplicate message, manual plus scheduled, a full still running at the next delta) | **Busy check** before the run: a Running job of that country with a heartbeat under 20 min old means a retry or delta is skipped and a full sync is deferred. The message's own earlier tries that stopped do not count: a Running job of the same run and part (`part=N` ends its name), or for a delta a retry job of its run, with no heartbeat for 20 min was left by a killed delivery. The new delivery marks it **Abandoned** (ended at its last heartbeat) and takes over at once; the time budget keeps it under the 60-minute scale-in limit. Any live job of another run (or the next part of the same run) still counts as busy. A live job of the same message defers the delivery in every mode: Azure shows a killed worker's message again about 10 min after it stopped, while its job looks live for 20, and skipping would drop the work. A CLI job over several countries (`WUK,WDE`) counts for each |
 | Remaining gap | Two messages for one country starting within about a second can both pass the check. The timer removes duplicate codes, and upserts on `ts_externalid` keep records from duplicating. The CLI (`scripts/run_scheduled_sync.py`) does not run the busy check |
 
 ### Heartbeat
@@ -270,8 +270,10 @@ only the heartbeat age tells a live job from a dead one.
 | Busy check | Running and heartbeat under 20 min (4 missed beats): alive |
 | Retry step | Running and heartbeat over 1 hour: dead, its failures may be retried |
 
-A killed job therefore blocks its country for at most 20 minutes; a killed
-retry does not block its own run at all. Its row needs no clean-up.
+A killed job therefore blocks its country for at most 20 minutes. Its own
+message comes back about 10 minutes after the worker stopped, finds the job
+still live and is deferred for 30 minutes; that delivery marks it Abandoned
+and takes over. Its row needs no other clean-up.
 
 ## What the workers run
 
@@ -294,7 +296,10 @@ parent hierarchy, HCO–HCO affiliations, HCP contacts, HCP–HCO affiliations.
 3. Where the last Full or Delta job of the country that covered its window
    stopped reading (the earlier of `ts_watermarkto` and `ts_startedon`), less
    6 hours (`WINDOW_OVERLAP`): OneKey dates a change before it can serve it,
-   after a delay that is not constant
+   after a delay that is not constant. Only windows read without a gap count:
+   a manual delta whose window starts after the end reached so far is passed
+   over (logged as `the gap stays to be read`). A job whose only errors are
+   `picklists:` or `contract cleanup:` still covered its window
 4. No such job: a **full sync** runs instead (logged as `mode=delta ran=full`)
 
 The window ends when the delta worker runs, after the retry.
@@ -415,7 +420,7 @@ traces
 A delta writes a contact for every individual that changed, with what came in
 its window: an existing contact is updated (its parent moves only through a
 main activity in the window), a new one is created only at a workplace in the
-window or already an account. A main activity whose individual did not change
+window or already an account the full sync has not retired. A main activity whose individual did not change
 (such as a move to another workplace) still moves the contact's
 `ts_department`, `ts_hospital` and `ts_hospitalgroup`, and a change to a
 department's or hospital's parent or group recomputes the contacts under it.

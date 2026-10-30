@@ -322,9 +322,18 @@ class MappingConfig:
         return False
 
 
-def _parse_bool(value: str) -> bool:
-    """Parse boolean from CSV string."""
-    return value.lower() in ("true", "1", "yes", "y")
+def _parse_bool(value: str | None, where: str = "") -> bool:
+    """Parse a boolean CSV cell: true/1/yes/y or false/0/no/n/blank, any case.
+
+    Anything else raises, so a typo cannot silently turn a key or required
+    flag off.
+    """
+    text = (value or "").strip().lower()
+    if text in ("true", "1", "yes", "y"):
+        return True
+    if text in ("false", "0", "no", "n", ""):
+        return False
+    raise ValueError(f"{where}: {value!r} is not true or false")
 
 
 def _parse_int(value: str, default: int = None) -> int | None:
@@ -343,6 +352,7 @@ def load_field_mappings(csv_path: Path) -> list[FieldMapping]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             # Skip comment rows
             if row.get("mapping_id", "").startswith("#"):
                 continue
@@ -360,9 +370,9 @@ def load_field_mappings(csv_path: Path) -> list[FieldMapping]:
                 target_field=row["target_field"],
                 target_field_type=row["target_field_type"],
                 max_length=_parse_int(row.get("max_length", "")),
-                is_required=_parse_bool(row.get("is_required", "false")),
-                is_key=_parse_bool(row.get("is_key", "false")),
-                is_lookup=_parse_bool(row.get("is_lookup", "false")),
+                is_required=_parse_bool(row.get("is_required", "false"), f"{csv_path} line {reader.line_num}"),
+                is_key=_parse_bool(row.get("is_key", "false"), f"{csv_path} line {reader.line_num}"),
+                is_lookup=_parse_bool(row.get("is_lookup", "false"), f"{csv_path} line {reader.line_num}"),
                 lookup_entity=row.get("lookup_entity") or None,
                 lookup_key_field=row.get("lookup_key_field") or None,
                 transform_rule=row.get("transform_rule", "direct"),
@@ -380,6 +390,7 @@ def load_relationship_mappings(csv_path: Path) -> list[RelationshipMapping]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             if row.get("relationship_id", "").startswith("#"):
                 continue
             if not row.get("relationship_id"):
@@ -394,7 +405,7 @@ def load_relationship_mappings(csv_path: Path) -> list[RelationshipMapping]:
                 target_field=row["target_field"],
                 relationship_type=row["relationship_type"],
                 lookup_key_field=row["lookup_key_field"],
-                is_required=_parse_bool(row.get("is_required", "false")),
+                is_required=_parse_bool(row.get("is_required", "false"), f"{csv_path} line {reader.line_num}"),
                 load_order=_parse_int(row.get("load_order", "0"), 0),
                 notes=row.get("notes", ""),
                 description=row.get("description", ""),
@@ -410,6 +421,7 @@ def load_entity_definitions(csv_path: Path) -> list[EntityDefinition]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             if row.get("entity_id", "").startswith("#"):
                 continue
             if not row.get("entity_id"):
@@ -423,7 +435,7 @@ def load_entity_definitions(csv_path: Path) -> list[EntityDefinition]:
                 primary_key=row.get("primary_key", ""),
                 alternate_key=row.get("alternate_key", "No"),
                 alternate_key_field=row.get("alternate_key_field") or None,
-                is_required=_parse_bool(row.get("is_required", "false")),
+                is_required=_parse_bool(row.get("is_required", "false"), f"{csv_path} line {reader.line_num}"),
                 load_order=_parse_int(row.get("load_order", "0"), 0),
                 parent_entity=row.get("parent_entity") or None,
                 description=row.get("description", ""),
@@ -439,6 +451,7 @@ def load_value_mappings(csv_path: Path) -> list[ValueMapping]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             if row.get("mapping_id", "").startswith("#"):
                 continue
             if not row.get("mapping_id"):
@@ -464,6 +477,7 @@ def load_field_constraints(csv_path: Path) -> list[FieldConstraint]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             if row.get("constraint_id", "").startswith("#"):
                 continue
             if not row.get("constraint_id"):
@@ -490,6 +504,7 @@ def load_picklist_targets(csv_path: Path) -> list[PicklistTarget]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             if row.get("mapping_type", "").startswith("#"):
                 continue
             mapping_type = (row.get("mapping_type") or "").strip()
@@ -519,6 +534,7 @@ def load_lookup_tables(csv_path: Path) -> list[LookupTableMapping]:
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            row = {key: value or "" for key, value in row.items() if key is not None}
             lookup_id = (row.get("lookup_id") or "").strip()
             if not lookup_id or lookup_id.startswith("#"):
                 continue

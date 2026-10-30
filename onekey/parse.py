@@ -21,6 +21,14 @@ def _rank(key, value):
         return 0
 
 
+def _phone_type(key, value):
+    """A telephone entry's type: its typeCode, else the part of its key before the rank."""
+    code = value.get("typeCode")
+    if code is None:
+        code = str(key).replace("_", ",").partition(",")[0]
+    return str(code).strip()
+
+
 def _coded_values(container):
     """Normalise a OneKey coded-value map into a list ordered by rank.
 
@@ -99,8 +107,14 @@ def _telephone_slots(entity, slots: int = 2) -> dict:
     if not isinstance(phones, dict) or not phones:
         return out
 
+    # Keys are "type,rank"; the map also holds faxes. telephone1/2 are the
+    # phones (type 1) by rank, as entity_mapping.csv's 1_1 and 1_2 paths say.
     ordered = sorted(
-        ((key, value) for key, value in phones.items() if isinstance(value, dict)),
+        (
+            (key, value)
+            for key, value in phones.items()
+            if isinstance(value, dict) and _phone_type(key, value) == "1"
+        ),
         key=lambda item: _rank(*item),
     )
     for i, (_, entry) in enumerate(ordered[:slots], start=1):
@@ -108,6 +122,7 @@ def _telephone_slots(entity, slots: int = 2) -> dict:
             entry.get("callNumberForSearch")
             or entry.get("callNumber")
             or entry.get("number")
+            or entry.get("callNumberForDisplay")
         )
     # Alias first phone as ``telephone`` for older mappings
     out["telephone"] = out.get("telephone1")

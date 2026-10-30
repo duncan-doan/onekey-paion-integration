@@ -116,9 +116,10 @@ def sync_sample(
         )
         results["success"] = True
         return results
-    except Exception as exc:
+    except BaseException as exc:  # Ctrl-C and SystemExit too: the run did not finish
         aborted = True
-        results["errors"].append(str(exc))
+        if str(exc):
+            results["errors"].append(str(exc))
         raise
     finally:
         engine._finish_job(results, aborted=aborted)

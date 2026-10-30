@@ -42,9 +42,11 @@ from integration.job_trace import (
     RETRY_RETRIED,
     STATUS_RUNNING,
     TRIGGER_MANUAL,
+    classify_failure,
     clip,
 )
-from onekey import ACTIVITY, EXACT, INDIVIDUAL, WORKPLACE, search_field
+from integration.dynamic_sync import main_activity_by_individual
+from onekey import ACTIVITY, EXACT, WORKPLACE, OneKeyHTTPError, search_field
 from onekey.parse import compose_hcp_result, flatten_hco
 
 logger = logging.getLogger(__name__)
@@ -326,10 +328,15 @@ def resolve_pending_for_ids(
         select.extend(["ts_phase", "ts_entitytype", "ts_externalid"])
     if len(ids) > _RESOLVE_SCAN_AT:
         wanted = set(ids)
+        # Only the codebases these IDs belong to: every OneKey ID starts with
+        # its codebase, and other countries' pending rows are not needed.
+        prefixes = " or ".join(
+            f"startswith(ts_sourceid,'{escape_odata(prefix)}')" for prefix in sorted({i[:3] for i in ids})
+        )
         rows = [
             row
             for row in dataverse.retrieve_multiple(
-                FAILURES, select=select, filter=f"ts_retrystatus eq {RETRY_PENDING}"
+                FAILURES, select=select, filter=f"ts_retrystatus eq {RETRY_PENDING} and ({prefixes})"
             )
             if row.get("ts_sourceid") in wanted
         ]
@@ -500,7 +507,7 @@ def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict
         )
         claimed = [row for row in rows if row["id"] in claimed_ids]
         if len(claimed) < len(rows):
-            raise RuntimeError(
+            raise _BookkeepingError(
                 f"could not claim {len(rows) - len(claimed)} of {len(rows)} failure row(s)"
             )
         engine.tracer.recent_failures.clear()
@@ -538,24 +545,29 @@ def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict
                 finalized.add(row["id"])
                 result[outcome["bucket"]] += 1
         if len(finalized) < len(outcomes):
-            raise RuntimeError(
+            raise _BookkeepingError(
                 f"could not record the outcome of {len(outcomes) - len(finalized)} failure row(s)"
             )
     except Exception as exc:
         result["errors"].append(f"{name}: {exc}")
         result["success"] = False
         logger.exception("Retry step %s failed for %s", name, codebase)
-        # Rows not finalized: release the claim if the replay never started,
-        # otherwise count a failed attempt.
+        # Rows not finalized: release the claim if the replay never started or
+        # the step stopped on an outage (OneKey or Dataverse unavailable, the
+        # outcome not recorded); otherwise count a failed attempt. An outage
+        # used to spend attempts until good rows were Ignored.
+        transient = _transient(exc)
         updates: list[tuple[str, dict]] = []
         buckets: dict[str, str] = {}
         for row in claimed:
             if row["id"] in finalized:
                 continue
-            if not started:
+            if not started or transient:
                 updates.append(
                     (row["id"], _failure_payload(RETRY_PENDING, attempt=row["attempt"]))
                 )
+                if started:
+                    buckets[row["id"]] = "pending"
                 continue
             attempt = row["attempt"] + 1
             status = RETRY_IGNORED if attempt >= MAX_RETRY_ATTEMPTS else RETRY_PENDING
@@ -566,6 +578,19 @@ def _retry_step(engine, name: str, codebase: str, rows: list[dict], result: dict
         for record_id in _update_failures(dataverse, updates):
             if record_id in buckets:
                 result[buckets[record_id]] += 1
+
+
+class _BookkeepingError(RuntimeError):
+    """Failure rows could not be claimed or updated: Dataverse, not the rows."""
+
+
+def _transient(exc: BaseException) -> bool:
+    """True for an outage rather than something the rows did."""
+    if isinstance(exc, _BookkeepingError):
+        return True
+    if isinstance(exc, OneKeyHTTPError):
+        return exc.status_code is None or exc.status_code == 429 or exc.status_code >= 500
+    return classify_failure(exc, None, None)[1]
 
 
 def _execute_step(engine, name: str, codebase: str, rows: list[dict]) -> list[str]:
@@ -608,11 +633,11 @@ def _execute_step(engine, name: str, codebase: str, rows: list[dict]) -> list[st
             )
         return missing
     if name == "contacts":
-        composed, missing = _composed_hcps(engine, codebase, rows)
+        composed, missing, update_only = _composed_hcps(engine, codebase, rows)
         if composed:
             engine._last_step_stats = (
                 "contacts",
-                engine._sync_hcps(codebase, composed=composed),
+                engine._sync_hcps(codebase, composed=composed, update_only=update_only),
             )
         return missing
     if name == "activity_affiliations":
@@ -712,9 +737,21 @@ def _relation_allow_set(raws: list[dict]) -> set[str]:
     return allow
 
 
-def _composed_hcps(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], list[str]]:
+def _composed_hcps(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], list[str], set[str]]:
+    """Contact rows for the failed individuals, each read through its main activity.
+
+    OneKey refuses a search by individual id outside the US (HTTP 400,
+    OKWS-3007), so the individual comes embedded in its activity read by id,
+    which carries its full detail. As in the full sync, only an active
+    activity at a contracted workplace places the contact; an individual
+    without one is written with its department, hospital and group left as
+    they are, and only updated, never created, when none of its activities
+    is at a contracted workplace (_main_activity). Returns the rows, the
+    individuals OneKey no longer has, and the update-only individuals.
+    """
     composed = []
     missing = []
+    update_only: set[str] = set()
     seen = set()
     for row in rows:
         individual_eid = row["source_id"]
@@ -722,20 +759,49 @@ def _composed_hcps(engine, codebase: str, rows: list[dict]) -> tuple[list[dict],
             continue
         seen.add(individual_eid)
         # Stop at the first missing piece: each lookup is another OneKey call.
-        individual = _get_by_id(engine, individual_eid, INDIVIDUAL, codebase)
-        activity = _main_activity(engine, codebase, individual_eid) if individual else None
-        workplace_eid = ((activity or {}).get("activity") or {}).get("workplaceEid")
+        record, placing, contracted = _main_activity(engine, codebase, individual_eid)
+        individual = (record or {}).get("individual") or {}
+        if not individual.get("individualEid"):
+            missing.append(individual_eid)
+            continue
+        if not contracted:
+            update_only.add(individual_eid)
+        # The record-level fields the full sync reads from the INDIVIDUAL row;
+        # the embedded individual carries its own privacy flag.
+        individual_record = {
+            "individual": individual,
+            "codBase": record.get("codBase") or codebase,
+            "country": record.get("country"),
+            "isPrivacyLaw": (
+                individual["isPrivacyLaw"]
+                if individual.get("isPrivacyLaw") is not None
+                else record.get("isPrivacyLaw")
+            ),
+        }
+        if not placing:
+            composed.append(compose_hcp_result(individual_record))
+            continue
+        workplace_eid = (record.get("activity") or {}).get("workplaceEid")
         workplace = (
             _get_by_id(engine, workplace_eid, WORKPLACE, codebase) if workplace_eid else None
         )
-        if not individual or not activity or not workplace:
+        if not workplace:
             missing.append(individual_eid)
             continue
-        composed.append(compose_hcp_result(individual, activity, workplace))
-    return composed, missing
+        composed.append(compose_hcp_result(individual_record, record, workplace))
+    return composed, missing, update_only
 
 
-def _main_activity(engine, codebase: str, individual_eid: str) -> dict | None:
+def _main_activity(engine, codebase: str, individual_eid: str) -> tuple[dict | None, bool, bool]:
+    """The individual's main activity read by id, whether it places the contact,
+    and whether any of its activities is at a contracted workplace.
+
+    A contracted workplace is an account that exists and that the
+    out-of-contract cleanup did not retire, as in a delta (_admit_known).
+    Prefers an active activity at one, marked main, then any such one.
+    Without one it returns another activity, for the individual it embeds,
+    and False.
+    """
     matches = engine.onekey.search(
         ACTIVITY,
         [search_field("activity.individualEid", individual_eid, EXACT)],
@@ -743,16 +809,31 @@ def _main_activity(engine, codebase: str, individual_eid: str) -> dict | None:
         result_size=20,
     )
     if not matches:
-        return None
-    chosen = matches[0]
-    for record in matches:
-        if (record.get("activity") or {}).get("isMainActivity"):
-            chosen = record
-            break
+        return None, False, False
+    workplaces = {
+        str((match.get("activity") or {}).get("workplaceEid"))
+        for match in matches
+        if (match.get("activity") or {}).get("workplaceEid")
+    }
+    contracted = (
+        set(engine._lookup_accounts_bulk(workplaces)) - engine._retired_account_eids
+        if workplaces
+        else set()
+    )
+    active = getattr(engine, "_active_activity", None) or (lambda activity: True)
+    placing = main_activity_by_individual(
+        matches,
+        active=lambda activity: active(activity) and str(activity.get("workplaceEid")) in contracted,
+    )
+    chosen = placing.get(individual_eid) or main_activity_by_individual(matches).get(individual_eid)
+    if chosen is None:
+        return None, False, False
     activity_eid = (chosen.get("activity") or {}).get("activityEid")
-    if not activity_eid:
-        return chosen
-    return _get_by_id(engine, activity_eid, ACTIVITY, codebase) or chosen
+    full = _get_by_id(engine, activity_eid, ACTIVITY, codebase) if activity_eid else None
+    in_contract = any(
+        str((match.get("activity") or {}).get("workplaceEid")) in contracted for match in matches
+    )
+    return full or chosen, individual_eid in placing, in_contract
 
 
 def _activities(engine, codebase: str, rows: list[dict]) -> tuple[list[dict], list[str]]:

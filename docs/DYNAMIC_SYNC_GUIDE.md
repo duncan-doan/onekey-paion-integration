@@ -307,10 +307,14 @@ class ValidationResult:
 1. Extract the full population; derive Account hierarchy levels in memory; upsert Accounts
    (no parent bind yet) with `ts_hierarchylevel` in the same payload
 2. Upsert customeraddress rows ({workplaceEid} - {addressEid})
-3. Link parentaccountid from managerWorkplaceEid
-4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup, then retire what left the
+3. Link parentaccountid from managerWorkplaceEid (a complete walk clears a parent now outside
+   the contract, or the workplace itself)
+4. Upsert Contacts + ts_department / ts_hospital / ts_hospitalgroup, placed through an active
+   activity at a workplace in the walk (an individual with none is updated, never created), then retire what left the
    contract: deactivate accounts, contacts and affiliations the walk no longer returns and clear
-   lookups to them (complete full sync only; limit SYNC_CONTRACT_CLEANUP_MAX_PERCENT, default 5)
+   lookups to them (complete full sync only; limit SYNC_CONTRACT_CLEANUP_MAX_PERCENT, default 5).
+   Retired accounts and contacts take substatus "Out of contract" (VAL-SST-013), which tells
+   them from records OneKey closed but still contracts
 5. Upsert HCP–HCO affiliations and roles, then set each account's primarycontactid to the
    contact of its active `ts_isprimary` affiliation (earliest start, then activity ID; none clears it)
 ```
@@ -326,14 +330,20 @@ Specialty, HCO type, and the other large OneKey lists are loaded into the code c
 ### Delta Sync Order
 
 Same phases for CDC window records: workplaces first, then addresses and
-hierarchy for those HCOs, then activities → contacts. ``run_dynamic_sync.py``
-stores watermarks under ``logs/sync_watermark_{CODEBASE}.json``.
+hierarchy for those HCOs, then activities → contacts. An account the full
+sync's cleanup retired (inactive, substatus "Out of contract") is not a known
+workplace, so a delta never places a contact there; one OneKey itself closed
+still is. ``run_dynamic_sync.py --delta`` without ``--date-from`` starts
+where the scheduled delta would, from ``ts_integrationjob`` (a dry run starts
+yesterday). The ``logs/sync_watermark_{CODEBASE}.json`` files it used to keep
+are no longer written or read.
 
 The scheduled jobs (``function_app.py`` timers and ``scripts/run_scheduled_sync.py``)
 use ``ts_integrationjob`` instead: the daily delta runs from where the last Full
 or Delta job of the codebase that covered its window stopped reading (the
 earlier of its ``ts_watermarkto`` and ``ts_startedon``, less 6 hours of
-overlap) up to now. A full sync runs at 00:00 UTC on the 1st of each month and
+overlap) up to now. A delta whose window starts after the end reached so far
+leaves a gap and is passed over, so the next delta reads the gap. A full sync runs at 00:00 UTC on the 1st of each month and
 the delta runs at 00:00 UTC on every other day, one queue message per codebase
 (see ``docs/AZURE_FUNCTION_SETUP.md``).
 

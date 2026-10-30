@@ -44,6 +44,23 @@ logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+# Transport errors that a retry cannot fix: a malformed request, or a
+# certificate that does not verify. Others (resets, timeouts, an aborted TLS
+# session) are retried.
+_PERMANENT_TRANSPORT_ERRORS = (
+    requests.exceptions.InvalidURL,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidHeader,
+    requests.exceptions.InvalidJSONError,
+)
+
+
+def _permanent(exc: requests.RequestException) -> bool:
+    return isinstance(exc, _PERMANENT_TRANSPORT_ERRORS) or (
+        isinstance(exc, requests.exceptions.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(exc)
+    )
+
 # Shortest wait after a 429, and the longest wait honoured before any attempt.
 # A huge Retry-After must not park a worker for hours while its heartbeat
 # keeps the job looking alive.
@@ -244,6 +261,8 @@ class OneKeySession:
                 last_error = OneKeyHTTPError(
                     f"Could not reach OneKey at {url}: {exc}", url=url
                 )
+                if _permanent(exc):
+                    raise last_error from exc
                 # Stale keep-alive sockets often surface as ConnectionResetError;
                 # rebuild the pool before the next attempt.
                 self._reset_connection_pool()
@@ -280,6 +299,14 @@ class OneKeySession:
                 retry_after = (
                     self._retry_after(response) if response.status_code in (429, 503) else None
                 )
+                if not resend_lost and response.status_code != 429 and retry_after is None:
+                    # A server error may come after OneKey acted on the request
+                    # (a gateway that gave up waiting): the caller resumes
+                    # instead of sending it again. Throttling was not acted on.
+                    raise OneKeyResponseLostError(
+                        str(last_error), status_code=response.status_code,
+                        body=getattr(last_error, "body", None), url=url,
+                    )
                 if attempt < self.config.max_retries and (
                     response.status_code == 429 or retry_after is not None
                 ):

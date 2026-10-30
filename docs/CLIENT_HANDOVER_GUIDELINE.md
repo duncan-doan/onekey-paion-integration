@@ -116,8 +116,10 @@ returns `transactionUniqueIdentifier`. Each following call sends that id again, 
 
 A packet whose answer is lost (a timeout or a reset) is not requested again blindly, which OneKey
 can refuse with HTTP 400. Following Developer Guide 6.13.4, the walk asks for that packet by
-number; if OneKey says it was never delivered (OKWS-3208), it asks for the next packet again, up
-to three times. The connection keeps OneKey's load-balancer cookie, which ties the walk to the
+number; if OneKey refuses that (HTTP 400) for any reason other than an unknown or sealed
+transaction (OKWS-3650, OKWS-3653), the packet was never delivered and it asks for the next packet
+again, up to three times. The packet numbers and OneKey's record count still catch a packet that was
+really lost: such a walk fails rather than pass as complete. The connection keeps OneKey's load-balancer cookie, which ties the walk to the
 server holding its transaction, and a refused request reports OneKey's reason (the OKWS code).
 
 Each row has `entityType` of WORKPLACE, INDIVIDUAL, or ACTIVITY. The engine keeps only contracted
@@ -258,6 +260,8 @@ the row its OneKey order gives it (section 1.6). The external id is `{workplaceE
 
 `managerWorkplaceEid` is resolved to an account and written to `parentaccountid`. Both ends must be
 in the contracted set for this run. A parent that is not in the contract is left unlinked and counted as missing.
+A complete full sync also clears a `parentaccountid` whose OneKey parent is now outside the contract, or
+is the workplace itself.
 
 #### Phase 4 — HCO–HCO affiliations
 
@@ -268,13 +272,22 @@ Each entry in `workplace.relations[]` becomes a `ts_affiliation` between two acc
 #### Phase 5 — HCP contacts
 
 Individuals are composed with their main activity and that activity's workplace, then upserted to `contact`.
-An activity OneKey marks inactive (its `stateCode` decodes to Inactive) is not used: the next active one
-places the contact, and a person with only inactive activities is still written (name, state) with
-their department, hospital and group left as they are. Inactive activities give no level either.
+An activity OneKey marks inactive (its `stateCode` decodes to Inactive; `statusCode` when `stateCode` is
+blank) is not used: the next active one places the contact, and a person with only inactive activities is
+still written (name, state) with their department, hospital and group left as they are. Inactive activities
+give no level either. Of several activities the main one wins, then the lowest activity ID, so the choice
+does not depend on the order OneKey sends them in. Only an activity whose workplace is in this walk places
+the contact. A full sync updates an individual with no activity at a walked workplace but does not create
+one, so a contact is never created without a department. A delta and a retry ignore a workplace whose
+account the full sync retired (substatus "Out of contract", below), so a change cannot place a contact
+there; a workplace OneKey itself closed still places it, as in the full sync. When the department account
+is missing, the hospital and group are left as they are rather than cleared.
 `ts_department` points at the main workplace account, `ts_hospital` at that workplace's parent and
 `ts_hospitalgroup` at the hospital's parent. Each parent is OneKey's `managerWorkplaceEid` first, then the
 HIE ("Is managed by") parent when that is a group of organisations (structure GOR or POR); a contact
-whose workplace or hospital has neither gets the field cleared. The sync no longer writes
+whose workplace or hospital has neither gets the field cleared. A manager that is the workplace itself, or
+an account the full sync retired, or (in a complete full sync) one outside the contract, is not taken as
+a hospital. The sync no longer writes
 `parentcustomerid` or the `department` text. A person whose individual, activity, or
 workplace is outside the contracted set for this extract is skipped.
 
@@ -300,11 +313,19 @@ Nothing
 is deleted: a record that returns to the contract is written with its OneKey state, which
 reactivates it. This runs before Phase 6, so the primary contacts see the result.
 
+Each account and contact the cleanup deactivates also gets the substatus "Out of contract"
+(`ts_substatus` 126870013, `value_mapping.csv` row VAL-SST-013; the choice sync creates the
+option), and so does one that was already inactive when it left the contract. OneKey also closes
+records that stay in the contract, and the sync writes those inactive too, so the substatus is how
+a delta or a retry tells a retired record from a closed one. The OneKey write of a record that
+returns replaces it.
+
 A walk that lost packets would make valid records look gone. When more than
 `SYNC_CONTRACT_CLEANUP_MAX_PERCENT` (default 5) of a codebase's active accounts, contacts or
 affiliations would be deactivated, nothing is written and the job ends Partially Succeeded
-with the counts in its error summary. Check them, then raise the setting for one run if the
-cleanup is expected, such as the first one. `--dry-run` reports the counts without writing.
+with the counts in its error summary (`contract cleanup: … skipped`). The rest of the run is
+complete, so the job still counts as covering its window (section 3.6). Check the counts, then
+raise the setting for one run if the cleanup is expected, such as the first one. `--dry-run` reports the counts without writing.
 A delta never deactivates an affiliation, not even an HCO–HCO relation a changed workplace no
 longer lists; it writes only what OneKey sends, including an inactive state OneKey sends for an
 activity. A delta can still link a new activity to a retired account; the next full sync retires
@@ -356,7 +377,9 @@ python scripts/run_dynamic_sync.py --delta --codbase WDE --date-from 2026-10-01 
 ```
 
 `--validate-only` checks the CSV and the Dataverse connection and writes nothing. `--dry-run` walks
-the transform without upserting. Scheduled production loads are the Azure jobs in section 3, not these
+the transform without upserting. A `--delta` without `--date-from` starts where the scheduled delta
+would (section 3.6), at the earliest of the countries given; a dry run without it reads from
+yesterday. Like the scheduled runs, a successful run resolves the pending failures it fixed (section 4.4). Scheduled production loads are the Azure jobs in section 3, not these
 commands.
 
 ## 2. Dynamic mapping
@@ -600,7 +623,7 @@ takes one message and runs that country to completion. A failure retries that co
         └─ enqueue one JSON message per codebase
                │
                ▼
-         onekey-queue
+         onekey-full (1st) or onekey-retry (other days, then onekey-delta)
                │
                ├─ message WUK ──▶ worker instance ──▶ phases 0–6 for WUK
                ├─ message WDE ──▶ worker instance ──▶ phases 0–6 for WDE
@@ -609,7 +632,7 @@ takes one message and runs that country to completion. A failure retries that co
                ▼
          success: message deleted, job row Succeeded or Partially Succeeded
          failure: message hidden 30 minutes, then retried
-         give up: body copied to onekey-queue-poison
+         give up: body copied to <queue>-poison
 ```
 
 The Function App is Python v4. `host.json` sets `functionTimeout` to 12 hours. The plan must be Flex
@@ -621,8 +644,10 @@ schedules are UTC only.
 | Function | Trigger | When (UTC) | What it does |
 | --- | --- | --- | --- |
 | `scheduled_onekey_full` | Timer `0 0 0 1 * *` | 00:00 on the 1st | Syncs choice options, then enqueues one full-sync message per codebase |
-| `scheduled_onekey_delta` | Timer `0 0 0 2-31 * *` | 00:00 on every other day | Syncs choice options, then enqueues one delta message per codebase |
-| `scheduled_onekey_worker` | Queue `onekey-queue` | When a message is available | Runs that one country |
+| `scheduled_onekey_delta` | Timer `0 0 0 2-31 * *` | 00:00 on every other day | Syncs choice options, then enqueues one retry message per codebase |
+| `scheduled_onekey_full_worker` | Queue `onekey-full` | When a message is available | Runs the full sync of that one country |
+| `scheduled_onekey_retry_worker` | Queue `onekey-retry` | When a message is available | Replays that country's pending failures, then queues its delta on `onekey-delta` |
+| `scheduled_onekey_delta_worker` | Queue `onekey-delta` | When a message is available | Runs the delta of that one country |
 | `sample_ok_to_dv` | Timer `0 0 12 1 * *` | 12:00 on the 1st | Upserts a few HCOs through the same phases. A connectivity check, not the production load. It skips itself if that country is already syncing |
 
 The delta timer skips the 1st so it does not start in the same minute as the full sync. On the 2nd, the delta
@@ -638,8 +663,8 @@ territories. The timer reads it when it fires. Duplicates are enqueued once. An 
 
 | `ONEKEY_CODBASE` | 1st of the month | Other days |
 | --- | --- | --- |
-| `WUK` | 1 full message | 1 delta message |
-| `WUK,WDE,WFR` | 3 full messages | 3 delta messages |
+| `WUK` | 1 full message | 1 retry message, which queues 1 delta |
+| `WUK,WDE,WFR` | 3 full messages | 3 retry messages, which queue 3 deltas |
 
 Changing the setting takes effect on the next timer tick. No redeploy is required for a country-list change. A
 mapping-file change still needs a deploy.
@@ -653,11 +678,13 @@ mapping-file change still needs a deploy.
 | Field | Meaning |
 | --- | --- |
 | `version` | Must be 1. Any other version is rejected and sent to the poison queue |
-| `mode` | `full` or `delta` |
-| `codebase` | One territory, for example `WDE` |
-| `date_to` | Leave null. The worker reads changes up to the moment it starts the delta. Set it only to replay an old window by hand. Not valid on a full message |
+| `mode` | `full`, `retry` or `delta`; it must match the queue |
+| `codebase` | One territory of three capital letters, for example `WDE`. Anything else goes to the poison queue at once |
+| `date_to` | Leave null. The worker reads changes up to the moment it starts the delta. Set it only to replay an old window by hand, as an ISO date or date-time; anything else goes to the poison queue at once. Not valid on a full message |
 | `retry_limit` | How many pending failure rows this country replays before the delta. Default 100 |
 | `choices` | `false` when the timer already synced the short choice options. `true` tells the worker to sync them |
+| `run_id`, `enqueued_at` | Set by the timer to tie one night's jobs together. Leave them out of a manual message |
+| `part` | Set on the continuation of a run that used up its time budget. Leave it out |
 
 The binding expects a Base64 body. A plain-text message cannot be decoded and goes to the poison
 queue.
@@ -672,24 +699,30 @@ read, not on the clock time the message was created.
 
 ### 3.5 What the worker runs
 
-`scheduled_onekey_worker` calls the same engine as the command-line sync.
+The queue workers call the same engine as the command-line sync.
 
 **Full message**
 
-1. If another live job is already syncing this codebase, defer. Azure shows the message again after 30
-   minutes.
+1. If a live job is already syncing this codebase, defer. Azure shows the message again after 30
+   minutes. A job this message left Running when its worker was killed comes back sooner: Azure shows
+   the message again about 10 minutes after the worker stopped, while the job still looks live for 20,
+   so that delivery is deferred too. Once the job has had no heartbeat for 20 minutes, the next
+   delivery marks it Abandoned and takes over.
 2. Run phases 0–6 for the whole contracted population. Phase 0 skips choice options when `choices` is
    false, and still loads this country's lookup tables.
 3. Mark pending failures resolved when the same OneKey id was written successfully.
 
-**Delta message**
+**Retry message, then delta message**
 
-1. If another live job is already syncing this codebase, skip and complete the message. The next
-   midnight delta starts from the last window that was actually covered, so the skipped run loses
-   nothing.
+1. If a live job of another run is already syncing this codebase, skip and complete the message,
+   and queue no delta. The next midnight delta starts from the last window that was actually
+   covered, so the skipped run loses nothing. A job of this same message that still looks live
+   (its worker was killed) defers the message instead, as for a full sync, so the work is not
+   dropped.
 2. Replay up to `retry_limit` pending `ts_integrationfailure` rows for this country. Matching is
-   by OneKey id prefix, so a WDE worker does not claim WUK rows.
-3. Compute the window (section 3.6) after the retry, so a long retry does not open a gap.
+   by OneKey id prefix, so a WDE worker does not claim WUK rows. Then queue the delta.
+3. The delta worker checks the codebase is free the same way, then computes the window (section 3.6),
+   after the retry, so a long retry does not open a gap.
 4. Run phases 0–6 for entities OneKey reports as changed in that window.
 5. Mark pending failures resolved when this delta wrote those ids.
 
@@ -701,14 +734,19 @@ at the end.
 The watermark is `ts_integrationjob`, not a file.
 
 The next delta starts at the latest "stopped reading" time among Succeeded or Partially Succeeded Full and
-Delta jobs for that country, minus 15 minutes of overlap, and ends at the moment the worker begins the
-delta.
+Delta jobs for that country, minus 6 hours of overlap, and ends at the moment the worker begins the
+delta. OneKey dates a change before it can serve it, after a delay that is not constant; the overlap
+reads such changes on the next night.
 
 A job stopped reading at the earlier of `ts_watermarkto` and `ts_startedon`. A full sync has no
 watermark end; its start time is used. Jobs that stopped early, lost a country, or are retries of a previous job
-are not used as the watermark. A manual replay of an old window does not move the next window.
+are not used as the watermark. A job whose only errors are a picklist failure or an out-of-contract
+cleanup held back by its limit still counts: its walk and its writes finished. A manual replay of an old
+window does not move the next window, and neither does a manual delta for a later period whose window
+starts after the last covered one: the days between were never read, so the next delta reads them.
 
-If no covering job exists, the delta starts at 00:00 UTC yesterday.
+If none of the country's last 200 Full and Delta jobs covered its window, the worker runs a full sync
+instead of the delta (logged as `mode=delta ran=full`).
 
 The overlap is intentional. A row changed near the boundary is read twice and upserted again, which is safe
 because the write matches on `ts_externalid`.
@@ -721,19 +759,19 @@ those ids up.
 | Setting | Value | Effect |
 | --- | --- | --- |
 | `visibilityTimeout` | 30 minutes | How long a failed message stays hidden before Azure retries it. A running message stays hidden for the whole run |
-| `maxDequeueCount` | 5 | Deliveries before Azure moves a delta message to `onekey-queue-poison` |
+| `maxDequeueCount` | 5 | Deliveries before Azure moves a delta message to `onekey-delta-poison` |
 | `maxPollingInterval` | 30 seconds | Longest wait before a new message is noticed |
 
 | Situation | Result |
 | --- | --- |
-| Message is not valid JSON, has an unknown field, or has a bad version | Copied to `onekey-queue-poison` immediately. Retrying cannot repair it |
+| Message is not valid JSON, has a bad version, territory or date, or is on another mode's queue | Copied to its queue's `-poison` queue immediately. Retrying cannot repair it. An unknown field is logged and ignored |
 | Delta fails | Exception. Azure retries after 30 minutes, up to 5 deliveries, then poison |
 | Full sync fails | Retried once. On the second failed delivery it goes to the poison queue, because every retry restarts the population from the first phase |
 | Full sync finds the country busy | Deferred and retried after 30 minutes. A busy delivery counts as a delivery |
 | Delta finds the country busy | Message completed as skipped |
 
-A poison message keeps its original JSON. Fix the cause, then put the same JSON back on `onekey-queue`
-(Base64-encoded) to run that country again. Deleting a delta poison message drops that attempt only. The
+A poison message keeps its original JSON. Fix the cause, then put the same JSON back on the queue it
+came from (Base64-encoded) to run that country again. Deleting a delta poison message drops that attempt only. The
 next scheduled delta covers the window, because the watermark does not advance on a failed job.
 
 ### 3.8 Enable and operate
@@ -762,15 +800,16 @@ Confirm a night run in Application Insights or the log stream:
 | `scheduled_delta_enqueued` or `scheduled_full_enqueued` | The timer placed the messages |
 | `scheduled_queue_complete` | The worker finished that country |
 | `scheduled_queue_skipped` | A delta found the country already running and left the window for the next delta |
-| `scheduled_queue_poisoned` | The message was moved to `onekey-queue-poison` |
+| `scheduled_queue_poisoned` | The message was moved to its `-poison` queue |
 
 The same run writes `ts_integrationjob`. Row-level errors are in `ts_integrationfailure`.
 
-To run one country by hand, add a Base64 message to `onekey-queue`. In the portal: Storage account,
-Queues, `onekey-queue`, Add message, and encode the body in Base64. Example body:
+To run one country by hand, add a Base64 message to `onekey-retry` (retry, then delta), `onekey-delta`
+(delta only) or `onekey-full`. In the portal: Storage account, Queues, the queue, Add message, and
+encode the body in Base64. Example body for `onekey-retry`:
 
 ```json
-{"version":1,"mode":"delta","codebase":"WDE","date_to":null,"retry_limit":100,"choices":true}
+{"version":1,"mode":"retry","codebase":"WDE","retry_limit":100,"choices":true}
 ```
 
 Setup commands, plan choice, and the full app-setting list are in `docs/AZURE_FUNCTION_SETUP.md`.
@@ -863,7 +902,7 @@ hierarchy, HCO affiliations, contacts, then HCP affiliations.
     Mark Retried (claim)
         │
         ▼
-    Read that id from OneKey by id
+    Read that id from OneKey by id (a contact through its activity)
         │
         ├─ not found ──────────────▶ Ignored
         │
@@ -876,7 +915,11 @@ hierarchy, HCO affiliations, contacts, then HCP affiliations.
 ```
 
 The retry reads the current OneKey record by id and sends it through the normal mapping. It does not reuse
-the payload from the night it failed. A retry job is written to `ts_integrationjob` with a link back to the
+the payload from the night it failed. OneKey answers a search by individual only for the US, so a
+contact is read through its activities. As in the full sync, the main active one at a workplace whose
+account exists and was not retired places it; a person with none is written without placement, and is
+only updated, never created, when no activity is at such a workplace. The privacy-law flag comes from the
+embedded individual. A retry job is written to `ts_integrationjob` with a link back to the
 parent job (`ts_retryofjob`) and "Retry" in its name (`WUK Retry Full …`), so it is recognised even when
 the parent could not be looked up. That job is not used as a delta watermark, because it only replays
 listed ids. A row that fails again is an outcome, not a failed run: only an error that stops a step
@@ -886,7 +929,8 @@ rewrites the activity with its roles.
 While the row is in progress its status is Retried, so a second worker does not take it. If the worker is killed
 before it records the outcome, the claim expires after two hours and the next run takes the row back. Each
 expired claim counts as an attempt. Five attempts that stop before an outcome is recorded set the row to
-Ignored.
+Ignored. A step stopped by an outage (OneKey or Dataverse unreachable, HTTP 429 or 5xx, a timeout)
+spends no attempt: its rows go back to Pending as they were.
 
 Resolved means the upsert succeeded. The original failure row is kept. A retry does not insert a second
 queue row for the same failure.
@@ -910,7 +954,7 @@ Section 3.7 is the queue behaviour. In short:
 | --- | --- |
 | One record fails inside a job | The job continues. The id is a failure row and is eligible for section 4.2 |
 | The worker raises (OneKey down, Dataverse down, an uncaught error) | Azure hides the message for 30 minutes and delivers it again. A delta is tried up to 5 times. A full sync is tried twice, because each attempt restarts from the first phase |
-| The message itself is invalid | It goes to `onekey-queue-poison` immediately |
+| The message itself is invalid | It goes to its queue's `-poison` queue immediately |
 | A delta finds the country already running | The message is completed and skipped. The next delta starts from the last covered window |
 | A full sync finds the country already running | The message is deferred and retried after 30 minutes |
 

@@ -514,3 +514,13 @@ def test_paused_work_is_not_continued_without_skip_unchanged(monkeypatch):
     outcome = handle_message(SyncQueueMessage(mode="full", codebase="WDE").encode(), 1, mode="full")
     assert outcome.status == OUTCOME_POISON
     assert "SYNC_SKIP_UNCHANGED is off" in outcome.reason
+
+
+@pytest.mark.parametrize("fields", [
+    {"mode": "delta", "codebase": "WUK", "date_to": "yesterday"},
+    {"mode": "full", "codebase": "WUK,WDE"},
+])
+def test_a_message_with_a_bad_date_or_territory_is_rejected_at_once(fields):
+    # Caught when the message is read, not after five failed deliveries.
+    with pytest.raises(QueueMessageError):
+        SyncQueueMessage(**fields)

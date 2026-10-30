@@ -113,30 +113,10 @@ def test_active_job_looks_for_a_fresh_running_job_per_codebase():
     assert active_job(jobs, ["WUK", "WDE"], now=now) is None
     assert [query[0] for query in jobs.queries] == [JOBS, JOBS]
     text = jobs.queries[1][1]["filter"]
-    assert "ts_codebase eq 'WDE'" in text
+    assert "contains(ts_codebase, 'WDE')" in text  # a "WUK,WDE" CLI job counts too
     assert f"ts_status eq {STATUS_RUNNING}" in text
     fresh = (now - ACTIVE_JOB_HEARTBEAT).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert f"ts_lastheartbeat ge {fresh}" in text
-
-
-def test_active_job_ignores_only_the_jobs_the_delivery_replaces():
-    # A delta or full sync replaces its own part's jobs and the run's retry
-    # jobs; the next part of the same run still counts as busy.
-    jobs = Jobs()
-    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", part=2)
-    assert jobs.queries[0][1]["filter"].endswith(
-        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
-        " and ((_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')) or endswith(ts_name, ' part=2')))"
-    )
-
-
-def test_a_retry_replaces_only_the_runs_retry_jobs():
-    jobs = Jobs()
-    active_job(jobs, ["WDE"], own_run="delta-20261012T000001Z-7", retry=True)
-    assert jobs.queries[0][1]["filter"].endswith(
-        " and not (contains(ts_name, 'run=delta-20261012T000001Z-7')"
-        " and (_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')))"
-    )
 
 
 def test_active_job_returns_the_live_job_and_its_codebase():
@@ -442,14 +422,36 @@ def test_the_run_id_reaches_the_job_tracer(fake_engine):
     assert fake_engine.tracer.run_id == "delta-20261013T000001Z"
 
 
-def test_a_redelivered_message_is_not_blocked_by_its_own_run(fake_engine):
+def test_a_redelivered_message_is_not_blocked_by_its_own_stopped_job(fake_engine):
+    # The stopped job's heartbeat is old, so the busy check does not see it,
+    # and the takeover marks it Abandoned.
     fake_engine.tracer = SimpleNamespace(run_id=None)
-    retry_from_env(codebases=["WDE"], if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
-    run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id="delta-20261012T000001Z-7")
-    filters = [kwargs["filter"] for _, kwargs in fake_engine.dataverse.queries]
-    busy = [text for text in filters if "ts_lastheartbeat ge" in text]
-    assert len(busy) == 2
-    assert all("not (contains(ts_name, 'run=delta-20261012T000001Z-7')" in text for text in busy)
+    fake_engine.dataverse = JobTable(own=[STOPPED])
+    run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id=RUN)
+    assert [kind for kind, _ in fake_engine.ran] == ["delta only"]
+
+
+def test_a_delivery_whose_own_job_still_looks_live_waits_instead_of_dropping_the_work(fake_engine):
+    # Azure shows a killed host's message again after about 10 minutes, while
+    # its job looks live for 20: a skipped delta or retry lost its work until
+    # the next night. Deferred, it comes back when the job is stale.
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    killed = {"ts_jobid": "job-killed", "ts_lastheartbeat": "x"}
+    for run in (
+        lambda: run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id=RUN),
+        lambda: retry_from_env(codebases=["WDE"], if_busy=IF_BUSY_SKIP, run_id=RUN),
+    ):
+        fake_engine.dataverse = JobTable(own_live=[killed])
+        with pytest.raises(SyncBusy):
+            run()
+    assert fake_engine.ran == []
+
+
+def test_a_live_job_of_another_run_still_skips_a_delta(fake_engine):
+    fake_engine.tracer = SimpleNamespace(run_id=None)
+    fake_engine.dataverse = JobTable(live=[{"ts_jobid": "job-other", "ts_lastheartbeat": "x"}])
+    result = run_from_env(codebases=["WDE"], retry=False, if_busy=IF_BUSY_SKIP, run_id=RUN)
+    assert result["skipped"] and fake_engine.ran == []
 
 
 # -- taking over from a stopped delivery of the same run ------------------------------
@@ -465,18 +467,21 @@ STOPPED = {
 
 
 class JobTable(Jobs):
-    """Jobs stub: own-run Running rows for the takeover, live rows for the busy check."""
+    """Jobs stub: own-run Running rows for the takeover, live rows for the busy
+    check, and live rows of the delivery's own run (``own_live``)."""
 
-    def __init__(self, own=None, live=None):
+    def __init__(self, own=None, live=None, own_live=None):
         super().__init__()
         self.own = own or []
         self.live = live or []
+        self.own_live = own_live or []
         self.updates = []
 
     def retrieve_multiple(self, entity_set, **kwargs):
         self.queries.append((entity_set, kwargs))
-        if "ts_lastheartbeat ge" in (kwargs.get("filter") or ""):
-            return list(self.live)
+        text = kwargs.get("filter") or ""
+        if "ts_lastheartbeat ge" in text:
+            return list(self.own_live) if f"run={RUN}" in text else self.live + self.own_live
         return list(self.own)
 
     def update(self, entity_set, record_id, payload):
@@ -489,11 +494,12 @@ def test_a_redelivered_full_sync_takes_over_its_stopped_job(fake_engine):
     run_from_env(codebases=["WDE"], full=True, if_busy=IF_BUSY_RAISE, run_id=RUN)
     assert [kind for kind, _ in fake_engine.ran] == ["full"]
     takeover = fake_engine.dataverse.queries[0][1]["filter"]
-    assert takeover == (
+    assert takeover.startswith(
         f"ts_codebase eq 'WDE' and ts_status eq {STATUS_RUNNING}"
         f" and contains(ts_name, 'run={RUN}')"
         " and ((_ts_retryofjob_value ne null or contains(ts_name, ' Retry ')) or endswith(ts_name, ' part=1'))"
-    )
+        " and (ts_lastheartbeat eq null or ts_lastheartbeat lt "
+    )  # only a stopped job is taken over
     [(entity_set, record_id, payload)] = fake_engine.dataverse.updates
     assert (entity_set, record_id) == (JOBS, "guid-1")
     assert payload["ts_status"] == STATUS_ABANDONED
@@ -610,3 +616,78 @@ def test_a_time_budget_becomes_the_engine_deadline(fake_engine, monkeypatch):
     assert engine.deadline == 3700.0
     run_from_env(codebases=["WUK"], full=True)  # the CLI: no limit
     assert engine.deadline is None
+
+
+def test_a_later_manual_delta_does_not_skip_the_unread_gap():
+    # Deltas covered up to 20 Oct, then failed; a manual delta for 23-24 Oct
+    # used to move the start to 24 Oct, so 20-23 Oct was never read.
+    from integration.job_trace import JOB_DELTA
+    jobs = Jobs([
+        {"ts_jobid": "manual", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-24T09:00:00Z",
+         "ts_watermarkfrom": "2026-10-23T00:00:00Z", "ts_watermarkto": "2026-10-24T09:00:00Z", "ts_errorsummary": None},
+        {"ts_jobid": "nightly", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-20T00:00:20Z",
+         "ts_watermarkfrom": "2026-10-18T18:00:00Z", "ts_watermarkto": "2026-10-20T00:00:10Z", "ts_errorsummary": None},
+    ])
+    assert last_window_start(jobs, ["WUK"]) == "2026-10-20T00:00:10Z"
+
+
+def test_an_old_replay_does_not_move_the_start_back():
+    # Sorted by window end, a replay of January run today became the base and
+    # every nightly delta after it looked like a gap: the next delta would
+    # have re-read ten months.
+    from integration.job_trace import JOB_DELTA
+    jobs = Jobs([
+        {"ts_jobid": "replay", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-30T09:00:00Z",
+         "ts_watermarkfrom": "2026-01-01T00:00:00Z", "ts_watermarkto": "2026-01-02T00:00:00Z", "ts_errorsummary": None},
+        {"ts_jobid": "nightly-30", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-30T00:00:20Z",
+         "ts_watermarkfrom": "2026-10-28T18:00:00Z", "ts_watermarkto": "2026-10-30T00:00:10Z", "ts_errorsummary": None},
+        {"ts_jobid": "nightly-29", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-29T00:00:20Z",
+         "ts_watermarkfrom": "2026-10-27T18:00:00Z", "ts_watermarkto": "2026-10-29T00:00:10Z", "ts_errorsummary": None},
+    ])
+    assert last_window_start(jobs, ["WUK"]) == "2026-10-30T00:00:10Z"
+
+
+def test_a_window_starting_a_few_hours_after_the_end_leaves_a_gap():
+    # The check allowed 6 hours: a manual delta from 15:00 after windows that
+    # reached 10:00 moved the start past five hours nobody read.
+    from integration.job_trace import JOB_DELTA
+    jobs = Jobs([
+        {"ts_jobid": "manual", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-20T21:00:00Z",
+         "ts_watermarkfrom": "2026-10-20T15:00:00Z", "ts_watermarkto": "2026-10-20T20:00:00Z", "ts_errorsummary": None},
+        {"ts_jobid": "nightly", "ts_jobtype": JOB_DELTA, "ts_startedon": "2026-10-20T10:00:20Z",
+         "ts_watermarkfrom": "2026-10-19T04:00:00Z", "ts_watermarkto": "2026-10-20T10:00:00Z", "ts_errorsummary": None},
+    ])
+    assert last_window_start(jobs, ["WUK"]) == "2026-10-20T10:00:00Z"
+
+
+def test_a_held_back_cleanup_still_covers_the_window_but_an_interrupted_run_does_not():
+    from integration.job_trace import error_summary
+    from integration.scheduled_sync import covered_window
+    held_back = "contract cleanup: WUK skipped, it would deactivate 9 of 100 active accounts"
+    assert covered_window({"ts_errorsummary": held_back})
+    assert not covered_window({"ts_errorsummary": f"{held_back} | WUK: OneKey 503"})
+    # Ctrl-C after a tolerated picklist error used to leave that error alone in
+    # the summary, and the job read as covering its window.
+    stopped = error_summary({"errors": ["picklists: searchCodeList 503"]}, aborted=True)
+    assert stopped.startswith("Sync stopped before completion")
+    assert not covered_window({"ts_errorsummary": stopped})
+
+
+def test_a_long_tolerated_error_cannot_hide_a_real_one_in_the_clip():
+    from integration.job_trace import error_summary
+    from integration.scheduled_sync import covered_window
+    summary = error_summary({"errors": ["picklists: " + "x" * 2100, "WUK: OneKey 503"]})
+    assert summary.startswith("WUK: OneKey 503")
+    assert not covered_window({"ts_errorsummary": summary})
+
+
+def test_a_paused_part_leaves_resolving_to_the_part_that_finishes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(scheduled_sync, "resolve_pending_for_ids", lambda *a, **k: calls.append(a) or 0)
+    engine = SimpleNamespace(
+        tracer=SimpleNamespace(trigger=None, retry_of_job_id=None, job_guid="g", recent_failures=[]),
+        succeeded_ids=set(), succeeded_records=set(), dataverse=None,
+        sync_full=lambda **kwargs: {"success": True, "paused": True},
+    )
+    scheduled_sync.run_full(engine, codebases=["WUK"])
+    assert calls == []  # it ran outside the time budget, over every pending row

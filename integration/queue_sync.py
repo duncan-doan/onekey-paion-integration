@@ -46,6 +46,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from integration.job_trace import parse_utc
+
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,8 @@ OUTCOME_CONTINUED = "continued"
 
 # A run_id goes into log lines and ts_name, so it holds no spaces.
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+# A OneKey territory: WUK, WDE, ... Anything else would also stretch ts_name.
+_CODEBASE = re.compile(r"^[A-Z]{3}$")
 
 
 def poison_queue(queue: str) -> str:
@@ -134,8 +138,13 @@ class SyncQueueMessage:
             raise QueueMessageError(f"Unsupported sync mode: {self.mode!r}")
         if not codebase:
             raise QueueMessageError("codebase is required")
+        if not _CODEBASE.match(codebase):
+            raise QueueMessageError(f"codebase must be a OneKey territory such as WUK, not {self.codebase!r}")
         if mode != "delta" and self.date_to is not None:
             raise QueueMessageError("date_to is only valid for delta work")
+        if self.date_to is not None and parse_utc(self.date_to) is None:
+            # Caught here, not on every delivery until Azure poisons it.
+            raise QueueMessageError(f"date_to must be an ISO date or date-time, not {self.date_to!r}")
         if self.retry_limit < 0:
             raise QueueMessageError("retry_limit cannot be negative")
         if not isinstance(self.choices, bool):
@@ -144,7 +153,7 @@ class SyncQueueMessage:
             isinstance(self.run_id, str) and _RUN_ID.match(self.run_id)
         ):
             raise QueueMessageError(f"Invalid run_id: {self.run_id!r}")
-        if self.enqueued_at is not None and _parse_utc(self.enqueued_at) is None:
+        if self.enqueued_at is not None and parse_utc(self.enqueued_at) is None:
             raise QueueMessageError(f"Invalid enqueued_at: {self.enqueued_at!r}")
         if isinstance(self.part, bool) or not isinstance(self.part, int) or self.part < 1:
             raise QueueMessageError(f"Invalid part: {self.part!r}")
@@ -205,14 +214,6 @@ class WorkOutcome:
     next_delta: str | None = None
     # Encoded continuation for the same queue, after a part spent its budget.
     next_part: str | None = None
-
-
-def _parse_utc(value: str) -> datetime | None:
-    try:
-        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
 def _iso(moment: datetime) -> str:
@@ -303,7 +304,7 @@ def run_progress(
     """
     if not item.run_id:
         return None
-    enqueued = _parse_utc(item.enqueued_at) if item.enqueued_at else None
+    enqueued = parse_utc(item.enqueued_at) if item.enqueued_at else None
     return {
         "run_id": item.run_id,
         "duration_s": max(0, int((finished_at - started_at).total_seconds())),
@@ -318,8 +319,9 @@ def dispatch(message: SyncQueueMessage, queued_at: datetime | None = None) -> di
 
     A delta or retry whose codebase is busy is skipped: the next delta starts
     from the last window that was covered and pending rows stay Pending, so
-    nothing is lost. A busy full sync raises SyncBusy and is retried later.
-    The jobs an earlier, stopped delivery of the message left Running are not
+    nothing is lost. A busy full sync raises SyncBusy and is retried later,
+    and so does any delivery whose own earlier job still looks live. The
+    jobs an earlier, stopped delivery of the message left Running are not
     busy: this delivery takes over (integration.scheduled_sync). A delta for a
     codebase with no completed job runs as a full sync (``promoted_to_full``
     in the result). ``queued_at`` is when Azure queued the message.

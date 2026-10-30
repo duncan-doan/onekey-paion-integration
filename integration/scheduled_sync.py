@@ -20,20 +20,22 @@ The ts_integrationjob table is the watermark. A job stopped reading at the
 earlier of its ts_watermarkto (the window end it was given) and ts_startedon;
 the next window starts there, less WINDOW_OVERLAP. A job that stopped early
 or lost a codebase is not used as the window start, so the next delta covers
-its window again. A failed ID that OneKey does not change again will not
+its window again; nor is a delta whose window starts after the end reached
+so far, since the gap before it was never read. A failed ID that OneKey does not change again will not
 appear in a later delta, so step 1 is what retries it.
 
 Queue workers run one codebase at a time and check active_job first. This is
 a best-effort busy check; simultaneous starts still need an atomic lease. A
-delivery does not wait for its own earlier tries: a job of the same run and
-part (part_marker ends its ts_name) still Running was left by a delivery the
-platform killed, and so was a retry job of the run when a delta or full sync
-starts, since a codebase's retry ends before its delta is queued
-(own_jobs_filter). The delivery that takes over marks them Abandoned
-(abandon_own_jobs). Any other live job, including the next part of the same
-run, still makes the codebase busy. The time budget
-(SYNC_TIME_BUDGET_MINUTES) keeps the new delivery under the 60-minute scale-in
-limit.
+delivery does not wait for its own earlier tries that stopped: a job of the
+same run and part (part_marker ends its ts_name), or a retry job of the run
+when a delta or full sync starts (own_jobs_filter), that is still Running
+without a fresh heartbeat was left by a delivery the platform killed. The
+delivery that takes over marks them Abandoned (abandon_own_jobs). Any live
+job still makes the codebase busy. One of the delivery's own that still looks
+live defers it rather than skip it (_busy): Azure resends the message of a
+killed host after about 10 minutes, while its job looks live for 20. The
+time budget (SYNC_TIME_BUDGET_MINUTES) keeps the new delivery under the
+60-minute scale-in limit.
 """
 
 from __future__ import annotations
@@ -56,9 +58,11 @@ from integration.job_trace import (
     STATUS_PARTIAL,
     STATUS_RUNNING,
     STATUS_SUCCEEDED,
+    TOLERATED_ERROR_PREFIXES,
     TRIGGER_TIMER,
     clip,
     job_codebase,
+    parse_utc,
     part_marker,
     run_marker,
 )
@@ -75,7 +79,7 @@ logger = logging.getLogger(__name__)
 WINDOW_OVERLAP = timedelta(hours=6)
 
 # Recent Succeeded/Partially Succeeded jobs inspected for the window start.
-_START_SCAN = 50
+_START_SCAN = 200
 
 # A Running job whose heartbeat is newer than this is still alive. The tracer
 # beats every HEARTBEAT_EVERY_SECONDS while requests flow, so four missed
@@ -112,22 +116,14 @@ def covered_window(job: dict) -> bool:
 
     Partially Succeeded also marks a job that stopped early or lost a codebase,
     and those always leave ts_errorsummary set. Record failures alone do not.
-    A picklist error does not stop the HCO/HCP phases, so it does not count.
+    A picklist error does not stop the HCO/HCP phases, and an out-of-contract
+    cleanup held back by its limit leaves the walk and the writes done, so
+    neither counts (job_trace.TOLERATED_ERROR_PREFIXES).
     """
     summary = (job.get("ts_errorsummary") or "").strip()
     if not summary:
         return True
-    return all(part.startswith("picklists:") for part in summary.split(" | "))
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return all(part.startswith(TOLERATED_ERROR_PREFIXES) for part in summary.split(" | "))
 
 
 def window_end(job: dict) -> datetime | None:
@@ -138,26 +134,27 @@ def window_end(job: dict) -> datetime | None:
     manual replay). A full sync has no watermark and reads the population as
     of its start. The earlier of the two is safe either way.
     """
-    started = _parse_iso(job.get("ts_startedon"))
-    watermark = _parse_iso(job.get("ts_watermarkto"))
+    started = parse_utc(job.get("ts_startedon"))
+    watermark = parse_utc(job.get("ts_watermarkto"))
     if started and watermark:
         return min(started, watermark)
     return started or watermark
 
 
 def last_window_start(dataverse, codebases: list[str]) -> str | None:
-    """Return the latest window end among Full or Delta jobs that covered their window.
+    """Return where the next delta starts: the end of the windows read without a gap.
 
-    The latest end, not the latest job: a manual replay of an old window
-    started today must not move the next window back to that old end, nor
-    forward to today. Retry jobs are excluded: a retry that spans several
+    The windows are joined in the order the jobs ran. A manual replay of an
+    old window started today ends before the end reached so far, so it
+    moves nothing; a manual delta for a later period starts after it, so the
+    gap stays to be read. Retry jobs are excluded: a retry that spans several
     phases is typed Full, but it only replays failed IDs. They are the jobs
     with ts_retryofjob set, or named with RETRY_NAME_MARKER: the link is
     left empty when the parent job cannot be looked up.
     """
     jobs = dataverse.retrieve_multiple(
         JOBS,
-        select=["ts_jobid", "ts_startedon", "ts_watermarkto", "ts_errorsummary"],
+        select=["ts_jobid", "ts_jobtype", "ts_startedon", "ts_watermarkfrom", "ts_watermarkto", "ts_errorsummary"],
         filter=(
             f"ts_codebase eq '{escape_odata(job_codebase(codebases))}'"
             f" and (ts_jobtype eq {JOB_FULL} or ts_jobtype eq {JOB_DELTA})"
@@ -168,12 +165,24 @@ def last_window_start(dataverse, codebases: list[str]) -> str | None:
         order_by="ts_startedon desc",
         top=_START_SCAN,
     )
+    # Oldest job first. A scheduled delta starts WINDOW_OVERLAP before the
+    # end reached so far, so any later start left hours nobody read. A full
+    # sync covers everything up to its start. The oldest scanned job is the
+    # base: what came before it is outside the scan.
+    earliest = datetime.min.replace(tzinfo=timezone.utc)
     best_job, best_end = None, None
-    for job in jobs:
-        if not covered_window(job):
-            continue
+    for job in sorted(jobs, key=lambda job: parse_utc(job.get("ts_startedon")) or earliest):
         end = window_end(job)
-        if end and (best_end is None or end > best_end):
+        if not end or not covered_window(job):
+            continue
+        start = None if job.get("ts_jobtype") == JOB_FULL else parse_utc(job.get("ts_watermarkfrom"))
+        if best_end is not None and start is not None and start > best_end:
+            logger.warning(
+                "Job %s starts its window at %s, after %s: the gap stays to be read",
+                job.get("ts_jobid"), _iso(start), _iso(best_end),
+            )
+            continue
+        if best_end is None or end > best_end:
             best_job, best_end = job, end
     if best_end is None:
         return None
@@ -242,31 +251,26 @@ def active_job(
     codebases: list[str],
     *,
     now: datetime | None = None,
-    own_run: str | None = None,
-    part: int = 1,
-    retry: bool = False,
+    only: str | None = None,
 ) -> dict | None:
     """Return a live Running job for any of these codebases, or None.
 
     Live means its heartbeat is newer than ACTIVE_JOB_HEARTBEAT. A job killed
     by a timeout or a platform restart stays Running, but its heartbeat
-    stops, so it no longer blocks the next run. The jobs a delivery of
-    ``own_run`` replaces (own_jobs_filter) are ignored, so a killed delivery
-    does not block its own redelivery.
+    stops, so it no longer blocks the next run. A job over several codebases
+    ("WUK,WDE", from the CLI) counts for each. ``only`` narrows the jobs to
+    an OData filter, such as own_jobs_filter.
     """
     fresh = (now or datetime.now(timezone.utc)) - ACTIVE_JOB_HEARTBEAT
-    own_jobs = (
-        f" and not ({own_jobs_filter(own_run, part, retry=retry)})" if own_run else ""
-    )
     for codebase in codebases:
         rows = dataverse.retrieve_multiple(
             JOBS,
             select=["ts_jobid", "ts_jobtype", "ts_startedon", "ts_lastheartbeat"],
             filter=(
-                f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
+                f"contains(ts_codebase, '{escape_odata(job_codebase([codebase]))}')"
                 f" and ts_status eq {STATUS_RUNNING}"
                 f" and ts_lastheartbeat ge {_iso(fresh)}"
-                f"{own_jobs}"
+                + (f" and ({only})" if only else "")
             ),
             order_by="ts_lastheartbeat desc",
             top=1,
@@ -310,11 +314,13 @@ def abandon_own_jobs(
                 f"ts_codebase eq '{escape_odata(job_codebase([codebase]))}'"
                 f" and ts_status eq {STATUS_RUNNING}"
                 f" and {own}"
+                # Only stopped ones: a live one makes this delivery busy.
+                f" and (ts_lastheartbeat eq null or ts_lastheartbeat lt {_iso(datetime.now(timezone.utc) - ACTIVE_JOB_HEARTBEAT)})"
             ),
         )
         for row in rows or []:
-            started = _parse_iso(row.get("ts_startedon"))
-            stopped = _parse_iso(row.get("ts_lastheartbeat")) or started
+            started = parse_utc(row.get("ts_startedon"))
+            stopped = parse_utc(row.get("ts_lastheartbeat")) or started
             note = (
                 f"Abandoned: the delivery running it was stopped (last heartbeat "
                 f"{row.get('ts_lastheartbeat') or 'none'}); a later delivery of "
@@ -411,7 +417,7 @@ def _delta_start(dataverse, codebases: list[str]) -> str | None:
     anchor = last_window_start(dataverse, codebases)
     if anchor is None:
         return None
-    return _iso(_parse_iso(anchor) - WINDOW_OVERLAP)
+    return _iso(parse_utc(anchor) - WINDOW_OVERLAP)
 
 
 def _promote_to_full(
@@ -573,7 +579,8 @@ def run_delta(
         sync_choices=sync_choices,
     )
     resolved = 0
-    if delta.get("success") and not dry_run:
+    # A paused part leaves it to the part that finishes, inside its budget.
+    if delta.get("success") and not delta.get("paused") and not dry_run:
         resolved = resolve_pending_for_ids(
             engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid,
             succeeded_records=getattr(engine, "succeeded_records", None),
@@ -612,7 +619,8 @@ def run_full(
         codebases=codebases, dry_run=dry_run, sync_choices=sync_choices
     )
     resolved = 0
-    if full.get("success") and not dry_run:
+    # A paused part leaves it to the part that finishes, inside its budget.
+    if full.get("success") and not full.get("paused") and not dry_run:
         resolved = resolve_pending_for_ids(
             engine.dataverse, engine.succeeded_ids, exclude_job_guid=engine.tracer.job_guid,
             succeeded_records=getattr(engine, "succeeded_records", None),
@@ -637,7 +645,7 @@ def delta_from_setting(date_to: str | None = None) -> str | None:
     if not raw:
         return None
     value = raw if "T" in raw else f"{raw}T00:00:00Z"
-    start = _parse_iso(value)
+    start = parse_utc(value)
     if start is None:
         logger.error(
             "%s=%r is not a date (use 2026-08-01 or 2026-08-01T00:00:00Z); ignored",
@@ -645,7 +653,7 @@ def delta_from_setting(date_to: str | None = None) -> str | None:
             raw,
         )
         return None
-    end = _parse_iso(date_to if not date_to or "T" in date_to else f"{date_to}T23:59:59Z")
+    end = parse_utc(date_to if not date_to or "T" in date_to else f"{date_to}T23:59:59Z")
     end = end or datetime.now(timezone.utc)
     if start >= end:
         logger.error(
@@ -675,9 +683,17 @@ def _busy(
     """Apply ``if_busy`` when a live job is syncing one of the codebases.
 
     Returns the skipped result for ``"skip"``, raises SyncBusy for ``"raise"``,
-    and returns None when nothing is running or ``if_busy`` is None. The jobs
-    this delivery of ``run_id`` replaces do not count: they are marked
+    and returns None when nothing is running or ``if_busy`` is None. Stopped
+    jobs this delivery of ``run_id`` replaces do not count: they are marked
     Abandoned and this delivery takes over (see the module docstring).
+
+    One of those jobs that still looks live raises SyncBusy whatever
+    ``if_busy`` says. It was most likely left by a delivery the platform
+    killed: Azure shows a message whose host stopped again once its lease
+    lapses, about 10 minutes, before the heartbeat check gives the job up.
+    Skipping would drop the work; deferred, the message comes back after
+    visibilityTimeout (30 minutes) and takes the stopped job over. A second
+    delivery of a message still running waits the same way.
     """
     if not if_busy:
         return None
@@ -685,13 +701,19 @@ def _busy(
     if run_id:
         try:
             abandon_own_jobs(engine.dataverse, codebases, run_id, part, retry=retry)
-        except Exception:  # noqa: BLE001 — active_job ignores them anyway
+        except Exception:  # noqa: BLE001 — a stopped job is not live, so it does not block
             logger.warning("Could not look for stopped jobs of run %s", run_id, exc_info=True)
-    running = active_job(
-        engine.dataverse, codebases, own_run=run_id, part=part, retry=retry
-    )
+    running = active_job(engine.dataverse, codebases)
     if not running:
         return None
+    if run_id:
+        own = active_job(engine.dataverse, codebases, only=own_jobs_filter(run_id, part, retry=retry))
+        if own:
+            logger.warning(
+                "Deferred %s sync of %s: job %s of this message still looks live (heartbeat %s)",
+                job, own["codebase"], own.get("ts_jobid"), own.get("ts_lastheartbeat"),
+            )
+            raise SyncBusy(own["codebase"], own)
     if if_busy == IF_BUSY_SKIP:
         logger.warning(
             "Skipped %s sync of %s: job %s is still running (heartbeat %s)",

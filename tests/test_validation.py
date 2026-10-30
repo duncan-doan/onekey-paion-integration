@@ -111,3 +111,26 @@ def test_each_table_is_read_once():
     validator.validate_schema(config)
     validator.validate_schema(config)
     assert len(client.paths) == len(set(client.paths))
+
+
+def test_a_short_csv_row_reads_as_blank_and_a_padded_boolean_still_counts(tmp_path):
+    from integration.dynamic_mapping import load_field_mappings
+    header = ("mapping_id,source_platform,source_entity,source_field,source_field_path,target_platform,"
+              "target_entity,target_field,target_field_type,max_length,is_required,is_key,is_lookup\n")
+    path = tmp_path / "entity_mapping.csv"
+    path.write_text(header + "HCO-001,OneKey,Workplace,workplaceEid,w,Dataverse,account,ts_externalid,string,50, TRUE ,TRUE \n"
+                    "HCO-002,OneKey,Workplace\n", encoding="utf-8")
+    first, short = load_field_mappings(path)
+    assert first.is_required and first.is_key and not first.is_lookup
+    assert (short.target_entity, short.is_key) == ("", False)
+
+
+def test_a_boolean_typo_names_its_row(tmp_path):
+    from integration.dynamic_mapping import load_field_mappings
+    path = tmp_path / "entity_mapping.csv"
+    path.write_text("mapping_id,source_platform,source_entity,source_field,source_field_path,target_platform,"
+                    "target_entity,target_field,target_field_type,max_length,is_required,is_key,is_lookup\n"
+                    "HCO-001,OneKey,Workplace,workplaceEid,w,Dataverse,account,ts_externalid,string,50,TRUE,TURE,FALSE\n",
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="line 2: 'TURE' is not true or false"):
+        load_field_mappings(path)

@@ -427,3 +427,15 @@ def test_hie_parent_ignores_ended_relations_and_takes_the_latest(tmp_path):
     assert sync._hie_group_parents({"hosp-a"}) == {"hosp-a": "grp-new"}
     relation_filter = next(f for es, f in dataverse.filters if es == "ts_affiliations")
     assert "ts_enddate eq null or ts_enddate ge " in relation_filter
+
+
+def test_a_contact_whose_department_account_is_missing_is_not_half_placed(tmp_path):
+    # The department account failed or is missing: the contact used to get a
+    # hospital and group for a workplace it is not linked to, and count as written.
+    dataverse = PayloadDataverse()
+    sync = DynamicSyncEngine(PopulationOneKey([]), dataverse, sync_logger=SyncLogger(log_dir=tmp_path))
+    sync._account_cache.update({"WUKH20": HOSP})  # the hospital exists, the department does not
+    sync._sync_hcps("WUK", composed=[_row("WUKI1", "WUKH10", manager="WUKH20")], partial=set())
+    payload = dataverse.payloads[("contacts", "WUKI1")]
+    assert not any(key.startswith(("ts_Department", "ts_Hospital")) for key in payload)
+    assert "WUKI1" not in sync.succeeded_ids  # its pending failure stays open

@@ -472,6 +472,7 @@ def test_iter_population_refetches_a_packet_lost_in_transit(monkeypatch):
             _packet([{"onekeyEid": "A"}], 1, False),
             _packet([{"onekeyEid": "C"}], 3, False),
             _packet([{"onekeyEid": "B"}], 2, False),  # packet 2, asked for by number
+            _packet([{"onekeyEid": "C"}], 3, False),  # packet 3 again: the cursor stays at 3
             _packet([{"onekeyEid": "D"}], 4, True),
         ]
     )
@@ -481,7 +482,8 @@ def test_iter_population_refetches_a_packet_lost_in_transit(monkeypatch):
     assert refetch["transactionPacketIdentifier"] == 2
     assert refetch["transactionUniqueIdentifier"] == "tx1"
     assert refetch["codBase"] == "WDE"
-    assert "transactionPacketIdentifier" not in session._session.calls[3]["json"]
+    assert session._session.calls[3]["json"]["transactionPacketIdentifier"] == 3
+    assert "transactionPacketIdentifier" not in session._session.calls[4]["json"]
 
 
 def _refused(code):
@@ -552,6 +554,87 @@ def test_dropping_pooled_sockets_keeps_the_session_and_its_load_balancer_cookie(
     session._reset_connection_pool()
     assert session._session is transport
     assert transport.cookies.get("BIGipServerokws.ok.imshealth.com_prod_http_pool") == "node-2"
+
+
+def test_a_gateway_error_on_a_continuation_resumes_by_packet_number(monkeypatch):
+    # A 504 can come after OneKey delivered the packet: resending "next" blindly
+    # was refused with OKWS-3208 and stopped the walk, like a timeout did.
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    monkeypatch.setattr("onekey.auth.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            FakeResponse(504, {"message": "gateway timeout"}),
+            _packet([{"onekeyEid": "B"}], 2, True),  # packet 2, asked for by number
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert [r["onekeyEid"] for r in records] == ["A", "B"]
+    assert session._session.calls[2]["json"]["transactionPacketIdentifier"] == 2
+
+
+def test_a_bare_400_on_a_resume_asks_for_the_next_packet_again(monkeypatch):
+    # Only OKWS-3208/3651 used to carry on: a gateway's 400 without a OneKey
+    # code stopped the walk and lost the whole part.
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            requests.ReadTimeout("read timed out"),
+            FakeResponse(400, text="Bad Request"),  # packet 2 by number
+            _packet([{"onekeyEid": "B"}], 2, True),  # so the next packet again
+        ]
+    )
+    records = list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert [r["onekeyEid"] for r in records] == ["A", "B"]
+
+
+def test_a_closed_transaction_is_not_resumed(monkeypatch):
+    # Asking for the next packet again cannot help a sealed transaction: it
+    # stops the walk at once.
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            _packet([{"onekeyEid": "A"}], 1, False),
+            requests.ReadTimeout("read timed out"),
+            _refused("OKWS-3653"),  # packet 2 by number: transaction sealed
+        ]
+    )
+    with pytest.raises(OneKeyHTTPError, match="OKWS-3653"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+    assert len(session._session.calls) == 3
+
+
+def test_a_walk_that_ends_short_of_onekeys_total_fails(monkeypatch):
+    # Without packet numbers a lost packet leaves no gap to see; the total does.
+    monkeypatch.setattr("onekey.client.time.sleep", lambda _: None)
+    session = make_session(
+        [
+            FakeResponse(200, search_payload([{"onekeyEid": "A"}], isTransactionComplete=False,
+                                             transactionUniqueIdentifier="tx1", totalNumberOfResults=3)),
+            FakeResponse(200, search_payload([{"onekeyEid": "C"}], isTransactionComplete=True,
+                                             transactionUniqueIdentifier="tx1", totalNumberOfResults=3)),
+        ]
+    )
+    with pytest.raises(OneKeyAPIResponseError, match="2 of its 3"):
+        list(OneKeyClient(session).iter_population(cod_base="WDE", page_size=100))
+
+
+def test_a_certificate_failure_is_not_retried():
+    session = make_session([requests.exceptions.SSLError("[SSL: CERTIFICATE_VERIFY_FAILED] bad cert")], max_retries=8)
+    with pytest.raises(OneKeyHTTPError, match="CERTIFICATE_VERIFY_FAILED"):
+        session.request("GET", "/system/connection/test", with_connector=False)
+    assert len(session._session.calls) == 1
+
+
+def test_phones_skip_faxes_and_fall_back_to_the_display_number():
+    from onekey.parse import _telephone_slots
+    slots = _telephone_slots({"telephones": {
+        "2,1": {"typeCode": "2", "callNumberForSearch": "02070000000"},  # fax
+        "1,2": {"typeCode": "1", "callNumberForSearch": "0123"},
+        "1,1": {"typeCode": "1", "callNumberForSearch": None, "callNumberForDisplay": "0999 111"},
+    }})
+    assert (slots["telephone1"], slots["telephone2"]) == ("0999 111", "0123")
 
 
 def test_iter_population_stops_when_too_many_packets_were_lost(monkeypatch):

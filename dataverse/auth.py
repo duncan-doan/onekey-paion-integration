@@ -120,6 +120,11 @@ def get_access_token(
             f"{response.text[:300]}"
         )
 
+    if not isinstance(payload, dict):
+        raise DataverseAuthError(
+            f"Token endpoint returned unexpected JSON (HTTP {response.status_code}): "
+            f"{response.text[:300]}"
+        )
     if response.status_code != 200 or "access_token" not in payload:
         raise DataverseAuthError(
             payload.get("error_description")

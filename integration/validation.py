@@ -119,9 +119,11 @@ class MappingValidator:
             if entity_def.platform == "Dataverse" and entity_def.is_required:
                 key_mapping = self.config.get_key_field(entity_def.entity_name)
                 if not key_mapping:
+                    # An error now, not after the OneKey extract: every write of
+                    # the table needs its key (require_key_field).
                     result.add_error(ValidationError(
                         error_type="missing_key_field",
-                        severity="warning",
+                        severity="error",
                         entity=entity_def.entity_name,
                         field=None,
                         message=f"No key field mapping defined for required entity",
